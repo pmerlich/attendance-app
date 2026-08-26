@@ -10,7 +10,7 @@ type ModalType = EntityType | "time";
 
 type RecordId = string | number;
 type Client = { id: RecordId; name: string; address: string; phone: string; email?: string; projects: number };
-type Employee = { id: RecordId; name: string; email: string; hourlyCost: number; status: "פעיל" | "מושהה" };
+type Employee = { id: RecordId; name: string; email: string; hourlyCost: number; status: "פעיל" | "מושהה"; connectionStatus?: "connected" | "pending" | "not_invited"; invitationToken?: string | null };
 type Project = {
   id: RecordId;
   name: string;
@@ -69,7 +69,7 @@ function billingLabel(type: BillingType, fixedPrice: number, hourlyRate: number)
 }
 
 type StoredProject = Pick<Project, "id" | "name" | "client" | "address" | "tag" | "billingType" | "fixedPrice" | "hourlyRate"> & { workerIds: string | string[]; totalSeconds: number };
-type AccountUser = { displayName: string; email: string; isLocal: boolean };
+type AccountUser = { displayName: string; email: string; role: "manager" | "employee"; isLocal: boolean };
 type ActiveTimer = { id: string; projectId: string; startedAt: string; elapsedSeconds: number };
 type TimeEntry = { id: string; projectId: string; projectName: string; startedAt: string; durationSeconds: number; description: string; source: "timer" | "manual" };
 type DeletedClient = { id: RecordId; name: string; address: string; deletedAt: string; projectCount: number };
@@ -105,15 +105,17 @@ export default function Home() {
   const [billingType, setBillingType] = useState<BillingType>("fixed");
   const [accountMode, setAccountMode] = useState<AccountMode>("solo");
   const [syncState, setSyncState] = useState<"loading" | "saved" | "error">("loading");
-  const [currentUser, setCurrentUser] = useState<AccountUser>({ displayName: "מנחם", email: "menachem@example.com", isLocal: true });
+  const [currentUser, setCurrentUser] = useState<AccountUser>({ displayName: "מנחם", email: "menachem@example.com", role: "manager", isLocal: true });
   const [authRequired, setAuthRequired] = useState(false);
   const [recentTimeEntries, setRecentTimeEntries] = useState<TimeEntry[]>([]);
   const [trash, setTrash] = useState<TrashState>({ clients: [], projects: [], employees: [] });
+  const [inviteNotice, setInviteNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
 
   function applyStoredState(data: StoredState) {
     const storedProjects = presentProjects(data.projects);
     setAccountMode(data.accountMode);
     setCurrentUser(data.user);
+    if (data.user.role === "employee") setView((current) => ["clients", "employees", "trash"].includes(current) ? "dashboard" : current);
     setClients(data.clients.map((client) => ({ ...client, projects: Number(client.projects) })));
     setEmployees(data.employees.map((employee) => ({ ...employee, hourlyCost: Number(employee.hourlyCost) })));
     setProjects(storedProjects);
@@ -139,11 +141,15 @@ export default function Home() {
 
   useEffect(() => {
     let active = true;
-    fetch("/api/state").then((response) => {
+    const inviteToken = new URLSearchParams(window.location.search).get("invite");
+    const request = inviteToken
+      ? fetch("/api/state", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "acceptInvitation", token: inviteToken }) })
+      : fetch("/api/state");
+    request.then(async (response) => {
       if (response.status === 401) { setAuthRequired(true); throw new Error("נדרשת התחברות"); }
-      if (!response.ok) throw new Error("טעינת הנתונים נכשלה");
+      if (!response.ok) { const error = await response.json().catch(() => ({})) as { error?: string }; throw new Error(error.error ?? "טעינת הנתונים נכשלה"); }
       return response.json() as Promise<StoredState>;
-    }).then((data) => { if (active) { applyStoredState(data); setSyncState("saved"); } }).catch(() => { if (active) setSyncState("error"); });
+    }).then((data) => { if (active) { applyStoredState(data); setSyncState("saved"); if (inviteToken) { setInviteNotice({ kind: "success", text: "ההזמנה אושרה. התחברת לצוות בהצלחה." }); window.history.replaceState({}, "", window.location.pathname); } } }).catch(async (error: Error) => { if (!active) return; setSyncState("error"); if (inviteToken) { setInviteNotice({ kind: "error", text: error.message }); const fallback = await fetch("/api/state"); if (fallback.ok && active) { applyStoredState(await fallback.json() as StoredState); setSyncState("saved"); } } });
     return () => { active = false; };
   }, []);
 
@@ -233,6 +239,17 @@ export default function Home() {
     } catch { setSyncState("error"); }
   }
 
+  async function inviteEmployee(employee: Employee) {
+    try {
+      const data = await saveAction("createEmployeeInvitation", { id: employee.id });
+      const invited = data.employees.find((item) => String(item.id) === String(employee.id));
+      if (!invited?.invitationToken) throw new Error("קישור ההזמנה לא נוצר");
+      const link = `${window.location.origin}/?invite=${invited.invitationToken}`;
+      await navigator.clipboard?.writeText(link).catch(() => undefined);
+      setInviteNotice({ kind: "success", text: `קישור ההזמנה של ${employee.name} נוצר. אפשר להעתיק אותו מכרטיס העובד.` });
+    } catch { setSyncState("error"); setInviteNotice({ kind: "error", text: "יצירת ההזמנה נכשלה. אפשר לנסות שוב." }); }
+  }
+
   async function addProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
@@ -256,6 +273,7 @@ export default function Home() {
   }
 
   if (authRequired) return <SignInView />;
+  const isManager = currentUser.role === "manager";
 
   return (
     <main className="app-shell">
@@ -264,34 +282,36 @@ export default function Home() {
         <nav>
           <button className={`nav-item ${view === "dashboard" ? "active" : ""}`} onClick={() => navigate("dashboard")}><span>⌂</span>ראשי</button>
           <button className={`nav-item ${view === "projects" ? "active" : ""}`} onClick={() => navigate("projects")}><span>▦</span>פרויקטים</button>
-          <button className={`nav-item ${view === "clients" ? "active" : ""}`} onClick={() => navigate("clients")}><span>♙</span>לקוחות</button>
-          {accountMode === "employer" && <button className={`nav-item ${view === "employees" ? "active" : ""}`} onClick={() => navigate("employees")}><span>♟</span>עובדים</button>}
+          {isManager && <button className={`nav-item ${view === "clients" ? "active" : ""}`} onClick={() => navigate("clients")}><span>♙</span>לקוחות</button>}
+          {isManager && accountMode === "employer" && <button className={`nav-item ${view === "employees" ? "active" : ""}`} onClick={() => navigate("employees")}><span>♟</span>עובדים</button>}
           <button className="nav-item"><span>↗</span>דוחות</button>
-          <button className={`nav-item ${view === "trash" ? "active" : ""}`} onClick={() => navigate("trash")}><span>♲</span>סל המחזור</button>
+          {isManager && <button className={`nav-item ${view === "trash" ? "active" : ""}`} onClick={() => navigate("trash")}><span>♲</span>סל המחזור</button>}
         </nav>
-        <button className="sidebar-foot" onClick={() => navigate("profile")}><div className="user-avatar">{currentUser.displayName.charAt(0)}</div><div><strong dir="auto">{currentUser.displayName}</strong><small>{accountMode === "solo" ? "עובד עצמאי" : "מעסיק עובדים"}</small></div><span aria-hidden="true">•••</span></button>
+        <button className="sidebar-foot" onClick={() => navigate("profile")}><div className="user-avatar">{currentUser.displayName.charAt(0)}</div><div><strong dir="auto">{currentUser.displayName}</strong><small>{!isManager ? "עובד בצוות" : accountMode === "solo" ? "עובד עצמאי" : "מעסיק עובדים"}</small></div><span aria-hidden="true">•••</span></button>
       </aside>
 
       <section className="content">
         <header className="topbar">
           <div><p className="eyebrow">{viewTitles[view].eyebrow}</p><h1>{view === "dashboard" ? `שלום ${currentUser.displayName}, יוצאים לעבודה.` : viewTitles[view].title}</h1></div>
-          <div className="top-actions"><span className="account-badge">{accountMode === "solo" ? "מצב עובד" : "מצב מעסיק"}</span><span className={`connection ${syncState === "error" ? "sync-error" : ""}`}><i /> {syncState === "loading" ? "שומר…" : syncState === "error" ? "בעיה בשמירה" : "נשמר"}</span><button className="icon-button profile-button" onClick={() => navigate("profile")} aria-label="פתיחת הפרופיל">מ</button>{view !== "profile" && view !== "trash" && <button className="primary-button" onClick={() => openNew(view === "clients" ? "client" : view === "employees" ? "employee" : "project")}><span>＋</span> {view === "clients" ? "לקוח חדש" : view === "employees" ? "עובד חדש" : "פרויקט חדש"}</button>}</div>
+          <div className="top-actions"><span className="account-badge">{!isManager ? "עובד בצוות" : accountMode === "solo" ? "מצב עובד" : "מצב מעסיק"}</span><span className={`connection ${syncState === "error" ? "sync-error" : ""}`}><i /> {syncState === "loading" ? "שומר…" : syncState === "error" ? "בעיה בשמירה" : "נשמר"}</span><button className="icon-button profile-button" onClick={() => navigate("profile")} aria-label="פתיחת הפרופיל">{currentUser.displayName.charAt(0)}</button>{isManager && view !== "profile" && view !== "trash" && <button className="primary-button" onClick={() => openNew(view === "clients" ? "client" : view === "employees" ? "employee" : "project")}><span>＋</span> {view === "clients" ? "לקוח חדש" : view === "employees" ? "עובד חדש" : "פרויקט חדש"}</button>}</div>
         </header>
 
-        {view === "dashboard" && <Dashboard accountMode={accountMode} activeProject={activeProject} running={running} seconds={seconds} projects={visibleProjects} recentTimeEntries={recentTimeEntries} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} toggleTimer={() => void toggleTimer()} stopTimer={() => void stopTimer()} selectProject={selectProject} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} showManual={openTimeEntry} showAll={() => navigate("projects")} />}
-        {view === "projects" && <ProjectsView projects={visibleProjects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} activeProject={activeProject} running={running} selectProject={selectProject} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} openManual={openTimeEntry} openNew={() => openNew("project")} />}
-        {view === "clients" && <ClientsView clients={clients} query={query} setQuery={setQuery} openNew={() => openNew("client")} editClient={(client) => openEdit("client", client)} removeClient={(client) => void removeRecord("client", client.id, client.name)} />}
-        {view === "employees" && <EmployeesView employees={employees} openNew={() => openNew("employee")} editEmployee={(employee) => openEdit("employee", employee)} removeEmployee={(employee) => void removeRecord("employee", employee.id, employee.name)} />}
-        {view === "trash" && <RecycleBinView trash={trash} restoreClient={(id, restoreProjects) => void restoreRecord("client", id, restoreProjects)} restoreProject={(id) => void restoreRecord("project", id)} restoreEmployee={(id) => void restoreRecord("employee", id)} />}
+        {inviteNotice && <div className={`invite-notice ${inviteNotice.kind}`} role="status"><span>{inviteNotice.kind === "success" ? "✓" : "!"}</span><strong>{inviteNotice.text}</strong><button onClick={() => setInviteNotice(null)} aria-label="סגירת ההודעה">×</button></div>}
+
+        {view === "dashboard" && (projects.length ? <Dashboard canManage={isManager} accountMode={accountMode} activeProject={activeProject} running={running} seconds={seconds} projects={visibleProjects} recentTimeEntries={recentTimeEntries} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} toggleTimer={() => void toggleTimer()} stopTimer={() => void stopTimer()} selectProject={selectProject} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} showManual={openTimeEntry} showAll={() => navigate("projects")} /> : <NoProjectsView isManager={isManager} openNew={() => openNew("project")} />)}
+        {view === "projects" && <ProjectsView canManage={isManager} projects={visibleProjects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} activeProject={activeProject} running={running} selectProject={selectProject} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} openManual={openTimeEntry} openNew={() => openNew("project")} />}
+        {isManager && view === "clients" && <ClientsView clients={clients} query={query} setQuery={setQuery} openNew={() => openNew("client")} editClient={(client) => openEdit("client", client)} removeClient={(client) => void removeRecord("client", client.id, client.name)} />}
+        {isManager && view === "employees" && <EmployeesView employees={employees} openNew={() => openNew("employee")} editEmployee={(employee) => openEdit("employee", employee)} removeEmployee={(employee) => void removeRecord("employee", employee.id, employee.name)} inviteEmployee={(employee) => void inviteEmployee(employee)} />}
+        {isManager && view === "trash" && <RecycleBinView trash={trash} restoreClient={(id, restoreProjects) => void restoreRecord("client", id, restoreProjects)} restoreProject={(id) => void restoreRecord("project", id)} restoreEmployee={(id) => void restoreRecord("employee", id)} />}
         {view === "profile" && <ProfileView user={currentUser} accountMode={accountMode} setAccountMode={(mode) => { setAccountMode(mode); void saveAction("setAccountMode", { accountMode: mode }).catch(() => setSyncState("error")); }} openTrash={() => navigate("trash")} />}
       </section>
 
       <nav className="mobile-nav" aria-label="ניווט נייד">
         <button className={view === "dashboard" ? "active" : ""} onClick={() => navigate("dashboard")}><span>⌂</span>ראשי</button>
         <button className={view === "projects" ? "active" : ""} onClick={() => navigate("projects")}><span>▦</span>פרויקטים</button>
-        <button className="mobile-timer" onClick={() => void toggleTimer()} aria-label={running ? "עצירת הטיימר" : "הפעלת הטיימר"}><span>{running ? "Ⅱ" : "▶"}</span></button>
-        <button className={view === "clients" ? "active" : ""} onClick={() => navigate("clients")}><span>♙</span>לקוחות</button>
-        {accountMode === "employer" ? <button className={view === "employees" ? "active" : ""} onClick={() => navigate("employees")}><span>♟</span>עובדים</button> : <button className={view === "profile" ? "active" : ""} onClick={() => navigate("profile")}><span>●</span>פרופיל</button>}
+        <button className="mobile-timer" disabled={!projects.length} onClick={() => void toggleTimer()} aria-label={running ? "עצירת הטיימר" : "הפעלת הטיימר"}><span>{running ? "Ⅱ" : "▶"}</span></button>
+        {isManager ? <button className={view === "clients" ? "active" : ""} onClick={() => navigate("clients")}><span>♙</span>לקוחות</button> : <button className={view === "profile" ? "active" : ""} onClick={() => navigate("profile")}><span>●</span>פרופיל</button>}
+        {isManager && (accountMode === "employer" ? <button className={view === "employees" ? "active" : ""} onClick={() => navigate("employees")}><span>♟</span>עובדים</button> : <button className={view === "profile" ? "active" : ""} onClick={() => navigate("profile")}><span>●</span>פרופיל</button>)}
       </nav>
 
       {modal && <Modal title={modal === "time" ? "דיווח שעות ידני" : `${editingId ? "עריכת" : modal === "project" ? "פרויקט" : modal === "client" ? "לקוח" : "עובד"} ${editingId ? (modal === "project" ? "פרויקט" : modal === "client" ? "לקוח" : "עובד") : "חדש"}`} close={() => { setModal(null); setEditingId(null); }}>
@@ -304,9 +324,9 @@ export default function Home() {
   );
 }
 
-type ProjectListProps = { projects: Project[]; activeProject: Project; running: boolean; selectProject: (project: Project) => void; editProject: (project: Project) => void; removeProject: (project: Project) => void };
+type ProjectListProps = { projects: Project[]; activeProject: Project; running: boolean; canManage: boolean; selectProject: (project: Project) => void; editProject: (project: Project) => void; removeProject: (project: Project) => void };
 
-function ProjectList({ projects, activeProject, running, selectProject, editProject, removeProject }: ProjectListProps) {
+function ProjectList({ projects, activeProject, running, canManage, selectProject, editProject, removeProject }: ProjectListProps) {
   if (!projects.length) return <div className="empty-state"><strong>לא נמצאו פרויקטים</strong><span>נסו חיפוש אחר או שנו את הסינון.</span></div>;
   return <div className="project-list">{projects.map((project) => <article className="project-row" key={project.id}>
     <div className={`project-symbol ${project.color}`}>{project.name.charAt(0)}</div>
@@ -315,7 +335,7 @@ function ProjectList({ projects, activeProject, running, selectProject, editProj
     <div className="project-metric"><span>שעות</span><strong>{project.hours}</strong></div>
     <div className="project-metric"><span>יתרה</span><strong>{project.balance}</strong></div>
     <button className="start-button" onClick={() => selectProject(project)} disabled={running && activeProject.id === project.id}>{running && activeProject.id === project.id ? "עובדים עכשיו" : "התחלת עבודה"}</button>
-    <div className="record-actions"><button type="button" onClick={() => editProject(project)}>עריכה</button><button type="button" className="danger" onClick={() => removeProject(project)}>לסל</button></div>
+    {canManage && <div className="record-actions"><button type="button" onClick={() => editProject(project)}>עריכה</button><button type="button" className="danger" onClick={() => removeProject(project)}>לסל</button></div>}
   </article>)}</div>;
 }
 
@@ -323,20 +343,24 @@ function ProjectToolbar({ filter, setFilter, query, setQuery }: { filter: string
   return <div className="projects-toolbar"><div className="filters" role="group" aria-label="סינון פרויקטים">{["הכול", "בביצוע", "ממתין"].map((item) => <button key={item} className={filter === item ? "selected" : ""} onClick={() => setFilter(item)}>{item}</button>)}</div><label className="search-box"><span>⌕</span><input dir="auto" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="חיפוש בעברית, Deutsch or English" aria-label="חיפוש פרויקטים" /></label></div>;
 }
 
-function Dashboard({ accountMode, activeProject, running, seconds, projects, recentTimeEntries, filter, setFilter, query, setQuery, toggleTimer, stopTimer, selectProject, editProject, removeProject, showManual, showAll }: ProjectListProps & { accountMode: AccountMode; seconds: number; recentTimeEntries: TimeEntry[]; filter: string; setFilter: (value: string) => void; query: string; setQuery: (value: string) => void; toggleTimer: () => void; stopTimer: () => void; showManual: () => void; showAll: () => void }) {
+function Dashboard({ canManage, accountMode, activeProject, running, seconds, projects, recentTimeEntries, filter, setFilter, query, setQuery, toggleTimer, stopTimer, selectProject, editProject, removeProject, showManual, showAll }: ProjectListProps & { accountMode: AccountMode; seconds: number; recentTimeEntries: TimeEntry[]; filter: string; setFilter: (value: string) => void; query: string; setQuery: (value: string) => void; toggleTimer: () => void; stopTimer: () => void; showManual: () => void; showAll: () => void }) {
   const totalHours = projects.reduce((sum, project) => sum + project.totalSeconds / 3600, 0);
   const totalExpected = projects.reduce((sum, project) => { const hours = project.totalSeconds / 3600; return sum + (project.billingType === "fixed" ? project.fixedPrice : project.billingType === "hourly" ? hours * project.hourlyRate : project.fixedPrice + hours * project.hourlyRate); }, 0);
   const averageHourly = totalHours ? totalExpected / totalHours : 0;
   return <>
     <section className="timer-card" aria-label="טיימר עבודה"><div className="timer-glow" /><div className="timer-project"><span className="live-pill"><i /> {running ? "טיימר פעיל" : "מוכן להתחלה"}</span><h2 dir="auto">{activeProject.name}</h2><p dir="auto">♙ {activeProject.client}<span>·</span>⌖ {activeProject.address}</p></div><div className="timer-clock"><span>{formatTime(seconds)}</span><small>{running ? "הזמן נשמר גם לאחר רענון" : "בחרו פרויקט או הפעילו את הטיימר"}</small></div><div className="timer-actions"><button className="stop-button" onClick={stopTimer} disabled={!running}><span>■</span> סיום עבודה</button><button className="pause-button" onClick={toggleTimer}><span>{running ? "Ⅱ" : "▶"}</span> {running ? "השהיה" : "התחלה"}</button></div></section>
-    <section className="stats-grid" aria-label="סיכום שעות"><article><div className="stat-icon green">◷</div><div><span>שעות שנשמרו</span><strong>{totalHours.toFixed(1)}</strong><small>בכל הפרויקטים המוצגים</small></div></article><article><div className="stat-icon violet">€</div><div><span>{accountMode === "solo" ? "השכר הצפוי" : "חיוב צפוי"}</span><strong>€{Math.round(totalExpected).toLocaleString()}</strong><small>לפי שיטות התמחור</small></div></article><article><div className="stat-icon amber">◎</div><div><span>דיווחי זמן אחרונים</span><strong>{recentTimeEntries.length}</strong><small>עד שמונה דיווחים אחרונים</small></div></article><article><div className="stat-icon blue">↗</div><div><span>{accountMode === "solo" ? "ממוצע לשעת עבודה" : "ממוצע חיוב לשעה"}</span><strong>€{Math.round(averageHourly).toLocaleString()}</strong><small className="up">מחושב מהנתונים שנשמרו</small></div></article></section>
-    <section className="projects-section"><div className="section-head"><div><h2>פרויקטים פעילים</h2><p>כל מה שקורה בשטח, במקום אחד</p></div><div className="section-actions"><button className="secondary-compact" onClick={showManual}>＋ דיווח ידני</button><button className="text-button" onClick={showAll}>לכל הפרויקטים ←</button></div></div><ProjectToolbar filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} /><ProjectList projects={projects} activeProject={activeProject} running={running} selectProject={selectProject} editProject={editProject} removeProject={removeProject} /></section>
+    <section className="stats-grid" aria-label="סיכום שעות"><article><div className="stat-icon green">◷</div><div><span>שעות שנשמרו</span><strong>{totalHours.toFixed(1)}</strong><small>בכל הפרויקטים המוצגים</small></div></article><article><div className="stat-icon violet">€</div><div><span>{!canManage || accountMode === "solo" ? "השכר הצפוי" : "חיוב צפוי"}</span><strong>€{Math.round(totalExpected).toLocaleString()}</strong><small>לפי שיטות התמחור</small></div></article><article><div className="stat-icon amber">◎</div><div><span>דיווחי זמן אחרונים</span><strong>{recentTimeEntries.length}</strong><small>עד שמונה דיווחים אחרונים</small></div></article><article><div className="stat-icon blue">↗</div><div><span>{!canManage || accountMode === "solo" ? "ממוצע לשעת עבודה" : "ממוצע חיוב לשעה"}</span><strong>€{Math.round(averageHourly).toLocaleString()}</strong><small className="up">מחושב מהנתונים שנשמרו</small></div></article></section>
+    <section className="projects-section"><div className="section-head"><div><h2>פרויקטים פעילים</h2><p>כל מה שקורה בשטח, במקום אחד</p></div><div className="section-actions"><button className="secondary-compact" onClick={showManual}>＋ דיווח ידני</button><button className="text-button" onClick={showAll}>לכל הפרויקטים ←</button></div></div><ProjectToolbar filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} /><ProjectList canManage={canManage} projects={projects} activeProject={activeProject} running={running} selectProject={selectProject} editProject={editProject} removeProject={removeProject} /></section>
     <RecentTimeEntries entries={recentTimeEntries} />
   </>;
 }
 
-function ProjectsView({ projects, filter, setFilter, query, setQuery, activeProject, running, selectProject, editProject, removeProject, openManual, openNew }: ProjectListProps & { filter: string; setFilter: (value: string) => void; query: string; setQuery: (value: string) => void; openManual: () => void; openNew: () => void }) {
-  return <section className="page-card"><div className="section-head"><div><h2>כל הפרויקטים</h2><p>{projects.length} פרויקטים מוצגים</p></div><div className="section-actions"><button className="secondary-compact" onClick={openManual}>＋ דיווח שעות</button><button className="mobile-primary" onClick={openNew}>＋ פרויקט חדש</button></div></div><ProjectToolbar filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} /><ProjectList projects={projects} activeProject={activeProject} running={running} selectProject={selectProject} editProject={editProject} removeProject={removeProject} /></section>;
+function ProjectsView({ canManage, projects, filter, setFilter, query, setQuery, activeProject, running, selectProject, editProject, removeProject, openManual, openNew }: ProjectListProps & { filter: string; setFilter: (value: string) => void; query: string; setQuery: (value: string) => void; openManual: () => void; openNew: () => void }) {
+  return <section className="page-card"><div className="section-head"><div><h2>כל הפרויקטים</h2><p>{projects.length} פרויקטים מוצגים</p></div><div className="section-actions">{projects.length > 0 && <button className="secondary-compact" onClick={openManual}>＋ דיווח שעות</button>}{canManage && <button className="mobile-primary" onClick={openNew}>＋ פרויקט חדש</button>}</div></div><ProjectToolbar filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} /><ProjectList canManage={canManage} projects={projects} activeProject={activeProject} running={running} selectProject={selectProject} editProject={editProject} removeProject={removeProject} /></section>;
+}
+
+function NoProjectsView({ isManager, openNew }: { isManager: boolean; openNew: () => void }) {
+  return <section className="page-card no-projects"><div className="empty-state"><div><strong>{isManager ? "אין עדיין פרויקט פעיל" : "עדיין לא שויכת לפרויקט"}</strong><span>{isManager ? "צרו פרויקט ראשון כדי להתחיל לדווח זמן." : "כשהמעסיק ישייך אותך לפרויקט, הוא יופיע כאן אוטומטית."}</span>{isManager && <button className="restore-primary" onClick={openNew}>יצירת פרויקט</button>}</div></div></section>;
 }
 
 function RecentTimeEntries({ entries }: { entries: TimeEntry[] }) {
@@ -349,8 +373,13 @@ function ClientsView({ clients, query, setQuery, openNew, editClient, removeClie
   return <section className="page-card"><div className="section-head"><div><h2>כל הלקוחות</h2><p>{clients.length} לקוחות במערכת</p></div><button className="mobile-primary" onClick={openNew}>＋ לקוח חדש</button></div><label className="search-box standalone"><span>⌕</span><input dir="auto" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="חיפוש לפי שם או כתובת" /></label><div className="record-grid">{visible.map((client) => <article className="record-card" key={client.id}><div className="record-avatar">{client.name.charAt(0)}</div><div className="record-copy"><strong dir="auto">{client.name}</strong><span dir="auto">⌖ {client.address}</span><small dir="ltr">{client.phone}</small></div><div className="record-meta"><strong>{client.projects}</strong><span>פרויקטים</span></div><div className="record-actions"><button type="button" onClick={() => editClient(client)}>עריכה</button><button type="button" className="danger" onClick={() => removeClient(client)}>לסל</button></div></article>)}</div></section>;
 }
 
-function EmployeesView({ employees, openNew, editEmployee, removeEmployee }: { employees: Employee[]; openNew: () => void; editEmployee: (employee: Employee) => void; removeEmployee: (employee: Employee) => void }) {
-  return <section className="page-card"><div className="section-head"><div><h2>הצוות</h2><p>{employees.filter((employee) => employee.status === "פעיל").length} עובדים פעילים</p></div><button className="mobile-primary" onClick={openNew}>＋ עובד חדש</button></div><div className="employee-grid">{employees.map((employee, index) => <article className="employee-card" key={employee.id}><div className={`employee-avatar shade-${index % 3}`}>{employee.name.charAt(0)}</div><span className="employee-status"><i />{employee.status}</span><h3 dir="auto">{employee.name}</h3><p dir="ltr">{employee.email}</p><div className="employee-rate"><span>עלות לשעה</span><strong>€{employee.hourlyCost}</strong></div><div className="card-actions"><button type="button" className="secondary-button" onClick={() => editEmployee(employee)}>עריכת עובד</button><button type="button" className="secondary-button danger" onClick={() => removeEmployee(employee)}>לסל המחזור</button></div></article>)}</div></section>;
+function EmployeesView({ employees, openNew, editEmployee, removeEmployee, inviteEmployee }: { employees: Employee[]; openNew: () => void; editEmployee: (employee: Employee) => void; removeEmployee: (employee: Employee) => void; inviteEmployee: (employee: Employee) => void }) {
+  const connected = employees.filter((employee) => employee.connectionStatus === "connected").length;
+  const pending = employees.filter((employee) => employee.connectionStatus === "pending").length;
+  return <section className="page-card"><div className="section-head"><div><h2>הצוות</h2><p>{connected} עובדים מחוברים · {pending} הזמנות ממתינות</p></div><button className="mobile-primary" onClick={openNew}>＋ עובד חדש</button></div><div className="employee-grid">{employees.map((employee, index) => {
+    const inviteUrl = employee.invitationToken ? `${typeof window === "undefined" ? "" : window.location.origin}/?invite=${employee.invitationToken}` : "";
+    return <article className="employee-card" key={employee.id}><div className={`employee-avatar shade-${index % 3}`}>{employee.name.charAt(0)}</div><span className="employee-status"><i />{employee.status}</span><h3 dir="auto">{employee.name}</h3><p dir="ltr">{employee.email}</p><span className={`connection-pill ${employee.connectionStatus ?? "not_invited"}`}>{employee.connectionStatus === "connected" ? "מחובר למערכת" : employee.connectionStatus === "pending" ? "הזמנה ממתינה" : "טרם הוזמן"}</span><div className="employee-rate"><span>עלות לשעה</span><strong>€{employee.hourlyCost}</strong></div>{inviteUrl && <div className="invite-link"><input dir="ltr" readOnly value={inviteUrl} aria-label={`קישור ההזמנה של ${employee.name}`} /><button type="button" onClick={() => void navigator.clipboard?.writeText(inviteUrl)}>העתקה</button></div>}<button type="button" className="invite-button" disabled={employee.connectionStatus === "connected"} onClick={() => inviteEmployee(employee)}>{employee.connectionStatus === "connected" ? "העובד כבר מחובר" : employee.connectionStatus === "pending" ? "יצירת קישור חדש" : "יצירת הזמנה"}</button><div className="card-actions"><button type="button" className="secondary-button" onClick={() => editEmployee(employee)}>עריכת עובד</button><button type="button" className="secondary-button danger" onClick={() => removeEmployee(employee)}>לסל המחזור</button></div></article>;
+  })}</div></section>;
 }
 
 function SignInView() {
@@ -372,6 +401,7 @@ function RecycleBinView({ trash, restoreClient, restoreProject, restoreEmployee 
 }
 
 function ProfileView({ user, accountMode, setAccountMode, openTrash }: { user: AccountUser; accountMode: AccountMode; setAccountMode: (mode: AccountMode) => void; openTrash: () => void }) {
+  if (user.role === "employee") return <section className="page-card profile-card"><div className="profile-intro"><div className="profile-avatar">{user.displayName.charAt(0)}</div><div><h2 dir="auto">{user.displayName}</h2><p dir="ltr">{user.email}</p><small>עובד מחובר לצוות</small></div>{!user.isLocal && <a className="sign-out-link" href="/signout-with-chatgpt?return_to=%2F">התנתקות</a>}</div><div className="team-member-summary"><span className="mode-icon">♟</span><div><strong>חשבון עובד</strong><p>מוצגים לך רק הפרויקטים שאליהם שויכת, דיווחי הזמן שלך והשכר המחושב לפי התעריף שלך.</p></div></div></section>;
   return <section className="page-card profile-card"><div className="profile-intro"><div className="profile-avatar">{user.displayName.charAt(0)}</div><div><h2 dir="auto">{user.displayName}</h2><p dir="ltr">{user.email}</p><small>{user.isLocal ? "משתמש פיתוח מקומי" : "חשבון מחובר"}</small></div>{!user.isLocal && <a className="sign-out-link" href="/signout-with-chatgpt?return_to=%2F">התנתקות</a>}</div><fieldset className="account-mode-options"><legend>סוג החשבון שלי</legend><label className={accountMode === "solo" ? "selected" : ""}><input type="radio" name="accountMode" checked={accountMode === "solo"} onChange={() => setAccountMode("solo")} /><span className="mode-icon">◷</span><span><strong>עובד</strong><small>אני עובד לבד ומגדיר בכל פרויקט כמה מגיע לי לפי שעה, במחיר גלובלי או בשילוב.</small></span>{accountMode === "solo" && <b>נבחר</b>}</label><label className={accountMode === "employer" ? "selected" : ""}><input type="radio" name="accountMode" checked={accountMode === "employer"} onChange={() => setAccountMode("employer")} /><span className="mode-icon">♟</span><span><strong>מעסיק עובדים</strong><small>אני מנהל צוות ומפריד בין המחיר ללקוח לבין העלות של כל עובד.</small></span>{accountMode === "employer" && <b>נבחר</b>}</label></fieldset><div className="mode-summary"><strong>{accountMode === "solo" ? "מצב עובד פעיל" : "מצב מעסיק פעיל"}</strong><span>{accountMode === "solo" ? "מסך העובדים הוסתר, ובפרויקטים יוצג רק השכר שמגיע לך." : "ניהול העובדים, עלויות השכר ורווחיות הפרויקט זמינים עבורך."}</span></div><button className="profile-trash-link" onClick={openTrash}><span>♲</span><span><strong>סל המחזור</strong><small>צפייה ושחזור של לקוחות, פרויקטים ועובדים שנמחקו</small></span><b>←</b></button></section>;
 }
 
