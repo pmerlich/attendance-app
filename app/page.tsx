@@ -2,13 +2,15 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
-type View = "dashboard" | "projects" | "clients" | "employees";
+type View = "dashboard" | "projects" | "clients" | "employees" | "profile";
 type BillingType = "fixed" | "hourly" | "combined";
+type AccountMode = "solo" | "employer";
 
-type Client = { id: number; name: string; address: string; phone: string; projects: number };
-type Employee = { id: number; name: string; email: string; hourlyCost: number; status: "פעיל" | "מושהה" };
+type RecordId = string | number;
+type Client = { id: RecordId; name: string; address: string; phone: string; projects: number };
+type Employee = { id: RecordId; name: string; email: string; hourlyCost: number; status: "פעיל" | "מושהה" };
 type Project = {
-  id: number;
+  id: RecordId;
   name: string;
   client: string;
   address: string;
@@ -45,6 +47,7 @@ const viewTitles: Record<View, { eyebrow: string; title: string }> = {
   projects: { eyebrow: "ניהול העבודה", title: "פרויקטים" },
   clients: { eyebrow: "אנשי קשר וכתובות", title: "לקוחות" },
   employees: { eyebrow: "הצוות שלך", title: "עובדים" },
+  profile: { eyebrow: "העדפות החשבון", title: "הפרופיל שלי" },
 };
 
 function formatTime(seconds: number) {
@@ -60,6 +63,22 @@ function billingLabel(type: BillingType, fixedPrice: number, hourlyRate: number)
   return `€${fixedPrice.toLocaleString()} + €${hourlyRate.toLocaleString()} לשעה`;
 }
 
+type StoredProject = Pick<Project, "id" | "name" | "client" | "address" | "tag" | "billingType" | "fixedPrice" | "hourlyRate">;
+type StoredState = { accountMode: AccountMode; clients: Client[]; employees: Employee[]; projects: StoredProject[] };
+
+function presentProjects(items: StoredProject[]): Project[] {
+  const colors: Project["color"][] = ["mint", "amber", "blue"];
+  return items.map((project, index) => ({
+    ...project,
+    billing: billingLabel(project.billingType, Number(project.fixedPrice), Number(project.hourlyRate)),
+    fixedPrice: Number(project.fixedPrice),
+    hourlyRate: Number(project.hourlyRate),
+    hours: project.id === "project-1" ? "28.5" : project.id === "project-2" ? "12.0" : project.id === "project-3" ? "41.5" : "0.0",
+    balance: `€${Number(project.fixedPrice).toLocaleString()}`,
+    color: colors[index % colors.length],
+  }));
+}
+
 export default function Home() {
   const [view, setView] = useState<View>("dashboard");
   const [clients, setClients] = useState(initialClients);
@@ -72,6 +91,34 @@ export default function Home() {
   const [query, setQuery] = useState("");
   const [modal, setModal] = useState<"project" | "client" | "employee" | null>(null);
   const [billingType, setBillingType] = useState<BillingType>("fixed");
+  const [accountMode, setAccountMode] = useState<AccountMode>("solo");
+  const [syncState, setSyncState] = useState<"loading" | "saved" | "error">("loading");
+
+  function applyStoredState(data: StoredState) {
+    const storedProjects = presentProjects(data.projects);
+    setAccountMode(data.accountMode);
+    setClients(data.clients.map((client) => ({ ...client, projects: Number(client.projects) })));
+    setEmployees(data.employees.map((employee) => ({ ...employee, hourlyCost: Number(employee.hourlyCost) })));
+    setProjects(storedProjects);
+    if (storedProjects.length) setActiveProject((current) => storedProjects.find((project) => project.id === current.id) ?? storedProjects[0]);
+  }
+
+  async function saveAction(action: string, values: Record<string, unknown>) {
+    setSyncState("loading");
+    const response = await fetch("/api/state", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, ...values }) });
+    if (!response.ok) throw new Error("שמירת הנתונים נכשלה");
+    applyStoredState(await response.json() as StoredState);
+    setSyncState("saved");
+  }
+
+  useEffect(() => {
+    let active = true;
+    fetch("/api/state").then((response) => {
+      if (!response.ok) throw new Error("טעינת הנתונים נכשלה");
+      return response.json() as Promise<StoredState>;
+    }).then((data) => { if (active) { applyStoredState(data); setSyncState("saved"); } }).catch(() => { if (active) setSyncState("error"); });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     if (!running) return;
@@ -100,32 +147,34 @@ export default function Home() {
     setView("dashboard");
   }
 
-  function addClient(event: FormEvent<HTMLFormElement>) {
+  async function addClient(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    setClients((items) => [...items, { id: Date.now(), name: String(data.get("name")), address: String(data.get("address")), phone: String(data.get("phone")), projects: 0 }]);
-    setModal(null);
+    try {
+      await saveAction("addClient", { name: data.get("name"), address: data.get("address"), phone: data.get("phone"), email: data.get("email") });
+      setModal(null);
+    } catch { setSyncState("error"); }
   }
 
-  function addEmployee(event: FormEvent<HTMLFormElement>) {
+  async function addEmployee(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    setEmployees((items) => [...items, { id: Date.now(), name: String(data.get("name")), email: String(data.get("email")), hourlyCost: Number(data.get("hourlyCost")), status: "פעיל" }]);
-    setModal(null);
+    try {
+      await saveAction("addEmployee", { name: data.get("name"), email: data.get("email"), hourlyCost: Number(data.get("hourlyCost")) });
+      setModal(null);
+    } catch { setSyncState("error"); }
   }
 
-  function addProject(event: FormEvent<HTMLFormElement>) {
+  async function addProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     const fixedPrice = Number(data.get("fixedPrice") || 0);
     const hourlyRate = Number(data.get("hourlyRate") || 0);
-    const project: Project = {
-      id: Date.now(), name: String(data.get("name")), client: String(data.get("client")), address: String(data.get("address")), tag: "בביצוע", billingType,
-      billing: billingLabel(billingType, fixedPrice, hourlyRate), fixedPrice, hourlyRate, hours: "0.0", balance: `€${fixedPrice.toLocaleString()}`, color: "mint",
-    };
-    setProjects((items) => [project, ...items]);
-    setModal(null);
-    setView("projects");
+    try {
+      await saveAction("addProject", { name: data.get("name"), client: data.get("client"), address: data.get("address"), billingType, fixedPrice, hourlyRate, workers: data.getAll("workers") });
+      setModal(null);
+      setView("projects");
+    } catch { setSyncState("error"); }
   }
 
   return (
@@ -136,22 +185,23 @@ export default function Home() {
           <button className={`nav-item ${view === "dashboard" ? "active" : ""}`} onClick={() => navigate("dashboard")}><span>⌂</span>ראשי</button>
           <button className={`nav-item ${view === "projects" ? "active" : ""}`} onClick={() => navigate("projects")}><span>▦</span>פרויקטים</button>
           <button className={`nav-item ${view === "clients" ? "active" : ""}`} onClick={() => navigate("clients")}><span>♙</span>לקוחות</button>
-          <button className={`nav-item ${view === "employees" ? "active" : ""}`} onClick={() => navigate("employees")}><span>♟</span>עובדים</button>
+          {accountMode === "employer" && <button className={`nav-item ${view === "employees" ? "active" : ""}`} onClick={() => navigate("employees")}><span>♟</span>עובדים</button>}
           <button className="nav-item"><span>↗</span>דוחות</button>
         </nav>
-        <div className="sidebar-foot"><div className="user-avatar">מ</div><div><strong>מנחם</strong><small>מנהל העסק</small></div><button aria-label="פתיחת הגדרות">•••</button></div>
+        <button className="sidebar-foot" onClick={() => navigate("profile")}><div className="user-avatar">מ</div><div><strong>מנחם</strong><small>{accountMode === "solo" ? "עובד עצמאי" : "מעסיק עובדים"}</small></div><span aria-hidden="true">•••</span></button>
       </aside>
 
       <section className="content">
         <header className="topbar">
           <div><p className="eyebrow">{viewTitles[view].eyebrow}</p><h1>{viewTitles[view].title}</h1></div>
-          <div className="top-actions"><span className="connection"><i /> מסונכרן</span><button className="icon-button" aria-label="התראות">♢<b>2</b></button><button className="primary-button" onClick={() => setModal(view === "clients" ? "client" : view === "employees" ? "employee" : "project")}><span>＋</span> {view === "clients" ? "לקוח חדש" : view === "employees" ? "עובד חדש" : "פרויקט חדש"}</button></div>
+          <div className="top-actions"><span className="account-badge">{accountMode === "solo" ? "מצב עובד" : "מצב מעסיק"}</span><span className={`connection ${syncState === "error" ? "sync-error" : ""}`}><i /> {syncState === "loading" ? "שומר…" : syncState === "error" ? "בעיה בשמירה" : "נשמר"}</span><button className="icon-button profile-button" onClick={() => navigate("profile")} aria-label="פתיחת הפרופיל">מ</button>{view !== "profile" && <button className="primary-button" onClick={() => setModal(view === "clients" ? "client" : view === "employees" ? "employee" : "project")}><span>＋</span> {view === "clients" ? "לקוח חדש" : view === "employees" ? "עובד חדש" : "פרויקט חדש"}</button>}</div>
         </header>
 
-        {view === "dashboard" && <Dashboard activeProject={activeProject} running={running} seconds={seconds} projects={visibleProjects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} setRunning={setRunning} setSeconds={setSeconds} selectProject={selectProject} showAll={() => navigate("projects")} />}
+        {view === "dashboard" && <Dashboard accountMode={accountMode} activeProject={activeProject} running={running} seconds={seconds} projects={visibleProjects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} setRunning={setRunning} setSeconds={setSeconds} selectProject={selectProject} showAll={() => navigate("projects")} />}
         {view === "projects" && <ProjectsView projects={visibleProjects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} activeProject={activeProject} running={running} selectProject={selectProject} openNew={() => setModal("project")} />}
         {view === "clients" && <ClientsView clients={clients} query={query} setQuery={setQuery} openNew={() => setModal("client")} />}
         {view === "employees" && <EmployeesView employees={employees} openNew={() => setModal("employee")} />}
+        {view === "profile" && <ProfileView accountMode={accountMode} setAccountMode={(mode) => { setAccountMode(mode); void saveAction("setAccountMode", { accountMode: mode }).catch(() => setSyncState("error")); }} />}
       </section>
 
       <nav className="mobile-nav" aria-label="ניווט נייד">
@@ -159,11 +209,11 @@ export default function Home() {
         <button className={view === "projects" ? "active" : ""} onClick={() => navigate("projects")}><span>▦</span>פרויקטים</button>
         <button className="mobile-timer" onClick={() => setRunning((value) => !value)} aria-label="הפעלת טיימר"><span>▶</span></button>
         <button className={view === "clients" ? "active" : ""} onClick={() => navigate("clients")}><span>♙</span>לקוחות</button>
-        <button className={view === "employees" ? "active" : ""} onClick={() => navigate("employees")}><span>♟</span>עובדים</button>
+        {accountMode === "employer" ? <button className={view === "employees" ? "active" : ""} onClick={() => navigate("employees")}><span>♟</span>עובדים</button> : <button className={view === "profile" ? "active" : ""} onClick={() => navigate("profile")}><span>●</span>פרופיל</button>}
       </nav>
 
       {modal && <Modal title={modal === "project" ? "פרויקט חדש" : modal === "client" ? "לקוח חדש" : "עובד חדש"} close={() => setModal(null)}>
-        {modal === "project" && <ProjectForm clients={clients} employees={employees} billingType={billingType} setBillingType={setBillingType} submit={addProject} />}
+        {modal === "project" && <ProjectForm accountMode={accountMode} clients={clients} employees={employees} billingType={billingType} setBillingType={setBillingType} submit={addProject} />}
         {modal === "client" && <ClientForm submit={addClient} />}
         {modal === "employee" && <EmployeeForm submit={addEmployee} />}
       </Modal>}
@@ -190,10 +240,10 @@ function ProjectToolbar({ filter, setFilter, query, setQuery }: { filter: string
   return <div className="projects-toolbar"><div className="filters" role="group" aria-label="סינון פרויקטים">{["הכול", "בביצוע", "ממתין"].map((item) => <button key={item} className={filter === item ? "selected" : ""} onClick={() => setFilter(item)}>{item}</button>)}</div><label className="search-box"><span>⌕</span><input dir="auto" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="חיפוש בעברית, Deutsch or English" aria-label="חיפוש פרויקטים" /></label></div>;
 }
 
-function Dashboard({ activeProject, running, seconds, projects, filter, setFilter, query, setQuery, setRunning, setSeconds, selectProject, showAll }: ProjectListProps & { seconds: number; filter: string; setFilter: (value: string) => void; query: string; setQuery: (value: string) => void; setRunning: (value: boolean | ((current: boolean) => boolean)) => void; setSeconds: (value: number) => void; showAll: () => void }) {
+function Dashboard({ accountMode, activeProject, running, seconds, projects, filter, setFilter, query, setQuery, setRunning, setSeconds, selectProject, showAll }: ProjectListProps & { accountMode: AccountMode; seconds: number; filter: string; setFilter: (value: string) => void; query: string; setQuery: (value: string) => void; setRunning: (value: boolean | ((current: boolean) => boolean)) => void; setSeconds: (value: number) => void; showAll: () => void }) {
   return <>
     <section className="timer-card" aria-label="טיימר עבודה פעיל"><div className="timer-glow" /><div className="timer-project"><span className="live-pill"><i /> {running ? "טיימר פעיל" : "הטיימר מושהה"}</span><h2 dir="auto">{activeProject.name}</h2><p dir="auto">♙ {activeProject.client}<span>·</span>⌖ {activeProject.address}</p></div><div className="timer-clock"><span>{formatTime(seconds)}</span><small>התחיל היום ב־08:12</small></div><div className="timer-actions"><button className="stop-button" onClick={() => { setRunning(false); setSeconds(0); }}><span>■</span> סיום עבודה</button><button className="pause-button" onClick={() => setRunning((value) => !value)}><span>{running ? "Ⅱ" : "▶"}</span> {running ? "השהיה" : "המשך"}</button></div></section>
-    <section className="stats-grid" aria-label="סיכום חודשי"><article><div className="stat-icon green">◷</div><div><span>שעות החודש</span><strong>142.5</strong><small className="up">↑ 12% מהחודש הקודם</small></div></article><article><div className="stat-icon violet">€</div><div><span>הכנסה צפויה</span><strong>€18,420</strong><small>ב־6 פרויקטים פעילים</small></div></article><article><div className="stat-icon amber">◎</div><div><span>ממתין לתשלום</span><strong>€4,280</strong><small className="warning">3 יתרות פתוחות</small></div></article><article><div className="stat-icon blue">↗</div><div><span>רווח צפוי</span><strong>€9,760</strong><small className="up">53% מההכנסות</small></div></article></section>
+    <section className="stats-grid" aria-label="סיכום חודשי"><article><div className="stat-icon green">◷</div><div><span>שעות החודש</span><strong>142.5</strong><small className="up">↑ 12% מהחודש הקודם</small></div></article><article><div className="stat-icon violet">€</div><div><span>{accountMode === "solo" ? "השכר הצפוי" : "הכנסה צפויה"}</span><strong>€18,420</strong><small>ב־6 פרויקטים פעילים</small></div></article><article><div className="stat-icon amber">◎</div><div><span>ממתין לתשלום</span><strong>€4,280</strong><small className="warning">3 יתרות פתוחות</small></div></article><article><div className="stat-icon blue">↗</div><div><span>{accountMode === "solo" ? "ממוצע לשעת עבודה" : "רווח צפוי"}</span><strong>{accountMode === "solo" ? "€129" : "€9,760"}</strong><small className="up">{accountMode === "solo" ? "לפי הפרויקטים הפעילים" : "53% מההכנסות"}</small></div></article></section>
     <section className="projects-section"><div className="section-head"><div><h2>פרויקטים פעילים</h2><p>כל מה שקורה בשטח, במקום אחד</p></div><button className="text-button" onClick={showAll}>לכל הפרויקטים ←</button></div><ProjectToolbar filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} /><ProjectList projects={projects} activeProject={activeProject} running={running} selectProject={selectProject} /></section>
   </>;
 }
@@ -209,6 +259,10 @@ function ClientsView({ clients, query, setQuery, openNew }: { clients: Client[];
 
 function EmployeesView({ employees, openNew }: { employees: Employee[]; openNew: () => void }) {
   return <section className="page-card"><div className="section-head"><div><h2>הצוות</h2><p>{employees.filter((employee) => employee.status === "פעיל").length} עובדים פעילים</p></div><button className="mobile-primary" onClick={openNew}>＋ עובד חדש</button></div><div className="employee-grid">{employees.map((employee, index) => <article className="employee-card" key={employee.id}><div className={`employee-avatar shade-${index % 3}`}>{employee.name.charAt(0)}</div><span className="employee-status"><i />{employee.status}</span><h3 dir="auto">{employee.name}</h3><p dir="ltr">{employee.email}</p><div className="employee-rate"><span>עלות לשעה</span><strong>€{employee.hourlyCost}</strong></div><button className="secondary-button">פרטי עובד</button></article>)}</div></section>;
+}
+
+function ProfileView({ accountMode, setAccountMode }: { accountMode: AccountMode; setAccountMode: (mode: AccountMode) => void }) {
+  return <section className="page-card profile-card"><div className="profile-intro"><div className="profile-avatar">מ</div><div><h2>מנחם</h2><p>בחר איך אתה עובד. אפשר לשנות את הבחירה גם בהמשך.</p></div></div><fieldset className="account-mode-options"><legend>סוג החשבון שלי</legend><label className={accountMode === "solo" ? "selected" : ""}><input type="radio" name="accountMode" checked={accountMode === "solo"} onChange={() => setAccountMode("solo")} /><span className="mode-icon">◷</span><span><strong>עובד</strong><small>אני עובד לבד ומגדיר בכל פרויקט כמה מגיע לי לפי שעה, במחיר גלובלי או בשילוב.</small></span>{accountMode === "solo" && <b>נבחר</b>}</label><label className={accountMode === "employer" ? "selected" : ""}><input type="radio" name="accountMode" checked={accountMode === "employer"} onChange={() => setAccountMode("employer")} /><span className="mode-icon">♟</span><span><strong>מעסיק עובדים</strong><small>אני מנהל צוות ומפריד בין המחיר ללקוח לבין העלות של כל עובד.</small></span>{accountMode === "employer" && <b>נבחר</b>}</label></fieldset><div className="mode-summary"><strong>{accountMode === "solo" ? "מצב עובד פעיל" : "מצב מעסיק פעיל"}</strong><span>{accountMode === "solo" ? "מסך העובדים הוסתר, ובפרויקטים יוצג רק השכר שמגיע לך." : "ניהול העובדים, עלויות השכר ורווחיות הפרויקט זמינים עבורך."}</span></div></section>;
 }
 
 function Modal({ title, close, children }: { title: string; close: () => void; children: React.ReactNode }) {
@@ -227,8 +281,9 @@ function EmployeeForm({ submit }: { submit: (event: FormEvent<HTMLFormElement>) 
   return <form className="entity-form" onSubmit={submit}><div className="form-grid"><Field label="שם העובד" wide><input name="name" dir="auto" required placeholder="שם בעברית, Deutsch or English" /></Field><Field label="אימייל"><input name="email" dir="ltr" type="email" required placeholder="name@example.com" /></Field><Field label="עלות לשעה (EUR)"><input name="hourlyCost" dir="ltr" type="number" min="0" step="0.01" required placeholder="0.00" /></Field></div><p className="form-note">זהו הסכום שמגיע לעובד לשעה, ולא התעריף שבו מחייבים את הלקוח.</p><FormActions label="הוספת עובד" /></form>;
 }
 
-function ProjectForm({ clients, employees, billingType, setBillingType, submit }: { clients: Client[]; employees: Employee[]; billingType: BillingType; setBillingType: (type: BillingType) => void; submit: (event: FormEvent<HTMLFormElement>) => void }) {
-  return <form className="entity-form project-form" onSubmit={submit}><div className="form-grid"><Field label="שם הפרויקט" wide><input name="name" dir="auto" required placeholder="שם חופשי בעברית, Deutsch or English" /></Field><Field label="לקוח"><select name="client" required defaultValue=""><option value="" disabled>בחירת לקוח</option>{clients.map((client) => <option key={client.id}>{client.name}</option>)}</select></Field><Field label="כתובת"><input name="address" dir="auto" required placeholder="כתובת העבודה" /></Field></div><fieldset className="billing-options"><legend>איך הלקוח משלם?</legend><label className={billingType === "fixed" ? "selected" : ""}><input type="radio" name="billingType" checked={billingType === "fixed"} onChange={() => setBillingType("fixed")} /><strong>מחיר קבוע</strong><span>סכום גלובלי שאינו תלוי בשעות</span></label><label className={billingType === "hourly" ? "selected" : ""}><input type="radio" name="billingType" checked={billingType === "hourly"} onChange={() => setBillingType("hourly")} /><strong>לפי שעה</strong><span>מספר שעות כפול תעריף הלקוח</span></label><label className={billingType === "combined" ? "selected" : ""}><input type="radio" name="billingType" checked={billingType === "combined"} onChange={() => setBillingType("combined")} /><strong>קבוע + שעות</strong><span>מחיר בסיס ובנוסף חיוב שעתי</span></label></fieldset><div className="form-grid conditional-fields">{(billingType === "fixed" || billingType === "combined") && <Field label={billingType === "fixed" ? "המחיר הקבוע (EUR)" : "מחיר הבסיס (EUR)"}><input name="fixedPrice" dir="ltr" type="number" min="0" step="0.01" required placeholder="0.00" /></Field>}{(billingType === "hourly" || billingType === "combined") && <Field label="תעריף ללקוח לשעה (EUR)"><input name="hourlyRate" dir="ltr" type="number" min="0" step="0.01" required placeholder="0.00" /></Field>}</div><fieldset className="worker-picker"><legend>שיוך עובדים</legend>{employees.map((employee) => <label key={employee.id}><input type="checkbox" name="workers" value={employee.id} /><span className="mini-avatar">{employee.name.charAt(0)}</span><span dir="auto">{employee.name}</span><small>€{employee.hourlyCost}/שעה</small></label>)}</fieldset><FormActions label="יצירת פרויקט" /></form>;
+function ProjectForm({ accountMode, clients, employees, billingType, setBillingType, submit }: { accountMode: AccountMode; clients: Client[]; employees: Employee[]; billingType: BillingType; setBillingType: (type: BillingType) => void; submit: (event: FormEvent<HTMLFormElement>) => void }) {
+  const isSolo = accountMode === "solo";
+  return <form className="entity-form project-form" onSubmit={submit}><div className="form-grid"><Field label="שם הפרויקט" wide><input name="name" dir="auto" required placeholder="שם חופשי בעברית, Deutsch or English" /></Field><Field label="לקוח"><select name="client" required defaultValue=""><option value="" disabled>בחירת לקוח</option>{clients.map((client) => <option key={client.id}>{client.name}</option>)}</select></Field><Field label="כתובת"><input name="address" dir="auto" required placeholder="כתובת העבודה" /></Field></div><div className="form-context"><strong>{isSolo ? "התשלום שמגיע לי בפרויקט" : "החיוב של הלקוח בפרויקט"}</strong><span>{isSolo ? "אין כאן מחיר ללקוח מול מחיר לעובד—רק הסכום שאתה מקבל." : "הסכומים כאן הם המחיר ללקוח. עלויות העובדים מחושבות בנפרד."}</span></div><fieldset className="billing-options"><legend>{isSolo ? "איך משלמים לי?" : "איך הלקוח משלם?"}</legend><label className={billingType === "fixed" ? "selected" : ""}><input type="radio" name="billingType" checked={billingType === "fixed"} onChange={() => setBillingType("fixed")} /><strong>מחיר גלובלי</strong><span>סכום קבוע שאינו תלוי בשעות</span></label><label className={billingType === "hourly" ? "selected" : ""}><input type="radio" name="billingType" checked={billingType === "hourly"} onChange={() => setBillingType("hourly")} /><strong>לפי שעה</strong><span>מספר שעות כפול {isSolo ? "השכר שלך" : "תעריף הלקוח"}</span></label><label className={billingType === "combined" ? "selected" : ""}><input type="radio" name="billingType" checked={billingType === "combined"} onChange={() => setBillingType("combined")} /><strong>גלובלי + שעות</strong><span>סכום בסיס ובנוסף תשלום שעתי</span></label></fieldset><div className="form-grid conditional-fields">{(billingType === "fixed" || billingType === "combined") && <Field label={billingType === "fixed" ? `${isSolo ? "השכר" : "המחיר"} הגלובלי (EUR)` : "סכום הבסיס (EUR)"}><input name="fixedPrice" dir="ltr" type="number" min="0" step="0.01" required placeholder="0.00" /></Field>}{(billingType === "hourly" || billingType === "combined") && <Field label={`${isSolo ? "השכר שלי" : "תעריף ללקוח"} לשעה (EUR)`}><input name="hourlyRate" dir="ltr" type="number" min="0" step="0.01" required placeholder="0.00" /></Field>}</div>{!isSolo && <fieldset className="worker-picker"><legend>שיוך עובדים</legend>{employees.map((employee) => <label key={employee.id}><input type="checkbox" name="workers" value={employee.id} /><span className="mini-avatar">{employee.name.charAt(0)}</span><span dir="auto">{employee.name}</span><small>€{employee.hourlyCost}/שעה</small></label>)}</fieldset>}<FormActions label="יצירת פרויקט" /></form>;
 }
 
 function FormActions({ label }: { label: string }) {

@@ -8,7 +8,7 @@ const timestamps = {
 };
 
 export const businesses = sqliteTable("businesses", {
-  id: text("id").primaryKey(), name: text("name").notNull(), currency: text("currency").notNull().default("EUR"), ...timestamps,
+  id: text("id").primaryKey(), name: text("name").notNull(), workMode: text("work_mode", { enum: ["solo", "employer"] }).notNull().default("solo"), currency: text("currency").notNull().default("EUR"), ...timestamps,
 });
 
 export const users = sqliteTable("users", {

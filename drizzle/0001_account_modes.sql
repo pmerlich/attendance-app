@@ -1,0 +1,1 @@
+ALTER TABLE `businesses` ADD `work_mode` text DEFAULT 'solo' NOT NULL;

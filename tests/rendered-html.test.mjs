@@ -21,5 +21,7 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.match(html, /<title>מנהל עבודה \| פרויקטים, שעות וכספים<\/title>/);
   assert.match(html, /טיימר פעיל/);
   assert.match(html, /פרויקטים פעילים/);
+  assert.match(html, /מצב עובד/);
+  assert.match(html, /עובד עצמאי/);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Starter Project/);
 });
