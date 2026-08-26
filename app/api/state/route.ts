@@ -67,6 +67,11 @@ async function ensureCoreSchema(db: D1Database) {
       accepted_by_auth_user_id text, accepted_at text, created_at text DEFAULT CURRENT_TIMESTAMP NOT NULL,
       updated_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, deleted_at text
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS audit_log (
+      id text PRIMARY KEY NOT NULL, business_id text NOT NULL, actor_id text NOT NULL,
+      entity_type text NOT NULL, entity_id text NOT NULL, action text NOT NULL,
+      details_json text DEFAULT '{}' NOT NULL, created_at text DEFAULT CURRENT_TIMESTAMP NOT NULL
+    )`),
   ]);
   const userColumns = await db.prepare("PRAGMA table_info(users)").all<{ name: string }>();
   if (!userColumns.results.some((column) => column.name === "auth_user_id")) {
@@ -128,6 +133,22 @@ async function loadState(db: D1Database, identity: Identity) {
       JOIN project_workers pw ON pw.project_id = p.id AND pw.user_id = ?
       JOIN users u ON u.id = pw.user_id
       WHERE p.business_id = ? AND p.deleted_at IS NULL ORDER BY p.created_at DESC`).bind(identity.ownerId, identity.ownerId, businessId).all();
+  const timeEntriesQuery = identity.role === "manager"
+    ? db.prepare(`SELECT te.id, te.project_id AS projectId, p.name AS projectName, te.user_id AS userId,
+      u.display_name AS workerName, te.started_at AS startedAt, te.ended_at AS endedAt,
+      COALESCE(te.duration_seconds, CAST((julianday('now') - julianday(te.started_at)) * 86400 AS INTEGER)) AS durationSeconds,
+      te.description, te.source
+      FROM time_entries te JOIN projects p ON p.id = te.project_id JOIN users u ON u.id = te.user_id
+      WHERE te.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
+      ORDER BY te.started_at DESC LIMIT 50`).bind(businessId).all()
+    : db.prepare(`SELECT te.id, te.project_id AS projectId, p.name AS projectName, te.user_id AS userId,
+      u.display_name AS workerName, te.started_at AS startedAt, te.ended_at AS endedAt,
+      COALESCE(te.duration_seconds, CAST((julianday('now') - julianday(te.started_at)) * 86400 AS INTEGER)) AS durationSeconds,
+      te.description, te.source
+      FROM time_entries te JOIN projects p ON p.id = te.project_id JOIN users u ON u.id = te.user_id
+      WHERE te.user_id = ? AND te.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
+        AND EXISTS (SELECT 1 FROM project_workers pw WHERE pw.project_id = p.id AND pw.user_id = ?)
+      ORDER BY te.started_at DESC LIMIT 50`).bind(identity.ownerId, businessId, identity.ownerId).all();
   const [business, clients, employees, projects, activeTimer, recentTimeEntries, deletedClients, deletedProjects, deletedEmployees] = await Promise.all([
     db.prepare("SELECT work_mode AS workMode FROM businesses WHERE id = ? AND deleted_at IS NULL").bind(businessId).first<{ workMode: "solo" | "employer" }>(),
     identity.role === "manager" ? db.prepare(`SELECT c.id, c.name, c.address, COALESCE(c.phone, '') AS phone, COALESCE(c.email, '') AS email, COUNT(p.id) AS projects
@@ -147,13 +168,7 @@ async function loadState(db: D1Database, identity: Identity) {
       WHERE te.user_id = ? AND te.ended_at IS NULL AND te.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
         AND (? = 'manager' OR EXISTS (SELECT 1 FROM project_workers pw WHERE pw.project_id = p.id AND pw.user_id = ?))
       ORDER BY te.started_at DESC LIMIT 1`).bind(identity.ownerId, businessId, identity.role, identity.ownerId).first(),
-    db.prepare(`SELECT te.id, te.project_id AS projectId, p.name AS projectName, te.started_at AS startedAt,
-      COALESCE(te.duration_seconds, CAST((julianday('now') - julianday(te.started_at)) * 86400 AS INTEGER)) AS durationSeconds,
-      te.description, te.source
-      FROM time_entries te JOIN projects p ON p.id = te.project_id
-      WHERE te.user_id = ? AND te.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
-        AND (? = 'manager' OR EXISTS (SELECT 1 FROM project_workers pw WHERE pw.project_id = p.id AND pw.user_id = ?))
-      ORDER BY te.started_at DESC LIMIT 8`).bind(identity.ownerId, businessId, identity.role, identity.ownerId).all(),
+    timeEntriesQuery,
     identity.role === "manager" ? db.prepare(`SELECT c.id, c.name, c.address, c.deleted_at AS deletedAt,
       COUNT(p.id) AS projectCount
       FROM clients c LEFT JOIN projects p ON p.client_id = c.id AND p.deleted_at IS NOT NULL
@@ -169,7 +184,7 @@ async function loadState(db: D1Database, identity: Identity) {
   ]);
   return {
     accountMode: business?.workMode ?? "solo",
-    user: { displayName: identity.displayName, email: identity.email, role: identity.role, isLocal: identity.isLocal },
+    user: { id: identity.ownerId, displayName: identity.displayName, email: identity.email, role: identity.role, isLocal: identity.isLocal },
     clients: clients.results,
     employees: employees.results,
     projects: projects.results,
@@ -269,8 +284,52 @@ export async function POST(request: Request) {
     const durationSeconds = Math.round(Number(body.hours ?? 0) * 3600);
     if (!Number.isFinite(durationSeconds) || durationSeconds < 60 || durationSeconds > 86400) return Response.json({ error: "משך הזמן אינו תקין" }, { status: 400 });
     const date = /^\d{4}-\d{2}-\d{2}$/.test(String(body.date ?? "")) ? String(body.date) : new Date().toISOString().slice(0, 10);
-    await db.prepare("INSERT INTO time_entries (id, project_id, user_id, started_at, ended_at, duration_seconds, description, source) VALUES (?, ?, ?, ?, ?, ?, ?, 'manual')")
-      .bind(crypto.randomUUID(), projectId, identity.ownerId, `${date} 12:00:00`, `${date} 12:00:00`, durationSeconds, String(body.description ?? "")).run();
+    const timeEntryId = crypto.randomUUID();
+    await db.batch([
+      db.prepare("INSERT INTO time_entries (id, project_id, user_id, started_at, ended_at, duration_seconds, description, source) VALUES (?, ?, ?, ?, ?, ?, ?, 'manual')")
+        .bind(timeEntryId, projectId, identity.ownerId, `${date} 12:00:00`, `${date} 12:00:00`, durationSeconds, String(body.description ?? "")),
+      db.prepare("INSERT INTO audit_log (id, business_id, actor_id, entity_type, entity_id, action, details_json) VALUES (?, ?, ?, 'time_entry', ?, 'create', ?)")
+        .bind(crypto.randomUUID(), businessId, identity.ownerId, timeEntryId, JSON.stringify({ projectId, date, durationSeconds })),
+    ]);
+  } else if (action === "updateTimeEntry") {
+    const timeEntryId = String(body.id ?? "");
+    const entry = await db.prepare(`SELECT te.user_id AS userId, te.project_id AS projectId, te.started_at AS startedAt,
+      te.duration_seconds AS durationSeconds, te.description, u.role AS userRole
+      FROM time_entries te JOIN projects p ON p.id = te.project_id JOIN users u ON u.id = te.user_id
+      WHERE te.id = ? AND te.deleted_at IS NULL AND te.ended_at IS NOT NULL AND p.business_id = ?
+        AND (? = 'manager' OR te.user_id = ?) LIMIT 1`).bind(timeEntryId, businessId, identity.role, identity.ownerId)
+      .first<{ userId: string; projectId: string; startedAt: string; durationSeconds: number; description: string; userRole: "manager" | "employee" }>();
+    if (!entry) return Response.json({ error: "דיווח הזמן לא נמצא או עדיין פעיל" }, { status: 400 });
+    const projectId = String(body.projectId ?? "");
+    const project = entry.userRole === "manager"
+      ? await db.prepare("SELECT id FROM projects WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(projectId, businessId).first()
+      : await db.prepare(`SELECT p.id FROM projects p JOIN project_workers pw ON pw.project_id = p.id
+        WHERE p.id = ? AND p.business_id = ? AND p.deleted_at IS NULL AND pw.user_id = ?`).bind(projectId, businessId, entry.userId).first();
+    if (!project) return Response.json({ error: "לא ניתן להעביר את הדיווח לפרויקט הזה" }, { status: 400 });
+    const durationSeconds = Math.round(Number(body.hours ?? 0) * 3600);
+    if (!Number.isFinite(durationSeconds) || durationSeconds < 60 || durationSeconds > 86400) return Response.json({ error: "משך הזמן אינו תקין" }, { status: 400 });
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(String(body.date ?? "")) ? String(body.date) : new Date().toISOString().slice(0, 10);
+    const description = String(body.description ?? "");
+    await db.batch([
+      db.prepare("UPDATE time_entries SET project_id = ?, started_at = ?, ended_at = ?, duration_seconds = ?, description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .bind(projectId, `${date} 12:00:00`, `${date} 12:00:00`, durationSeconds, description, timeEntryId),
+      db.prepare("INSERT INTO audit_log (id, business_id, actor_id, entity_type, entity_id, action, details_json) VALUES (?, ?, ?, 'time_entry', ?, 'update', ?)")
+        .bind(crypto.randomUUID(), businessId, identity.ownerId, timeEntryId, JSON.stringify({ before: entry, after: { projectId, date, durationSeconds, description } })),
+    ]);
+  } else if (action === "deleteTimeEntry") {
+    const timeEntryId = String(body.id ?? "");
+    const entry = await db.prepare(`SELECT te.user_id AS userId, te.project_id AS projectId, te.started_at AS startedAt,
+      te.duration_seconds AS durationSeconds, te.description
+      FROM time_entries te JOIN projects p ON p.id = te.project_id
+      WHERE te.id = ? AND te.deleted_at IS NULL AND te.ended_at IS NOT NULL AND p.business_id = ?
+        AND (? = 'manager' OR te.user_id = ?) LIMIT 1`).bind(timeEntryId, businessId, identity.role, identity.ownerId)
+      .first<Record<string, unknown>>();
+    if (!entry) return Response.json({ error: "דיווח הזמן לא נמצא או עדיין פעיל" }, { status: 400 });
+    await db.batch([
+      db.prepare("UPDATE time_entries SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(timeEntryId),
+      db.prepare("INSERT INTO audit_log (id, business_id, actor_id, entity_type, entity_id, action, details_json) VALUES (?, ?, ?, 'time_entry', ?, 'delete', ?)")
+        .bind(crypto.randomUUID(), businessId, identity.ownerId, timeEntryId, JSON.stringify(entry)),
+    ]);
   } else if (action === "setAccountMode") {
     await db.prepare("UPDATE businesses SET work_mode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(body.accountMode === "employer" ? "employer" : "solo", businessId).run();
   } else if (action === "addClient") {
