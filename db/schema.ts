@@ -12,8 +12,21 @@ export const businesses = sqliteTable("businesses", {
 });
 
 export const users = sqliteTable("users", {
-  id: text("id").primaryKey(), businessId: text("business_id").notNull().references(() => businesses.id), email: text("email").notNull(), displayName: text("display_name").notNull(), role: text("role", { enum: ["manager", "employee"] }).notNull(), hourlyCost: real("hourly_cost"), isActive: integer("is_active", { mode: "boolean" }).notNull().default(true), ...timestamps,
-}, (table) => [uniqueIndex("users_business_email_unique").on(table.businessId, table.email)]);
+  id: text("id").primaryKey(), businessId: text("business_id").notNull().references(() => businesses.id), authUserId: text("auth_user_id"), email: text("email").notNull(), displayName: text("display_name").notNull(), role: text("role", { enum: ["manager", "employee"] }).notNull(), hourlyCost: real("hourly_cost"), isActive: integer("is_active", { mode: "boolean" }).notNull().default(true), ...timestamps,
+}, (table) => [uniqueIndex("users_business_email_unique").on(table.businessId, table.email), index("idx_users_auth_user_id").on(table.authUserId)]);
+
+export const employeeInvitations = sqliteTable("employee_invitations", {
+  id: text("id").primaryKey(),
+  businessId: text("business_id").notNull().references(() => businesses.id),
+  employeeId: text("employee_id").notNull().references(() => users.id),
+  email: text("email").notNull(),
+  token: text("token").notNull().unique(),
+  status: text("status", { enum: ["pending", "accepted", "revoked"] }).notNull().default("pending"),
+  expiresAt: text("expires_at").notNull(),
+  acceptedByAuthUserId: text("accepted_by_auth_user_id"),
+  acceptedAt: text("accepted_at"),
+  ...timestamps,
+}, (table) => [index("idx_employee_invitations_business_status").on(table.businessId, table.status)]);
 
 export const clients = sqliteTable("clients", {
   id: text("id").primaryKey(), businessId: text("business_id").notNull().references(() => businesses.id), name: text("name").notNull(), address: text("address").notNull().default(""), phone: text("phone"), email: text("email"), notes: text("notes"), ...timestamps,
