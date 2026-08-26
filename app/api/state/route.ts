@@ -55,10 +55,18 @@ async function ensureCoreSchema(db: D1Database) {
       id text PRIMARY KEY NOT NULL, project_id text NOT NULL, user_id text NOT NULL,
       hourly_cost_override real, assigned_at text DEFAULT CURRENT_TIMESTAMP NOT NULL
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS time_entries (
+      id text PRIMARY KEY NOT NULL, project_id text NOT NULL, user_id text NOT NULL,
+      started_at text NOT NULL, ended_at text, duration_seconds integer, description text DEFAULT '' NOT NULL,
+      source text NOT NULL, sync_status text DEFAULT 'synced' NOT NULL,
+      created_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, updated_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, deleted_at text
+    )`),
   ]);
   await db.batch([
     db.prepare("DROP INDEX IF EXISTS users_email_unique"),
     db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS users_business_email_unique ON users (business_id, email)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_time_entries_project_id ON time_entries (project_id)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_time_entries_user_active ON time_entries (user_id, ended_at)"),
   ]);
 }
 
@@ -79,12 +87,15 @@ async function ensureAccount(db: D1Database, identity: Identity) {
     db.prepare("INSERT OR IGNORE INTO projects (id, business_id, client_id, name, address, status, billing_method, fixed_price, client_hourly_rate) VALUES ('project-1', ?, 'client-1', 'שיפוץ דירת משפחת כהן', 'Rue de la Paix 14, Paris', 'active', 'fixed', 4200, 0)").bind(identity.businessId),
     db.prepare("INSERT OR IGNORE INTO projects (id, business_id, client_id, name, address, status, billing_method, fixed_price, client_hourly_rate) VALUES ('project-2', ?, 'client-2', 'Küchenmontage Berlin', 'Kantstraße 81, Berlin', 'waiting', 'hourly', 0, 45)").bind(identity.businessId),
     db.prepare("INSERT OR IGNORE INTO projects (id, business_id, client_id, name, address, status, billing_method, fixed_price, client_hourly_rate) VALUES ('project-3', ?, 'client-3', 'Office renovation — Atelier 27', 'Boulevard Voltaire 27, Paris', 'active', 'combined', 1500, 38)").bind(identity.businessId),
+    db.prepare("INSERT OR IGNORE INTO time_entries (id, project_id, user_id, started_at, ended_at, duration_seconds, description, source) VALUES ('demo-time-1', 'project-1', ?, '2026-08-20 08:00:00', '2026-08-20 08:00:00', 102600, 'עבודות שיפוץ', 'manual')").bind(identity.ownerId),
+    db.prepare("INSERT OR IGNORE INTO time_entries (id, project_id, user_id, started_at, ended_at, duration_seconds, description, source) VALUES ('demo-time-2', 'project-2', ?, '2026-08-21 08:00:00', '2026-08-21 08:00:00', 43200, 'Montage', 'manual')").bind(identity.ownerId),
+    db.prepare("INSERT OR IGNORE INTO time_entries (id, project_id, user_id, started_at, ended_at, duration_seconds, description, source) VALUES ('demo-time-3', 'project-3', ?, '2026-08-22 08:00:00', '2026-08-22 08:00:00', 149400, 'Renovation work', 'manual')").bind(identity.ownerId),
   ]);
 }
 
 async function loadState(db: D1Database, identity: Identity) {
   const businessId = identity.businessId;
-  const [business, clients, employees, projects] = await Promise.all([
+  const [business, clients, employees, projects, activeTimer, recentTimeEntries] = await Promise.all([
     db.prepare("SELECT work_mode AS workMode FROM businesses WHERE id = ? AND deleted_at IS NULL").bind(businessId).first<{ workMode: "solo" | "employer" }>(),
     db.prepare(`SELECT c.id, c.name, c.address, COALESCE(c.phone, '') AS phone, COALESCE(c.email, '') AS email, COUNT(p.id) AS projects
       FROM clients c LEFT JOIN projects p ON p.client_id = c.id AND p.deleted_at IS NULL
@@ -95,11 +106,24 @@ async function loadState(db: D1Database, identity: Identity) {
     db.prepare(`SELECT p.id, p.name, c.name AS client, p.address,
       CASE p.status WHEN 'waiting' THEN 'ממתין' ELSE 'בביצוע' END AS tag,
       p.billing_method AS billingType, p.fixed_price AS fixedPrice, p.client_hourly_rate AS hourlyRate,
-      COALESCE(GROUP_CONCAT(pw.user_id), '') AS workerIds
-      FROM projects p JOIN clients c ON c.id = p.client_id LEFT JOIN project_workers pw ON pw.project_id = p.id
-      WHERE p.business_id = ? AND p.deleted_at IS NULL GROUP BY p.id ORDER BY p.created_at DESC`).bind(businessId).all(),
+      COALESCE((SELECT GROUP_CONCAT(pw.user_id) FROM project_workers pw WHERE pw.project_id = p.id), '') AS workerIds,
+      COALESCE((SELECT SUM(COALESCE(te.duration_seconds, CAST((julianday('now') - julianday(te.started_at)) * 86400 AS INTEGER)))
+        FROM time_entries te WHERE te.project_id = p.id AND te.deleted_at IS NULL), 0) AS totalSeconds
+      FROM projects p JOIN clients c ON c.id = p.client_id
+      WHERE p.business_id = ? AND p.deleted_at IS NULL ORDER BY p.created_at DESC`).bind(businessId).all(),
+    db.prepare(`SELECT te.id, te.project_id AS projectId, te.started_at AS startedAt,
+      CAST((julianday('now') - julianday(te.started_at)) * 86400 AS INTEGER) AS elapsedSeconds
+      FROM time_entries te JOIN projects p ON p.id = te.project_id
+      WHERE te.user_id = ? AND te.ended_at IS NULL AND te.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
+      ORDER BY te.started_at DESC LIMIT 1`).bind(identity.ownerId, businessId).first(),
+    db.prepare(`SELECT te.id, te.project_id AS projectId, p.name AS projectName, te.started_at AS startedAt,
+      COALESCE(te.duration_seconds, CAST((julianday('now') - julianday(te.started_at)) * 86400 AS INTEGER)) AS durationSeconds,
+      te.description, te.source
+      FROM time_entries te JOIN projects p ON p.id = te.project_id
+      WHERE te.user_id = ? AND te.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
+      ORDER BY te.started_at DESC LIMIT 8`).bind(identity.ownerId, businessId).all(),
   ]);
-  return { accountMode: business?.workMode ?? "solo", user: { displayName: identity.displayName, email: identity.email, isLocal: identity.isLocal }, clients: clients.results, employees: employees.results, projects: projects.results };
+  return { accountMode: business?.workMode ?? "solo", user: { displayName: identity.displayName, email: identity.email, isLocal: identity.isLocal }, clients: clients.results, employees: employees.results, projects: projects.results, activeTimer, recentTimeEntries: recentTimeEntries.results };
 }
 
 async function prepareRequest(request: Request) {
@@ -125,7 +149,33 @@ export async function POST(request: Request) {
   const body = await request.json() as Record<string, unknown>;
   const action = String(body.action ?? "");
 
-  if (action === "setAccountMode") {
+  if (action === "startTimer") {
+    const projectId = String(body.projectId ?? "");
+    const project = await db.prepare("SELECT id FROM projects WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(projectId, businessId).first();
+    if (!project) return Response.json({ error: "הפרויקט לא נמצא" }, { status: 400 });
+    await db.prepare(`UPDATE time_entries SET ended_at = CURRENT_TIMESTAMP,
+      duration_seconds = MAX(1, CAST((julianday('now') - julianday(started_at)) * 86400 AS INTEGER)), updated_at = CURRENT_TIMESTAMP
+      WHERE user_id = ? AND ended_at IS NULL AND deleted_at IS NULL
+      AND project_id IN (SELECT id FROM projects WHERE business_id = ?)`)
+      .bind(identity.ownerId, businessId).run();
+    await db.prepare("INSERT INTO time_entries (id, project_id, user_id, started_at, source) VALUES (?, ?, ?, CURRENT_TIMESTAMP, 'timer')")
+      .bind(crypto.randomUUID(), projectId, identity.ownerId).run();
+  } else if (action === "stopTimer") {
+    await db.prepare(`UPDATE time_entries SET ended_at = CURRENT_TIMESTAMP,
+      duration_seconds = MAX(1, CAST((julianday('now') - julianday(started_at)) * 86400 AS INTEGER)), updated_at = CURRENT_TIMESTAMP
+      WHERE user_id = ? AND ended_at IS NULL AND deleted_at IS NULL
+      AND project_id IN (SELECT id FROM projects WHERE business_id = ?)`)
+      .bind(identity.ownerId, businessId).run();
+  } else if (action === "addManualTime") {
+    const projectId = String(body.projectId ?? "");
+    const project = await db.prepare("SELECT id FROM projects WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(projectId, businessId).first();
+    if (!project) return Response.json({ error: "הפרויקט לא נמצא" }, { status: 400 });
+    const durationSeconds = Math.round(Number(body.hours ?? 0) * 3600);
+    if (!Number.isFinite(durationSeconds) || durationSeconds < 60 || durationSeconds > 86400) return Response.json({ error: "משך הזמן אינו תקין" }, { status: 400 });
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(String(body.date ?? "")) ? String(body.date) : new Date().toISOString().slice(0, 10);
+    await db.prepare("INSERT INTO time_entries (id, project_id, user_id, started_at, ended_at, duration_seconds, description, source) VALUES (?, ?, ?, ?, ?, ?, ?, 'manual')")
+      .bind(crypto.randomUUID(), projectId, identity.ownerId, `${date} 12:00:00`, `${date} 12:00:00`, durationSeconds, String(body.description ?? "")).run();
+  } else if (action === "setAccountMode") {
     await db.prepare("UPDATE businesses SET work_mode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(body.accountMode === "employer" ? "employer" : "solo", businessId).run();
   } else if (action === "addClient") {
     await db.prepare("INSERT INTO clients (id, business_id, name, address, phone, email) VALUES (?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), businessId, String(body.name ?? ""), String(body.address ?? ""), String(body.phone ?? ""), String(body.email ?? "")).run();

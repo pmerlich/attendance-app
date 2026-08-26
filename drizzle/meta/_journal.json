@@ -22,6 +22,13 @@
       "when": 1787771241556,
       "tag": "0002_account_identity",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1787772377970,
+      "tag": "0003_time_tracking",
+      "breakpoints": true
     }
   ]
 }
