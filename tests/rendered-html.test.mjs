@@ -18,7 +18,7 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
   assert.match(html, /<html[^>]*lang="he"[^>]*dir="rtl"/i);
-  assert.match(html, /<title>זמן־שטח \| ניהול פרויקטים ושעות<\/title>/);
+  assert.match(html, /<title>מנהל עבודה \| פרויקטים, שעות וכספים<\/title>/);
   assert.match(html, /טיימר פעיל/);
   assert.match(html, /פרויקטים פעילים/);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Starter Project/);

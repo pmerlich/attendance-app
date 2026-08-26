@@ -3,9 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 
 const projects = [
-  { id: 1, name: "שיפוץ דירת משפחת כהן", client: "דניאל כהן", address: "Rue de la Paix 14, Paris", tag: "בביצוע", hours: "28.5", balance: "€1,840", color: "mint" },
-  { id: 2, name: "התקנת מטבח — לביא", client: "נועה לביא", address: "Avenue Victor Hugo 81, Paris", tag: "ממתין", hours: "12.0", balance: "€720", color: "amber" },
-  { id: 3, name: "משרד חדש — Atelier 27", client: "Atelier 27", address: "Boulevard Voltaire 27, Paris", tag: "בביצוע", hours: "41.5", balance: "€2,460", color: "blue" },
+  { id: 1, name: "שיפוץ דירת משפחת כהן", client: "דניאל כהן", address: "Rue de la Paix 14, Paris", tag: "בביצוע", billing: "מחיר גלובלי", hours: "28.5", balance: "€1,840", color: "mint" },
+  { id: 2, name: "Küchenmontage Berlin", client: "Bauhaus Projekt GmbH", address: "Kantstraße 81, Berlin", tag: "ממתין", billing: "לפי שעות", hours: "12.0", balance: "€720", color: "amber" },
+  { id: 3, name: "Office renovation — Atelier 27", client: "Atelier 27", address: "Boulevard Voltaire 27, Paris", tag: "בביצוע", billing: "גלובלי + שעות", hours: "41.5", balance: "€2,460", color: "blue" },
 ];
 
 function formatTime(seconds: number) {
@@ -20,6 +20,7 @@ export default function Home() {
   const [running, setRunning] = useState(true);
   const [seconds, setSeconds] = useState(2 * 3600 + 14 * 60 + 38);
   const [filter, setFilter] = useState("הכול");
+  const [query, setQuery] = useState("");
 
   useEffect(() => {
     if (!running) return;
@@ -27,7 +28,14 @@ export default function Home() {
     return () => window.clearInterval(interval);
   }, [running]);
 
-  const visibleProjects = useMemo(() => filter === "הכול" ? projects : projects.filter((project) => project.tag === filter), [filter]);
+  const visibleProjects = useMemo(() => {
+    const normalizedQuery = query.trim().toLocaleLowerCase();
+    return projects.filter((project) => {
+      const matchesStatus = filter === "הכול" || project.tag === filter;
+      const searchableText = `${project.name} ${project.client} ${project.address}`.toLocaleLowerCase();
+      return matchesStatus && searchableText.includes(normalizedQuery);
+    });
+  }, [filter, query]);
 
   function selectProject(project: (typeof projects)[number]) {
     setActiveProject(project);
@@ -38,7 +46,7 @@ export default function Home() {
   return (
     <main className="app-shell">
       <aside className="sidebar" aria-label="ניווט ראשי">
-        <div className="brand"><span className="brand-mark">ז׳</span><span>זמן־שטח</span></div>
+        <div className="brand"><span className="brand-mark">מ׳</span><span>מנהל עבודה</span></div>
         <nav>
           <a className="nav-item active" href="#dashboard"><span>⌂</span>ראשי</a>
           <a className="nav-item" href="#projects"><span>▦</span>פרויקטים</a>
@@ -71,12 +79,15 @@ export default function Home() {
 
         <section className="projects-section" id="projects">
           <div className="section-head"><div><h2>פרויקטים פעילים</h2><p>כל מה שקורה בשטח, במקום אחד</p></div><button className="text-button">לכל הפרויקטים ←</button></div>
-          <div className="filters" role="group" aria-label="סינון פרויקטים">{["הכול", "בביצוע", "ממתין"].map((item) => <button key={item} className={filter === item ? "selected" : ""} onClick={() => setFilter(item)}>{item}</button>)}</div>
+          <div className="projects-toolbar">
+            <div className="filters" role="group" aria-label="סינון פרויקטים">{["הכול", "בביצוע", "ממתין"].map((item) => <button key={item} className={filter === item ? "selected" : ""} onClick={() => setFilter(item)}>{item}</button>)}</div>
+            <label className="search-box"><span>⌕</span><input dir="auto" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="חיפוש בעברית, Deutsch or English" aria-label="חיפוש פרויקטים" /></label>
+          </div>
           <div className="project-list">
             {visibleProjects.map((project) => (
               <article className="project-row" key={project.id}>
                 <div className={`project-symbol ${project.color}`}>{project.name.charAt(0)}</div>
-                <div className="project-main"><strong>{project.name}</strong><span>{project.client} · {project.address}</span></div>
+                <div className="project-main"><strong dir="auto">{project.name}</strong><span dir="auto">{project.client} · {project.address}</span><small>{project.billing}</small></div>
                 <span className={`status ${project.color}`}>{project.tag}</span>
                 <div className="project-metric"><span>שעות</span><strong>{project.hours}</strong></div>
                 <div className="project-metric"><span>יתרה</span><strong>{project.balance}</strong></div>
@@ -92,4 +103,3 @@ export default function Home() {
     </main>
   );
 }
-
