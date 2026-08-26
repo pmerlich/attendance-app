@@ -49,7 +49,7 @@ export const timeEntries = sqliteTable("time_entries", {
 
 export const payments = sqliteTable("payments", {
   id: text("id").primaryKey(), projectId: text("project_id").notNull().references(() => projects.id), amount: real("amount").notNull(), paidAt: text("paid_at").notNull(), method: text("method"), note: text("note"), ...timestamps,
-});
+}, (table) => [index("idx_payments_project_id").on(table.projectId)]);
 
 export const expenses = sqliteTable("expenses", {
   id: text("id").primaryKey(), projectId: text("project_id").notNull().references(() => projects.id), amount: real("amount").notNull(), incurredAt: text("incurred_at").notNull(), category: text("category").notNull().default("materials"), billableToClient: integer("billable_to_client", { mode: "boolean" }).notNull().default(false), note: text("note"), ...timestamps,

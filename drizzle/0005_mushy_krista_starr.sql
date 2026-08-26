@@ -1,0 +1,1 @@
+CREATE INDEX `idx_payments_project_id` ON `payments` (`project_id`);

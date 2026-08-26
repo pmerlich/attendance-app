@@ -61,6 +61,11 @@ async function ensureCoreSchema(db: D1Database) {
       source text NOT NULL, sync_status text DEFAULT 'synced' NOT NULL,
       created_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, updated_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, deleted_at text
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS payments (
+      id text PRIMARY KEY NOT NULL, project_id text NOT NULL, amount real NOT NULL, paid_at text NOT NULL,
+      method text, note text, created_at text DEFAULT CURRENT_TIMESTAMP NOT NULL,
+      updated_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, deleted_at text
+    )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS employee_invitations (
       id text PRIMARY KEY NOT NULL, business_id text NOT NULL, employee_id text NOT NULL, email text NOT NULL,
       token text NOT NULL UNIQUE, status text DEFAULT 'pending' NOT NULL, expires_at text NOT NULL,
@@ -82,6 +87,7 @@ async function ensureCoreSchema(db: D1Database) {
     db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS users_business_email_unique ON users (business_id, email)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_time_entries_project_id ON time_entries (project_id)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_time_entries_user_active ON time_entries (user_id, ended_at)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_payments_project_id ON payments (project_id)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_users_auth_user_id ON users (auth_user_id)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_employee_invitations_business_status ON employee_invitations (business_id, status)"),
   ]);
@@ -119,6 +125,7 @@ async function loadState(db: D1Database, identity: Identity) {
       CASE p.status WHEN 'waiting' THEN 'ממתין' ELSE 'בביצוע' END AS tag,
       p.billing_method AS billingType, p.fixed_price AS fixedPrice, p.client_hourly_rate AS hourlyRate,
       COALESCE((SELECT GROUP_CONCAT(pw.user_id) FROM project_workers pw WHERE pw.project_id = p.id), '') AS workerIds,
+      COALESCE((SELECT SUM(pay.amount) FROM payments pay WHERE pay.project_id = p.id AND pay.deleted_at IS NULL), 0) AS paidAmount,
       COALESCE((SELECT SUM(COALESCE(te.duration_seconds, CAST((julianday('now') - julianday(te.started_at)) * 86400 AS INTEGER)))
         FROM time_entries te WHERE te.project_id = p.id AND te.deleted_at IS NULL), 0) AS totalSeconds
       FROM projects p JOIN clients c ON c.id = p.client_id
@@ -126,7 +133,7 @@ async function loadState(db: D1Database, identity: Identity) {
     : db.prepare(`SELECT p.id, p.name, c.name AS client, p.address,
       CASE p.status WHEN 'waiting' THEN 'ממתין' ELSE 'בביצוע' END AS tag,
       'hourly' AS billingType, 0 AS fixedPrice, COALESCE(pw.hourly_cost_override, u.hourly_cost, 0) AS hourlyRate,
-      '' AS workerIds,
+      '' AS workerIds, 0 AS paidAmount,
       COALESCE((SELECT SUM(COALESCE(te.duration_seconds, CAST((julianday('now') - julianday(te.started_at)) * 86400 AS INTEGER)))
         FROM time_entries te WHERE te.project_id = p.id AND te.user_id = ? AND te.deleted_at IS NULL), 0) AS totalSeconds
       FROM projects p JOIN clients c ON c.id = p.client_id
@@ -149,7 +156,14 @@ async function loadState(db: D1Database, identity: Identity) {
       WHERE te.user_id = ? AND te.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
         AND EXISTS (SELECT 1 FROM project_workers pw WHERE pw.project_id = p.id AND pw.user_id = ?)
       ORDER BY te.started_at DESC LIMIT 50`).bind(identity.ownerId, businessId, identity.ownerId).all();
-  const [business, clients, employees, projects, activeTimer, recentTimeEntries, deletedClients, deletedProjects, deletedEmployees] = await Promise.all([
+  const paymentsQuery = identity.role === "manager"
+    ? db.prepare(`SELECT pay.id, pay.project_id AS projectId, p.name AS projectName, c.name AS clientName,
+      pay.amount, pay.paid_at AS paidAt, COALESCE(pay.method, '') AS method, COALESCE(pay.note, '') AS note
+      FROM payments pay JOIN projects p ON p.id = pay.project_id JOIN clients c ON c.id = p.client_id
+      WHERE pay.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
+      ORDER BY pay.paid_at DESC, pay.created_at DESC LIMIT 100`).bind(businessId).all()
+    : managerOnly();
+  const [business, clients, employees, projects, activeTimer, recentTimeEntries, payments, deletedClients, deletedProjects, deletedEmployees] = await Promise.all([
     db.prepare("SELECT work_mode AS workMode FROM businesses WHERE id = ? AND deleted_at IS NULL").bind(businessId).first<{ workMode: "solo" | "employer" }>(),
     identity.role === "manager" ? db.prepare(`SELECT c.id, c.name, c.address, COALESCE(c.phone, '') AS phone, COALESCE(c.email, '') AS email, COUNT(p.id) AS projects
       FROM clients c LEFT JOIN projects p ON p.client_id = c.id AND p.deleted_at IS NULL
@@ -169,6 +183,7 @@ async function loadState(db: D1Database, identity: Identity) {
         AND (? = 'manager' OR EXISTS (SELECT 1 FROM project_workers pw WHERE pw.project_id = p.id AND pw.user_id = ?))
       ORDER BY te.started_at DESC LIMIT 1`).bind(identity.ownerId, businessId, identity.role, identity.ownerId).first(),
     timeEntriesQuery,
+    paymentsQuery,
     identity.role === "manager" ? db.prepare(`SELECT c.id, c.name, c.address, c.deleted_at AS deletedAt,
       COUNT(p.id) AS projectCount
       FROM clients c LEFT JOIN projects p ON p.client_id = c.id AND p.deleted_at IS NOT NULL
@@ -190,6 +205,7 @@ async function loadState(db: D1Database, identity: Identity) {
     projects: projects.results,
     activeTimer,
     recentTimeEntries: recentTimeEntries.results,
+    payments: payments.results,
     trash: { clients: deletedClients.results, projects: deletedProjects.results, employees: deletedEmployees.results },
   };
 }
@@ -251,7 +267,7 @@ export async function POST(request: Request) {
   if (!context) return Response.json({ error: "נדרשת התחברות" }, { status: 401 });
   const { db, identity } = context;
   const businessId = identity.businessId;
-  const managerActions = new Set(["setAccountMode", "addClient", "updateClient", "deleteClient", "addEmployee", "updateEmployee", "deleteEmployee", "addProject", "updateProject", "deleteProject", "restoreClient", "restoreProject", "restoreEmployee", "createEmployeeInvitation"]);
+  const managerActions = new Set(["setAccountMode", "addClient", "updateClient", "deleteClient", "addEmployee", "updateEmployee", "deleteEmployee", "addProject", "updateProject", "deleteProject", "restoreClient", "restoreProject", "restoreEmployee", "createEmployeeInvitation", "addPayment", "updatePayment", "deletePayment"]);
   if (identity.role !== "manager" && managerActions.has(action)) return Response.json({ error: "הפעולה זמינה למנהל בלבד" }, { status: 403 });
 
   if (action === "startTimer") {
@@ -329,6 +345,42 @@ export async function POST(request: Request) {
       db.prepare("UPDATE time_entries SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(timeEntryId),
       db.prepare("INSERT INTO audit_log (id, business_id, actor_id, entity_type, entity_id, action, details_json) VALUES (?, ?, ?, 'time_entry', ?, 'delete', ?)")
         .bind(crypto.randomUUID(), businessId, identity.ownerId, timeEntryId, JSON.stringify(entry)),
+    ]);
+  } else if (action === "addPayment" || action === "updatePayment") {
+    const projectId = String(body.projectId ?? "");
+    const project = await db.prepare("SELECT id FROM projects WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(projectId, businessId).first();
+    if (!project) return Response.json({ error: "הפרויקט לא נמצא" }, { status: 400 });
+    const amount = Number(body.amount ?? 0);
+    if (!Number.isFinite(amount) || amount <= 0 || amount > 100000000) return Response.json({ error: "סכום התשלום אינו תקין" }, { status: 400 });
+    const paidAt = /^\d{4}-\d{2}-\d{2}$/.test(String(body.paidAt ?? "")) ? String(body.paidAt) : new Date().toISOString().slice(0, 10);
+    const allowedMethods = new Set(["transfer", "cash", "card", "check", "other"]);
+    const method = allowedMethods.has(String(body.method ?? "")) ? String(body.method) : "other";
+    const note = String(body.note ?? "");
+    const paymentId = action === "updatePayment" ? String(body.id ?? "") : crypto.randomUUID();
+    if (action === "updatePayment") {
+      const existing = await db.prepare(`SELECT pay.id, pay.project_id AS projectId, pay.amount, pay.paid_at AS paidAt, pay.method, pay.note
+        FROM payments pay JOIN projects p ON p.id = pay.project_id
+        WHERE pay.id = ? AND pay.deleted_at IS NULL AND p.business_id = ? LIMIT 1`).bind(paymentId, businessId).first<Record<string, unknown>>();
+      if (!existing) return Response.json({ error: "התשלום לא נמצא" }, { status: 400 });
+      await db.batch([
+        db.prepare("UPDATE payments SET project_id = ?, amount = ?, paid_at = ?, method = ?, note = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(projectId, amount, paidAt, method, note, paymentId),
+        db.prepare("INSERT INTO audit_log (id, business_id, actor_id, entity_type, entity_id, action, details_json) VALUES (?, ?, ?, 'payment', ?, 'update', ?)").bind(crypto.randomUUID(), businessId, identity.ownerId, paymentId, JSON.stringify({ before: existing, after: { projectId, amount, paidAt, method, note } })),
+      ]);
+    } else {
+      await db.batch([
+        db.prepare("INSERT INTO payments (id, project_id, amount, paid_at, method, note) VALUES (?, ?, ?, ?, ?, ?)").bind(paymentId, projectId, amount, paidAt, method, note),
+        db.prepare("INSERT INTO audit_log (id, business_id, actor_id, entity_type, entity_id, action, details_json) VALUES (?, ?, ?, 'payment', ?, 'create', ?)").bind(crypto.randomUUID(), businessId, identity.ownerId, paymentId, JSON.stringify({ projectId, amount, paidAt, method, note })),
+      ]);
+    }
+  } else if (action === "deletePayment") {
+    const paymentId = String(body.id ?? "");
+    const payment = await db.prepare(`SELECT pay.id, pay.project_id AS projectId, pay.amount, pay.paid_at AS paidAt, pay.method, pay.note
+      FROM payments pay JOIN projects p ON p.id = pay.project_id
+      WHERE pay.id = ? AND pay.deleted_at IS NULL AND p.business_id = ? LIMIT 1`).bind(paymentId, businessId).first<Record<string, unknown>>();
+    if (!payment) return Response.json({ error: "התשלום לא נמצא" }, { status: 400 });
+    await db.batch([
+      db.prepare("UPDATE payments SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(paymentId),
+      db.prepare("INSERT INTO audit_log (id, business_id, actor_id, entity_type, entity_id, action, details_json) VALUES (?, ?, ?, 'payment', ?, 'delete', ?)").bind(crypto.randomUUID(), businessId, identity.ownerId, paymentId, JSON.stringify(payment)),
     ]);
   } else if (action === "setAccountMode") {
     await db.prepare("UPDATE businesses SET work_mode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(body.accountMode === "employer" ? "employer" : "solo", businessId).run();
