@@ -95,7 +95,7 @@ async function ensureAccount(db: D1Database, identity: Identity) {
 
 async function loadState(db: D1Database, identity: Identity) {
   const businessId = identity.businessId;
-  const [business, clients, employees, projects, activeTimer, recentTimeEntries] = await Promise.all([
+  const [business, clients, employees, projects, activeTimer, recentTimeEntries, deletedClients, deletedProjects, deletedEmployees] = await Promise.all([
     db.prepare("SELECT work_mode AS workMode FROM businesses WHERE id = ? AND deleted_at IS NULL").bind(businessId).first<{ workMode: "solo" | "employer" }>(),
     db.prepare(`SELECT c.id, c.name, c.address, COALESCE(c.phone, '') AS phone, COALESCE(c.email, '') AS email, COUNT(p.id) AS projects
       FROM clients c LEFT JOIN projects p ON p.client_id = c.id AND p.deleted_at IS NULL
@@ -122,8 +122,29 @@ async function loadState(db: D1Database, identity: Identity) {
       FROM time_entries te JOIN projects p ON p.id = te.project_id
       WHERE te.user_id = ? AND te.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
       ORDER BY te.started_at DESC LIMIT 8`).bind(identity.ownerId, businessId).all(),
+    db.prepare(`SELECT c.id, c.name, c.address, c.deleted_at AS deletedAt,
+      COUNT(p.id) AS projectCount
+      FROM clients c LEFT JOIN projects p ON p.client_id = c.id AND p.deleted_at IS NOT NULL
+      WHERE c.business_id = ? AND c.deleted_at IS NOT NULL
+      GROUP BY c.id ORDER BY c.deleted_at DESC`).bind(businessId).all(),
+    db.prepare(`SELECT p.id, p.name, COALESCE(c.name, '') AS clientName, p.address, p.deleted_at AS deletedAt
+      FROM projects p LEFT JOIN clients c ON c.id = p.client_id
+      WHERE p.business_id = ? AND p.deleted_at IS NOT NULL
+      ORDER BY p.deleted_at DESC`).bind(businessId).all(),
+    db.prepare(`SELECT id, display_name AS name, email, deleted_at AS deletedAt
+      FROM users WHERE business_id = ? AND role = 'employee' AND deleted_at IS NOT NULL
+      ORDER BY deleted_at DESC`).bind(businessId).all(),
   ]);
-  return { accountMode: business?.workMode ?? "solo", user: { displayName: identity.displayName, email: identity.email, isLocal: identity.isLocal }, clients: clients.results, employees: employees.results, projects: projects.results, activeTimer, recentTimeEntries: recentTimeEntries.results };
+  return {
+    accountMode: business?.workMode ?? "solo",
+    user: { displayName: identity.displayName, email: identity.email, isLocal: identity.isLocal },
+    clients: clients.results,
+    employees: employees.results,
+    projects: projects.results,
+    activeTimer,
+    recentTimeEntries: recentTimeEntries.results,
+    trash: { clients: deletedClients.results, projects: deletedProjects.results, employees: deletedEmployees.results },
+  };
 }
 
 async function prepareRequest(request: Request) {
@@ -209,6 +230,25 @@ export async function POST(request: Request) {
     }
   } else if (action === "deleteProject") {
     await db.prepare("UPDATE projects SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(String(body.id ?? ""), businessId).run();
+  } else if (action === "restoreClient") {
+    const clientId = String(body.id ?? "");
+    const statements = [
+      db.prepare("UPDATE clients SET deleted_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND deleted_at IS NOT NULL").bind(clientId, businessId),
+    ];
+    if (body.restoreProjects === true) {
+      statements.push(db.prepare("UPDATE projects SET deleted_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE client_id = ? AND business_id = ? AND deleted_at IS NOT NULL").bind(clientId, businessId));
+    }
+    await db.batch(statements);
+  } else if (action === "restoreProject") {
+    const projectId = String(body.id ?? "");
+    const project = await db.prepare("SELECT client_id AS clientId FROM projects WHERE id = ? AND business_id = ? AND deleted_at IS NOT NULL").bind(projectId, businessId).first<{ clientId: string }>();
+    if (!project) return Response.json({ error: "הפרויקט לא נמצא בסל המחזור" }, { status: 400 });
+    await db.batch([
+      db.prepare("UPDATE clients SET deleted_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ?").bind(project.clientId, businessId),
+      db.prepare("UPDATE projects SET deleted_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ?").bind(projectId, businessId),
+    ]);
+  } else if (action === "restoreEmployee") {
+    await db.prepare("UPDATE users SET deleted_at = NULL, is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND role = 'employee' AND deleted_at IS NOT NULL").bind(String(body.id ?? ""), businessId).run();
   } else {
     return Response.json({ error: "פעולה לא מוכרת" }, { status: 400 });
   }

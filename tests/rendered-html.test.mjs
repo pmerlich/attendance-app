@@ -27,5 +27,6 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.match(html, /עובד עצמאי/);
   assert.match(html, /עריכה/);
   assert.match(html, /לסל/);
+  assert.match(html, /סל המחזור/);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Starter Project/);
 });
