@@ -8,6 +8,27 @@
       "when": 1787767276491,
       "tag": "0000_last_korg",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1787769735276,
+      "tag": "0001_account_modes",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1787771241556,
+      "tag": "0002_account_identity",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1787772377970,
+      "tag": "0003_time_tracking",
+      "breakpoints": true
     }
   ]
 }

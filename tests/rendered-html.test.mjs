@@ -19,7 +19,14 @@ test("server-renders the Hebrew operations dashboard", async () => {
   const html = await response.text();
   assert.match(html, /<html[^>]*lang="he"[^>]*dir="rtl"/i);
   assert.match(html, /<title>מנהל עבודה \| פרויקטים, שעות וכספים<\/title>/);
-  assert.match(html, /טיימר פעיל/);
+  assert.match(html, /מוכן להתחלה/);
+  assert.match(html, /דיווח ידני/);
+  assert.match(html, /שעות שנשמרו/);
   assert.match(html, /פרויקטים פעילים/);
+  assert.match(html, /מצב עובד/);
+  assert.match(html, /עובד עצמאי/);
+  assert.match(html, /עריכה/);
+  assert.match(html, /לסל/);
+  assert.match(html, /סל המחזור/);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Starter Project/);
 });

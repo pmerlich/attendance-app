@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 const timestamps = {
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
@@ -8,12 +8,12 @@ const timestamps = {
 };
 
 export const businesses = sqliteTable("businesses", {
-  id: text("id").primaryKey(), name: text("name").notNull(), currency: text("currency").notNull().default("EUR"), ...timestamps,
+  id: text("id").primaryKey(), name: text("name").notNull(), workMode: text("work_mode", { enum: ["solo", "employer"] }).notNull().default("solo"), currency: text("currency").notNull().default("EUR"), ...timestamps,
 });
 
 export const users = sqliteTable("users", {
-  id: text("id").primaryKey(), businessId: text("business_id").notNull().references(() => businesses.id), email: text("email").notNull().unique(), displayName: text("display_name").notNull(), role: text("role", { enum: ["manager", "employee"] }).notNull(), hourlyCost: real("hourly_cost"), isActive: integer("is_active", { mode: "boolean" }).notNull().default(true), ...timestamps,
-});
+  id: text("id").primaryKey(), businessId: text("business_id").notNull().references(() => businesses.id), email: text("email").notNull(), displayName: text("display_name").notNull(), role: text("role", { enum: ["manager", "employee"] }).notNull(), hourlyCost: real("hourly_cost"), isActive: integer("is_active", { mode: "boolean" }).notNull().default(true), ...timestamps,
+}, (table) => [uniqueIndex("users_business_email_unique").on(table.businessId, table.email)]);
 
 export const clients = sqliteTable("clients", {
   id: text("id").primaryKey(), businessId: text("business_id").notNull().references(() => businesses.id), name: text("name").notNull(), address: text("address").notNull().default(""), phone: text("phone"), email: text("email"), notes: text("notes"), ...timestamps,
@@ -29,7 +29,10 @@ export const projectWorkers = sqliteTable("project_workers", {
 
 export const timeEntries = sqliteTable("time_entries", {
   id: text("id").primaryKey(), projectId: text("project_id").notNull().references(() => projects.id), userId: text("user_id").notNull().references(() => users.id), startedAt: text("started_at").notNull(), endedAt: text("ended_at"), durationSeconds: integer("duration_seconds"), description: text("description").notNull().default(""), source: text("source", { enum: ["timer", "manual"] }).notNull(), syncStatus: text("sync_status", { enum: ["synced", "pending", "conflict"] }).notNull().default("synced"), ...timestamps,
-});
+}, (table) => [
+  index("idx_time_entries_project_id").on(table.projectId),
+  index("idx_time_entries_user_active").on(table.userId, table.endedAt),
+]);
 
 export const payments = sqliteTable("payments", {
   id: text("id").primaryKey(), projectId: text("project_id").notNull().references(() => projects.id), amount: real("amount").notNull(), paidAt: text("paid_at").notNull(), method: text("method"), note: text("note"), ...timestamps,
