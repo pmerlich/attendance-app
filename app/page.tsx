@@ -5,9 +5,10 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 type View = "dashboard" | "projects" | "clients" | "employees" | "profile";
 type BillingType = "fixed" | "hourly" | "combined";
 type AccountMode = "solo" | "employer";
+type EntityType = "project" | "client" | "employee";
 
 type RecordId = string | number;
-type Client = { id: RecordId; name: string; address: string; phone: string; projects: number };
+type Client = { id: RecordId; name: string; address: string; phone: string; email?: string; projects: number };
 type Employee = { id: RecordId; name: string; email: string; hourlyCost: number; status: "פעיל" | "מושהה" };
 type Project = {
   id: RecordId;
@@ -19,6 +20,7 @@ type Project = {
   billing: string;
   fixedPrice: number;
   hourlyRate: number;
+  workerIds: string[];
   hours: string;
   balance: string;
   color: "mint" | "amber" | "blue";
@@ -37,9 +39,9 @@ const initialEmployees: Employee[] = [
 ];
 
 const initialProjects: Project[] = [
-  { id: 1, name: "שיפוץ דירת משפחת כהן", client: "דניאל כהן", address: "Rue de la Paix 14, Paris", tag: "בביצוע", billingType: "fixed", billing: "מחיר גלובלי", fixedPrice: 4200, hourlyRate: 0, hours: "28.5", balance: "€1,840", color: "mint" },
-  { id: 2, name: "Küchenmontage Berlin", client: "Bauhaus Projekt GmbH", address: "Kantstraße 81, Berlin", tag: "ממתין", billingType: "hourly", billing: "€45 לשעה", fixedPrice: 0, hourlyRate: 45, hours: "12.0", balance: "€720", color: "amber" },
-  { id: 3, name: "Office renovation — Atelier 27", client: "Atelier 27", address: "Boulevard Voltaire 27, Paris", tag: "בביצוע", billingType: "combined", billing: "€1,500 + €38 לשעה", fixedPrice: 1500, hourlyRate: 38, hours: "41.5", balance: "€2,460", color: "blue" },
+  { id: 1, name: "שיפוץ דירת משפחת כהן", client: "דניאל כהן", address: "Rue de la Paix 14, Paris", tag: "בביצוע", billingType: "fixed", billing: "מחיר גלובלי", fixedPrice: 4200, hourlyRate: 0, workerIds: ["employee-1"], hours: "28.5", balance: "€1,840", color: "mint" },
+  { id: 2, name: "Küchenmontage Berlin", client: "Bauhaus Projekt GmbH", address: "Kantstraße 81, Berlin", tag: "ממתין", billingType: "hourly", billing: "€45 לשעה", fixedPrice: 0, hourlyRate: 45, workerIds: ["employee-2"], hours: "12.0", balance: "€720", color: "amber" },
+  { id: 3, name: "Office renovation — Atelier 27", client: "Atelier 27", address: "Boulevard Voltaire 27, Paris", tag: "בביצוע", billingType: "combined", billing: "€1,500 + €38 לשעה", fixedPrice: 1500, hourlyRate: 38, workerIds: ["employee-1", "employee-3"], hours: "41.5", balance: "€2,460", color: "blue" },
 ];
 
 const viewTitles: Record<View, { eyebrow: string; title: string }> = {
@@ -63,7 +65,7 @@ function billingLabel(type: BillingType, fixedPrice: number, hourlyRate: number)
   return `€${fixedPrice.toLocaleString()} + €${hourlyRate.toLocaleString()} לשעה`;
 }
 
-type StoredProject = Pick<Project, "id" | "name" | "client" | "address" | "tag" | "billingType" | "fixedPrice" | "hourlyRate">;
+type StoredProject = Pick<Project, "id" | "name" | "client" | "address" | "tag" | "billingType" | "fixedPrice" | "hourlyRate"> & { workerIds: string | string[] };
 type StoredState = { accountMode: AccountMode; clients: Client[]; employees: Employee[]; projects: StoredProject[] };
 
 function presentProjects(items: StoredProject[]): Project[] {
@@ -73,6 +75,7 @@ function presentProjects(items: StoredProject[]): Project[] {
     billing: billingLabel(project.billingType, Number(project.fixedPrice), Number(project.hourlyRate)),
     fixedPrice: Number(project.fixedPrice),
     hourlyRate: Number(project.hourlyRate),
+    workerIds: Array.isArray(project.workerIds) ? project.workerIds : project.workerIds ? project.workerIds.split(",") : [],
     hours: project.id === "project-1" ? "28.5" : project.id === "project-2" ? "12.0" : project.id === "project-3" ? "41.5" : "0.0",
     balance: `€${Number(project.fixedPrice).toLocaleString()}`,
     color: colors[index % colors.length],
@@ -89,7 +92,8 @@ export default function Home() {
   const [seconds, setSeconds] = useState(2 * 3600 + 14 * 60 + 38);
   const [filter, setFilter] = useState("הכול");
   const [query, setQuery] = useState("");
-  const [modal, setModal] = useState<"project" | "client" | "employee" | null>(null);
+  const [modal, setModal] = useState<EntityType | null>(null);
+  const [editingId, setEditingId] = useState<RecordId | null>(null);
   const [billingType, setBillingType] = useState<BillingType>("fixed");
   const [accountMode, setAccountMode] = useState<AccountMode>("solo");
   const [syncState, setSyncState] = useState<"loading" | "saved" | "error">("loading");
@@ -147,12 +151,34 @@ export default function Home() {
     setView("dashboard");
   }
 
+  function openNew(type: EntityType) {
+    setEditingId(null);
+    setBillingType("fixed");
+    setModal(type);
+  }
+
+  function openEdit(type: EntityType, record: Client | Employee | Project) {
+    setEditingId(record.id);
+    if (type === "project") setBillingType((record as Project).billingType);
+    setModal(type);
+  }
+
+  async function removeRecord(type: EntityType, id: RecordId, name: string) {
+    const extra = type === "client" ? " גם הפרויקטים של הלקוח יועברו לסל המחזור." : "";
+    if (!window.confirm(`להעביר את ${name} לסל המחזור?${extra}`)) return;
+    try {
+      await saveAction(type === "client" ? "deleteClient" : type === "employee" ? "deleteEmployee" : "deleteProject", { id });
+      if (type === "project" && activeProject.id === id) setRunning(false);
+    } catch { setSyncState("error"); }
+  }
+
   async function addClient(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     try {
-      await saveAction("addClient", { name: data.get("name"), address: data.get("address"), phone: data.get("phone"), email: data.get("email") });
+      await saveAction(editingId ? "updateClient" : "addClient", { id: editingId, name: data.get("name"), address: data.get("address"), phone: data.get("phone"), email: data.get("email") });
       setModal(null);
+      setEditingId(null);
     } catch { setSyncState("error"); }
   }
 
@@ -160,8 +186,9 @@ export default function Home() {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     try {
-      await saveAction("addEmployee", { name: data.get("name"), email: data.get("email"), hourlyCost: Number(data.get("hourlyCost")) });
+      await saveAction(editingId ? "updateEmployee" : "addEmployee", { id: editingId, name: data.get("name"), email: data.get("email"), hourlyCost: Number(data.get("hourlyCost")) });
       setModal(null);
+      setEditingId(null);
     } catch { setSyncState("error"); }
   }
 
@@ -171,8 +198,9 @@ export default function Home() {
     const fixedPrice = Number(data.get("fixedPrice") || 0);
     const hourlyRate = Number(data.get("hourlyRate") || 0);
     try {
-      await saveAction("addProject", { name: data.get("name"), client: data.get("client"), address: data.get("address"), billingType, fixedPrice, hourlyRate, workers: data.getAll("workers") });
+      await saveAction(editingId ? "updateProject" : "addProject", { id: editingId, name: data.get("name"), client: data.get("client"), address: data.get("address"), billingType, fixedPrice, hourlyRate, workers: data.getAll("workers") });
       setModal(null);
+      setEditingId(null);
       setView("projects");
     } catch { setSyncState("error"); }
   }
@@ -194,13 +222,13 @@ export default function Home() {
       <section className="content">
         <header className="topbar">
           <div><p className="eyebrow">{viewTitles[view].eyebrow}</p><h1>{viewTitles[view].title}</h1></div>
-          <div className="top-actions"><span className="account-badge">{accountMode === "solo" ? "מצב עובד" : "מצב מעסיק"}</span><span className={`connection ${syncState === "error" ? "sync-error" : ""}`}><i /> {syncState === "loading" ? "שומר…" : syncState === "error" ? "בעיה בשמירה" : "נשמר"}</span><button className="icon-button profile-button" onClick={() => navigate("profile")} aria-label="פתיחת הפרופיל">מ</button>{view !== "profile" && <button className="primary-button" onClick={() => setModal(view === "clients" ? "client" : view === "employees" ? "employee" : "project")}><span>＋</span> {view === "clients" ? "לקוח חדש" : view === "employees" ? "עובד חדש" : "פרויקט חדש"}</button>}</div>
+          <div className="top-actions"><span className="account-badge">{accountMode === "solo" ? "מצב עובד" : "מצב מעסיק"}</span><span className={`connection ${syncState === "error" ? "sync-error" : ""}`}><i /> {syncState === "loading" ? "שומר…" : syncState === "error" ? "בעיה בשמירה" : "נשמר"}</span><button className="icon-button profile-button" onClick={() => navigate("profile")} aria-label="פתיחת הפרופיל">מ</button>{view !== "profile" && <button className="primary-button" onClick={() => openNew(view === "clients" ? "client" : view === "employees" ? "employee" : "project")}><span>＋</span> {view === "clients" ? "לקוח חדש" : view === "employees" ? "עובד חדש" : "פרויקט חדש"}</button>}</div>
         </header>
 
-        {view === "dashboard" && <Dashboard accountMode={accountMode} activeProject={activeProject} running={running} seconds={seconds} projects={visibleProjects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} setRunning={setRunning} setSeconds={setSeconds} selectProject={selectProject} showAll={() => navigate("projects")} />}
-        {view === "projects" && <ProjectsView projects={visibleProjects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} activeProject={activeProject} running={running} selectProject={selectProject} openNew={() => setModal("project")} />}
-        {view === "clients" && <ClientsView clients={clients} query={query} setQuery={setQuery} openNew={() => setModal("client")} />}
-        {view === "employees" && <EmployeesView employees={employees} openNew={() => setModal("employee")} />}
+        {view === "dashboard" && <Dashboard accountMode={accountMode} activeProject={activeProject} running={running} seconds={seconds} projects={visibleProjects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} setRunning={setRunning} setSeconds={setSeconds} selectProject={selectProject} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} showAll={() => navigate("projects")} />}
+        {view === "projects" && <ProjectsView projects={visibleProjects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} activeProject={activeProject} running={running} selectProject={selectProject} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} openNew={() => openNew("project")} />}
+        {view === "clients" && <ClientsView clients={clients} query={query} setQuery={setQuery} openNew={() => openNew("client")} editClient={(client) => openEdit("client", client)} removeClient={(client) => void removeRecord("client", client.id, client.name)} />}
+        {view === "employees" && <EmployeesView employees={employees} openNew={() => openNew("employee")} editEmployee={(employee) => openEdit("employee", employee)} removeEmployee={(employee) => void removeRecord("employee", employee.id, employee.name)} />}
         {view === "profile" && <ProfileView accountMode={accountMode} setAccountMode={(mode) => { setAccountMode(mode); void saveAction("setAccountMode", { accountMode: mode }).catch(() => setSyncState("error")); }} />}
       </section>
 
@@ -212,18 +240,18 @@ export default function Home() {
         {accountMode === "employer" ? <button className={view === "employees" ? "active" : ""} onClick={() => navigate("employees")}><span>♟</span>עובדים</button> : <button className={view === "profile" ? "active" : ""} onClick={() => navigate("profile")}><span>●</span>פרופיל</button>}
       </nav>
 
-      {modal && <Modal title={modal === "project" ? "פרויקט חדש" : modal === "client" ? "לקוח חדש" : "עובד חדש"} close={() => setModal(null)}>
-        {modal === "project" && <ProjectForm accountMode={accountMode} clients={clients} employees={employees} billingType={billingType} setBillingType={setBillingType} submit={addProject} />}
-        {modal === "client" && <ClientForm submit={addClient} />}
-        {modal === "employee" && <EmployeeForm submit={addEmployee} />}
+      {modal && <Modal title={`${editingId ? "עריכת" : modal === "project" ? "פרויקט" : modal === "client" ? "לקוח" : "עובד"} ${editingId ? (modal === "project" ? "פרויקט" : modal === "client" ? "לקוח" : "עובד") : "חדש"}`} close={() => { setModal(null); setEditingId(null); }}>
+        {modal === "project" && <ProjectForm accountMode={accountMode} clients={clients} employees={employees} billingType={billingType} setBillingType={setBillingType} initial={projects.find((project) => project.id === editingId)} submit={addProject} />}
+        {modal === "client" && <ClientForm initial={clients.find((client) => client.id === editingId)} submit={addClient} />}
+        {modal === "employee" && <EmployeeForm initial={employees.find((employee) => employee.id === editingId)} submit={addEmployee} />}
       </Modal>}
     </main>
   );
 }
 
-type ProjectListProps = { projects: Project[]; activeProject: Project; running: boolean; selectProject: (project: Project) => void };
+type ProjectListProps = { projects: Project[]; activeProject: Project; running: boolean; selectProject: (project: Project) => void; editProject: (project: Project) => void; removeProject: (project: Project) => void };
 
-function ProjectList({ projects, activeProject, running, selectProject }: ProjectListProps) {
+function ProjectList({ projects, activeProject, running, selectProject, editProject, removeProject }: ProjectListProps) {
   if (!projects.length) return <div className="empty-state"><strong>לא נמצאו פרויקטים</strong><span>נסו חיפוש אחר או שנו את הסינון.</span></div>;
   return <div className="project-list">{projects.map((project) => <article className="project-row" key={project.id}>
     <div className={`project-symbol ${project.color}`}>{project.name.charAt(0)}</div>
@@ -232,7 +260,7 @@ function ProjectList({ projects, activeProject, running, selectProject }: Projec
     <div className="project-metric"><span>שעות</span><strong>{project.hours}</strong></div>
     <div className="project-metric"><span>יתרה</span><strong>{project.balance}</strong></div>
     <button className="start-button" onClick={() => selectProject(project)} disabled={running && activeProject.id === project.id}>{running && activeProject.id === project.id ? "עובדים עכשיו" : "התחלת עבודה"}</button>
-    <button className="more-button" aria-label={`אפשרויות עבור ${project.name}`}>•••</button>
+    <div className="record-actions"><button type="button" onClick={() => editProject(project)}>עריכה</button><button type="button" className="danger" onClick={() => removeProject(project)}>לסל</button></div>
   </article>)}</div>;
 }
 
@@ -240,25 +268,25 @@ function ProjectToolbar({ filter, setFilter, query, setQuery }: { filter: string
   return <div className="projects-toolbar"><div className="filters" role="group" aria-label="סינון פרויקטים">{["הכול", "בביצוע", "ממתין"].map((item) => <button key={item} className={filter === item ? "selected" : ""} onClick={() => setFilter(item)}>{item}</button>)}</div><label className="search-box"><span>⌕</span><input dir="auto" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="חיפוש בעברית, Deutsch or English" aria-label="חיפוש פרויקטים" /></label></div>;
 }
 
-function Dashboard({ accountMode, activeProject, running, seconds, projects, filter, setFilter, query, setQuery, setRunning, setSeconds, selectProject, showAll }: ProjectListProps & { accountMode: AccountMode; seconds: number; filter: string; setFilter: (value: string) => void; query: string; setQuery: (value: string) => void; setRunning: (value: boolean | ((current: boolean) => boolean)) => void; setSeconds: (value: number) => void; showAll: () => void }) {
+function Dashboard({ accountMode, activeProject, running, seconds, projects, filter, setFilter, query, setQuery, setRunning, setSeconds, selectProject, editProject, removeProject, showAll }: ProjectListProps & { accountMode: AccountMode; seconds: number; filter: string; setFilter: (value: string) => void; query: string; setQuery: (value: string) => void; setRunning: (value: boolean | ((current: boolean) => boolean)) => void; setSeconds: (value: number) => void; showAll: () => void }) {
   return <>
     <section className="timer-card" aria-label="טיימר עבודה פעיל"><div className="timer-glow" /><div className="timer-project"><span className="live-pill"><i /> {running ? "טיימר פעיל" : "הטיימר מושהה"}</span><h2 dir="auto">{activeProject.name}</h2><p dir="auto">♙ {activeProject.client}<span>·</span>⌖ {activeProject.address}</p></div><div className="timer-clock"><span>{formatTime(seconds)}</span><small>התחיל היום ב־08:12</small></div><div className="timer-actions"><button className="stop-button" onClick={() => { setRunning(false); setSeconds(0); }}><span>■</span> סיום עבודה</button><button className="pause-button" onClick={() => setRunning((value) => !value)}><span>{running ? "Ⅱ" : "▶"}</span> {running ? "השהיה" : "המשך"}</button></div></section>
     <section className="stats-grid" aria-label="סיכום חודשי"><article><div className="stat-icon green">◷</div><div><span>שעות החודש</span><strong>142.5</strong><small className="up">↑ 12% מהחודש הקודם</small></div></article><article><div className="stat-icon violet">€</div><div><span>{accountMode === "solo" ? "השכר הצפוי" : "הכנסה צפויה"}</span><strong>€18,420</strong><small>ב־6 פרויקטים פעילים</small></div></article><article><div className="stat-icon amber">◎</div><div><span>ממתין לתשלום</span><strong>€4,280</strong><small className="warning">3 יתרות פתוחות</small></div></article><article><div className="stat-icon blue">↗</div><div><span>{accountMode === "solo" ? "ממוצע לשעת עבודה" : "רווח צפוי"}</span><strong>{accountMode === "solo" ? "€129" : "€9,760"}</strong><small className="up">{accountMode === "solo" ? "לפי הפרויקטים הפעילים" : "53% מההכנסות"}</small></div></article></section>
-    <section className="projects-section"><div className="section-head"><div><h2>פרויקטים פעילים</h2><p>כל מה שקורה בשטח, במקום אחד</p></div><button className="text-button" onClick={showAll}>לכל הפרויקטים ←</button></div><ProjectToolbar filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} /><ProjectList projects={projects} activeProject={activeProject} running={running} selectProject={selectProject} /></section>
+    <section className="projects-section"><div className="section-head"><div><h2>פרויקטים פעילים</h2><p>כל מה שקורה בשטח, במקום אחד</p></div><button className="text-button" onClick={showAll}>לכל הפרויקטים ←</button></div><ProjectToolbar filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} /><ProjectList projects={projects} activeProject={activeProject} running={running} selectProject={selectProject} editProject={editProject} removeProject={removeProject} /></section>
   </>;
 }
 
-function ProjectsView({ projects, filter, setFilter, query, setQuery, activeProject, running, selectProject, openNew }: ProjectListProps & { filter: string; setFilter: (value: string) => void; query: string; setQuery: (value: string) => void; openNew: () => void }) {
-  return <section className="page-card"><div className="section-head"><div><h2>כל הפרויקטים</h2><p>{projects.length} פרויקטים מוצגים</p></div><button className="mobile-primary" onClick={openNew}>＋ פרויקט חדש</button></div><ProjectToolbar filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} /><ProjectList projects={projects} activeProject={activeProject} running={running} selectProject={selectProject} /></section>;
+function ProjectsView({ projects, filter, setFilter, query, setQuery, activeProject, running, selectProject, editProject, removeProject, openNew }: ProjectListProps & { filter: string; setFilter: (value: string) => void; query: string; setQuery: (value: string) => void; openNew: () => void }) {
+  return <section className="page-card"><div className="section-head"><div><h2>כל הפרויקטים</h2><p>{projects.length} פרויקטים מוצגים</p></div><button className="mobile-primary" onClick={openNew}>＋ פרויקט חדש</button></div><ProjectToolbar filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} /><ProjectList projects={projects} activeProject={activeProject} running={running} selectProject={selectProject} editProject={editProject} removeProject={removeProject} /></section>;
 }
 
-function ClientsView({ clients, query, setQuery, openNew }: { clients: Client[]; query: string; setQuery: (value: string) => void; openNew: () => void }) {
+function ClientsView({ clients, query, setQuery, openNew, editClient, removeClient }: { clients: Client[]; query: string; setQuery: (value: string) => void; openNew: () => void; editClient: (client: Client) => void; removeClient: (client: Client) => void }) {
   const visible = clients.filter((client) => `${client.name} ${client.address}`.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
-  return <section className="page-card"><div className="section-head"><div><h2>כל הלקוחות</h2><p>{clients.length} לקוחות במערכת</p></div><button className="mobile-primary" onClick={openNew}>＋ לקוח חדש</button></div><label className="search-box standalone"><span>⌕</span><input dir="auto" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="חיפוש לפי שם או כתובת" /></label><div className="record-grid">{visible.map((client) => <article className="record-card" key={client.id}><div className="record-avatar">{client.name.charAt(0)}</div><div className="record-copy"><strong dir="auto">{client.name}</strong><span dir="auto">⌖ {client.address}</span><small dir="ltr">{client.phone}</small></div><div className="record-meta"><strong>{client.projects}</strong><span>פרויקטים</span></div><button className="more-button">•••</button></article>)}</div></section>;
+  return <section className="page-card"><div className="section-head"><div><h2>כל הלקוחות</h2><p>{clients.length} לקוחות במערכת</p></div><button className="mobile-primary" onClick={openNew}>＋ לקוח חדש</button></div><label className="search-box standalone"><span>⌕</span><input dir="auto" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="חיפוש לפי שם או כתובת" /></label><div className="record-grid">{visible.map((client) => <article className="record-card" key={client.id}><div className="record-avatar">{client.name.charAt(0)}</div><div className="record-copy"><strong dir="auto">{client.name}</strong><span dir="auto">⌖ {client.address}</span><small dir="ltr">{client.phone}</small></div><div className="record-meta"><strong>{client.projects}</strong><span>פרויקטים</span></div><div className="record-actions"><button type="button" onClick={() => editClient(client)}>עריכה</button><button type="button" className="danger" onClick={() => removeClient(client)}>לסל</button></div></article>)}</div></section>;
 }
 
-function EmployeesView({ employees, openNew }: { employees: Employee[]; openNew: () => void }) {
-  return <section className="page-card"><div className="section-head"><div><h2>הצוות</h2><p>{employees.filter((employee) => employee.status === "פעיל").length} עובדים פעילים</p></div><button className="mobile-primary" onClick={openNew}>＋ עובד חדש</button></div><div className="employee-grid">{employees.map((employee, index) => <article className="employee-card" key={employee.id}><div className={`employee-avatar shade-${index % 3}`}>{employee.name.charAt(0)}</div><span className="employee-status"><i />{employee.status}</span><h3 dir="auto">{employee.name}</h3><p dir="ltr">{employee.email}</p><div className="employee-rate"><span>עלות לשעה</span><strong>€{employee.hourlyCost}</strong></div><button className="secondary-button">פרטי עובד</button></article>)}</div></section>;
+function EmployeesView({ employees, openNew, editEmployee, removeEmployee }: { employees: Employee[]; openNew: () => void; editEmployee: (employee: Employee) => void; removeEmployee: (employee: Employee) => void }) {
+  return <section className="page-card"><div className="section-head"><div><h2>הצוות</h2><p>{employees.filter((employee) => employee.status === "פעיל").length} עובדים פעילים</p></div><button className="mobile-primary" onClick={openNew}>＋ עובד חדש</button></div><div className="employee-grid">{employees.map((employee, index) => <article className="employee-card" key={employee.id}><div className={`employee-avatar shade-${index % 3}`}>{employee.name.charAt(0)}</div><span className="employee-status"><i />{employee.status}</span><h3 dir="auto">{employee.name}</h3><p dir="ltr">{employee.email}</p><div className="employee-rate"><span>עלות לשעה</span><strong>€{employee.hourlyCost}</strong></div><div className="card-actions"><button type="button" className="secondary-button" onClick={() => editEmployee(employee)}>עריכת עובד</button><button type="button" className="secondary-button danger" onClick={() => removeEmployee(employee)}>לסל המחזור</button></div></article>)}</div></section>;
 }
 
 function ProfileView({ accountMode, setAccountMode }: { accountMode: AccountMode; setAccountMode: (mode: AccountMode) => void }) {
@@ -273,17 +301,17 @@ function Field({ label, children, wide = false }: { label: string; children: Rea
   return <label className={`form-field ${wide ? "wide" : ""}`}><span>{label}</span>{children}</label>;
 }
 
-function ClientForm({ submit }: { submit: (event: FormEvent<HTMLFormElement>) => void }) {
-  return <form className="entity-form" onSubmit={submit}><div className="form-grid"><Field label="שם הלקוח" wide><input name="name" dir="auto" required placeholder="לדוגמה: Müller Bau GmbH" /></Field><Field label="כתובת" wide><input name="address" dir="auto" required placeholder="רחוב, מספר ועיר" /></Field><Field label="טלפון"><input name="phone" dir="ltr" placeholder="+49..." /></Field><Field label="אימייל"><input name="email" dir="ltr" type="email" placeholder="name@example.com" /></Field></div><FormActions label="שמירת לקוח" /></form>;
+function ClientForm({ initial, submit }: { initial?: Client; submit: (event: FormEvent<HTMLFormElement>) => void }) {
+  return <form className="entity-form" onSubmit={submit}><div className="form-grid"><Field label="שם הלקוח" wide><input name="name" dir="auto" required defaultValue={initial?.name} placeholder="לדוגמה: Müller Bau GmbH" /></Field><Field label="כתובת" wide><input name="address" dir="auto" required defaultValue={initial?.address} placeholder="רחוב, מספר ועיר" /></Field><Field label="טלפון"><input name="phone" dir="ltr" defaultValue={initial?.phone} placeholder="+49..." /></Field><Field label="אימייל"><input name="email" dir="ltr" type="email" defaultValue={initial?.email} placeholder="name@example.com" /></Field></div><FormActions label={initial ? "שמירת שינויים" : "שמירת לקוח"} /></form>;
 }
 
-function EmployeeForm({ submit }: { submit: (event: FormEvent<HTMLFormElement>) => void }) {
-  return <form className="entity-form" onSubmit={submit}><div className="form-grid"><Field label="שם העובד" wide><input name="name" dir="auto" required placeholder="שם בעברית, Deutsch or English" /></Field><Field label="אימייל"><input name="email" dir="ltr" type="email" required placeholder="name@example.com" /></Field><Field label="עלות לשעה (EUR)"><input name="hourlyCost" dir="ltr" type="number" min="0" step="0.01" required placeholder="0.00" /></Field></div><p className="form-note">זהו הסכום שמגיע לעובד לשעה, ולא התעריף שבו מחייבים את הלקוח.</p><FormActions label="הוספת עובד" /></form>;
+function EmployeeForm({ initial, submit }: { initial?: Employee; submit: (event: FormEvent<HTMLFormElement>) => void }) {
+  return <form className="entity-form" onSubmit={submit}><div className="form-grid"><Field label="שם העובד" wide><input name="name" dir="auto" required defaultValue={initial?.name} placeholder="שם בעברית, Deutsch or English" /></Field><Field label="אימייל"><input name="email" dir="ltr" type="email" required defaultValue={initial?.email} placeholder="name@example.com" /></Field><Field label="עלות לשעה (EUR)"><input name="hourlyCost" dir="ltr" type="number" min="0" step="0.01" required defaultValue={initial?.hourlyCost} placeholder="0.00" /></Field></div><p className="form-note">זהו הסכום שמגיע לעובד לשעה, ולא התעריף שבו מחייבים את הלקוח.</p><FormActions label={initial ? "שמירת שינויים" : "הוספת עובד"} /></form>;
 }
 
-function ProjectForm({ accountMode, clients, employees, billingType, setBillingType, submit }: { accountMode: AccountMode; clients: Client[]; employees: Employee[]; billingType: BillingType; setBillingType: (type: BillingType) => void; submit: (event: FormEvent<HTMLFormElement>) => void }) {
+function ProjectForm({ accountMode, clients, employees, billingType, setBillingType, initial, submit }: { accountMode: AccountMode; clients: Client[]; employees: Employee[]; billingType: BillingType; setBillingType: (type: BillingType) => void; initial?: Project; submit: (event: FormEvent<HTMLFormElement>) => void }) {
   const isSolo = accountMode === "solo";
-  return <form className="entity-form project-form" onSubmit={submit}><div className="form-grid"><Field label="שם הפרויקט" wide><input name="name" dir="auto" required placeholder="שם חופשי בעברית, Deutsch or English" /></Field><Field label="לקוח"><select name="client" required defaultValue=""><option value="" disabled>בחירת לקוח</option>{clients.map((client) => <option key={client.id}>{client.name}</option>)}</select></Field><Field label="כתובת"><input name="address" dir="auto" required placeholder="כתובת העבודה" /></Field></div><div className="form-context"><strong>{isSolo ? "התשלום שמגיע לי בפרויקט" : "החיוב של הלקוח בפרויקט"}</strong><span>{isSolo ? "אין כאן מחיר ללקוח מול מחיר לעובד—רק הסכום שאתה מקבל." : "הסכומים כאן הם המחיר ללקוח. עלויות העובדים מחושבות בנפרד."}</span></div><fieldset className="billing-options"><legend>{isSolo ? "איך משלמים לי?" : "איך הלקוח משלם?"}</legend><label className={billingType === "fixed" ? "selected" : ""}><input type="radio" name="billingType" checked={billingType === "fixed"} onChange={() => setBillingType("fixed")} /><strong>מחיר גלובלי</strong><span>סכום קבוע שאינו תלוי בשעות</span></label><label className={billingType === "hourly" ? "selected" : ""}><input type="radio" name="billingType" checked={billingType === "hourly"} onChange={() => setBillingType("hourly")} /><strong>לפי שעה</strong><span>מספר שעות כפול {isSolo ? "השכר שלך" : "תעריף הלקוח"}</span></label><label className={billingType === "combined" ? "selected" : ""}><input type="radio" name="billingType" checked={billingType === "combined"} onChange={() => setBillingType("combined")} /><strong>גלובלי + שעות</strong><span>סכום בסיס ובנוסף תשלום שעתי</span></label></fieldset><div className="form-grid conditional-fields">{(billingType === "fixed" || billingType === "combined") && <Field label={billingType === "fixed" ? `${isSolo ? "השכר" : "המחיר"} הגלובלי (EUR)` : "סכום הבסיס (EUR)"}><input name="fixedPrice" dir="ltr" type="number" min="0" step="0.01" required placeholder="0.00" /></Field>}{(billingType === "hourly" || billingType === "combined") && <Field label={`${isSolo ? "השכר שלי" : "תעריף ללקוח"} לשעה (EUR)`}><input name="hourlyRate" dir="ltr" type="number" min="0" step="0.01" required placeholder="0.00" /></Field>}</div>{!isSolo && <fieldset className="worker-picker"><legend>שיוך עובדים</legend>{employees.map((employee) => <label key={employee.id}><input type="checkbox" name="workers" value={employee.id} /><span className="mini-avatar">{employee.name.charAt(0)}</span><span dir="auto">{employee.name}</span><small>€{employee.hourlyCost}/שעה</small></label>)}</fieldset>}<FormActions label="יצירת פרויקט" /></form>;
+  return <form className="entity-form project-form" onSubmit={submit}><div className="form-grid"><Field label="שם הפרויקט" wide><input name="name" dir="auto" required defaultValue={initial?.name} placeholder="שם חופשי בעברית, Deutsch or English" /></Field><Field label="לקוח"><select name="client" required defaultValue={initial?.client ?? ""}><option value="" disabled>בחירת לקוח</option>{clients.map((client) => <option key={client.id}>{client.name}</option>)}</select></Field><Field label="כתובת"><input name="address" dir="auto" required defaultValue={initial?.address} placeholder="כתובת העבודה" /></Field></div><div className="form-context"><strong>{isSolo ? "התשלום שמגיע לי בפרויקט" : "החיוב של הלקוח בפרויקט"}</strong><span>{isSolo ? "אין כאן מחיר ללקוח מול מחיר לעובד—רק הסכום שאתה מקבל." : "הסכומים כאן הם המחיר ללקוח. עלויות העובדים מחושבות בנפרד."}</span></div><fieldset className="billing-options"><legend>{isSolo ? "איך משלמים לי?" : "איך הלקוח משלם?"}</legend><label className={billingType === "fixed" ? "selected" : ""}><input type="radio" name="billingType" checked={billingType === "fixed"} onChange={() => setBillingType("fixed")} /><strong>מחיר גלובלי</strong><span>סכום קבוע שאינו תלוי בשעות</span></label><label className={billingType === "hourly" ? "selected" : ""}><input type="radio" name="billingType" checked={billingType === "hourly"} onChange={() => setBillingType("hourly")} /><strong>לפי שעה</strong><span>מספר שעות כפול {isSolo ? "השכר שלך" : "תעריף הלקוח"}</span></label><label className={billingType === "combined" ? "selected" : ""}><input type="radio" name="billingType" checked={billingType === "combined"} onChange={() => setBillingType("combined")} /><strong>גלובלי + שעות</strong><span>סכום בסיס ובנוסף תשלום שעתי</span></label></fieldset><div className="form-grid conditional-fields">{(billingType === "fixed" || billingType === "combined") && <Field label={billingType === "fixed" ? `${isSolo ? "השכר" : "המחיר"} הגלובלי (EUR)` : "סכום הבסיס (EUR)"}><input name="fixedPrice" dir="ltr" type="number" min="0" step="0.01" required defaultValue={initial?.fixedPrice} placeholder="0.00" /></Field>}{(billingType === "hourly" || billingType === "combined") && <Field label={`${isSolo ? "השכר שלי" : "תעריף ללקוח"} לשעה (EUR)`}><input name="hourlyRate" dir="ltr" type="number" min="0" step="0.01" required defaultValue={initial?.hourlyRate} placeholder="0.00" /></Field>}</div>{!isSolo && <fieldset className="worker-picker"><legend>שיוך עובדים</legend>{employees.map((employee) => <label key={employee.id}><input type="checkbox" name="workers" value={employee.id} defaultChecked={initial?.workerIds.includes(String(employee.id))} /><span className="mini-avatar">{employee.name.charAt(0)}</span><span dir="auto">{employee.name}</span><small>€{employee.hourlyCost}/שעה</small></label>)}</fieldset>}<FormActions label={initial ? "שמירת שינויים" : "יצירת פרויקט"} /></form>;
 }
 
 function FormActions({ label }: { label: string }) {
