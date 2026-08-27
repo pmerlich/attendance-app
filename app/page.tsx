@@ -3,11 +3,11 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 
-type View = "dashboard" | "projects" | "time" | "payments" | "clients" | "employees" | "trash" | "profile";
+type View = "dashboard" | "projects" | "time" | "payments" | "expenses" | "clients" | "employees" | "trash" | "profile";
 type BillingType = "fixed" | "hourly" | "combined";
 type AccountMode = "solo" | "employer";
 type EntityType = "project" | "client" | "employee";
-type ModalType = EntityType | "time" | "payment";
+type ModalType = EntityType | "time" | "payment" | "expense";
 
 type RecordId = string | number;
 type Client = { id: RecordId; name: string; address: string; phone: string; email?: string; projects: number };
@@ -26,6 +26,11 @@ type Project = {
   totalSeconds: number;
   expectedAmount: number;
   paidAmount: number;
+  expenseAmount?: number;
+  billableExpenseAmount?: number;
+  laborCost?: number;
+  costAmount?: number;
+  profitAmount?: number;
   hours: string;
   balance: string;
   color: "mint" | "amber" | "blue";
@@ -54,6 +59,7 @@ const viewTitles: Record<View, { eyebrow: string; title: string }> = {
   projects: { eyebrow: "ניהול העבודה", title: "פרויקטים" },
   time: { eyebrow: "מעקב ובקרה", title: "דיווחי זמן" },
   payments: { eyebrow: "כספים ותקבולים", title: "תשלומי לקוחות" },
+  expenses: { eyebrow: "עלויות ורווחיות", title: "הוצאות וחומרים" },
   clients: { eyebrow: "אנשי קשר וכתובות", title: "לקוחות" },
   employees: { eyebrow: "הצוות שלך", title: "עובדים" },
   trash: { eyebrow: "שחזור מידע", title: "סל המחזור" },
@@ -73,16 +79,17 @@ function billingLabel(type: BillingType, fixedPrice: number, hourlyRate: number)
   return `€${fixedPrice.toLocaleString()} + €${hourlyRate.toLocaleString()} לשעה`;
 }
 
-type StoredProject = Pick<Project, "id" | "name" | "client" | "address" | "tag" | "billingType" | "fixedPrice" | "hourlyRate"> & { workerIds: string | string[]; totalSeconds: number; paidAmount: number };
+type StoredProject = Pick<Project, "id" | "name" | "client" | "address" | "tag" | "billingType" | "fixedPrice" | "hourlyRate"> & { workerIds: string | string[]; totalSeconds: number; paidAmount: number; expenseAmount: number; billableExpenseAmount: number; laborCost: number };
 type AccountUser = { id: string; displayName: string; email: string; role: "manager" | "employee"; isLocal: boolean };
 type ActiveTimer = { id: string; projectId: string; startedAt: string; elapsedSeconds: number };
 type TimeEntry = { id: string; projectId: string; projectName: string; userId: string; workerName: string; startedAt: string; endedAt: string | null; durationSeconds: number; description: string; source: "timer" | "manual" };
 type Payment = { id: string; projectId: string; projectName: string; clientName: string; amount: number; paidAt: string; method: "transfer" | "cash" | "card" | "check" | "other"; note: string };
+type Expense = { id: string; projectId: string; projectName: string; clientName: string; amount: number; incurredAt: string; category: "materials" | "equipment" | "travel" | "subcontractor" | "other"; billableToClient: boolean | number; note: string };
 type DeletedClient = { id: RecordId; name: string; address: string; deletedAt: string; projectCount: number };
 type DeletedProject = { id: RecordId; name: string; clientName: string; address: string; deletedAt: string };
 type DeletedEmployee = { id: RecordId; name: string; email: string; deletedAt: string };
 type TrashState = { clients: DeletedClient[]; projects: DeletedProject[]; employees: DeletedEmployee[] };
-type StoredState = { accountMode: AccountMode; user: AccountUser; clients: Client[]; employees: Employee[]; projects: StoredProject[]; activeTimer: ActiveTimer | null; recentTimeEntries: TimeEntry[]; payments: Payment[]; trash: TrashState };
+type StoredState = { accountMode: AccountMode; user: AccountUser; clients: Client[]; employees: Employee[]; projects: StoredProject[]; activeTimer: ActiveTimer | null; recentTimeEntries: TimeEntry[]; payments: Payment[]; expenses: Expense[]; trash: TrashState };
 
 function presentProjects(items: StoredProject[]): Project[] {
   const colors: Project["color"][] = ["mint", "amber", "blue"];
@@ -91,9 +98,14 @@ function presentProjects(items: StoredProject[]): Project[] {
     const hourlyRate = Number(project.hourlyRate);
     const totalSeconds = Number(project.totalSeconds);
     const hours = totalSeconds / 3600;
-    const amount = project.billingType === "fixed" ? fixedPrice : project.billingType === "hourly" ? hours * hourlyRate : fixedPrice + hours * hourlyRate;
+    const baseAmount = project.billingType === "fixed" ? fixedPrice : project.billingType === "hourly" ? hours * hourlyRate : fixedPrice + hours * hourlyRate;
+    const expenseAmount = Number(project.expenseAmount ?? 0);
+    const billableExpenseAmount = Number(project.billableExpenseAmount ?? 0);
+    const laborCost = Number(project.laborCost ?? 0);
+    const amount = baseAmount + billableExpenseAmount;
+    const costAmount = expenseAmount + laborCost;
     const paidAmount = Number(project.paidAmount ?? 0);
-    return { ...project, billing: billingLabel(project.billingType, fixedPrice, hourlyRate), fixedPrice, hourlyRate, totalSeconds, expectedAmount: amount, paidAmount, workerIds: Array.isArray(project.workerIds) ? project.workerIds : project.workerIds ? project.workerIds.split(",") : [], hours: hours.toFixed(1), balance: `€${Math.round(amount - paidAmount).toLocaleString()}`, color: colors[index % colors.length] };
+    return { ...project, billing: billingLabel(project.billingType, fixedPrice, hourlyRate), fixedPrice, hourlyRate, totalSeconds, expectedAmount: amount, paidAmount, expenseAmount, billableExpenseAmount, laborCost, costAmount, profitAmount: amount - costAmount, workerIds: Array.isArray(project.workerIds) ? project.workerIds : project.workerIds ? project.workerIds.split(",") : [], hours: hours.toFixed(1), balance: `€${Math.round(amount - paidAmount).toLocaleString()}`, color: colors[index % colors.length] };
   });
 }
 
@@ -116,6 +128,7 @@ export default function Home() {
   const [authRequired, setAuthRequired] = useState(false);
   const [recentTimeEntries, setRecentTimeEntries] = useState<TimeEntry[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
+  const [expenses, setExpenses] = useState<Expense[]>([]);
   const [trash, setTrash] = useState<TrashState>({ clients: [], projects: [], employees: [] });
   const [inviteNotice, setInviteNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
 
@@ -123,12 +136,13 @@ export default function Home() {
     const storedProjects = presentProjects(data.projects);
     setAccountMode(data.accountMode);
     setCurrentUser(data.user);
-    if (data.user.role === "employee") setView((current) => ["payments", "clients", "employees", "trash"].includes(current) ? "dashboard" : current);
+    if (data.user.role === "employee") setView((current) => ["payments", "expenses", "clients", "employees", "trash"].includes(current) ? "dashboard" : current);
     setClients(data.clients.map((client) => ({ ...client, projects: Number(client.projects) })));
     setEmployees(data.employees.map((employee) => ({ ...employee, hourlyCost: Number(employee.hourlyCost) })));
     setProjects(storedProjects);
     setRecentTimeEntries(data.recentTimeEntries ?? []);
     setPayments((data.payments ?? []).map((payment) => ({ ...payment, amount: Number(payment.amount) })));
+    setExpenses((data.expenses ?? []).map((expense) => ({ ...expense, amount: Number(expense.amount), billableToClient: Boolean(expense.billableToClient) })));
     setTrash(data.trash ?? { clients: [], projects: [], employees: [] });
     if (storedProjects.length) {
       const timerProject = data.activeTimer ? storedProjects.find((project) => String(project.id) === String(data.activeTimer?.projectId)) : null;
@@ -233,6 +247,27 @@ export default function Home() {
     try { await saveAction("deletePayment", { id: payment.id }); } catch { setSyncState("error"); }
   }
 
+  function openExpense(expense?: Expense) {
+    setEditingId(expense?.id ?? null);
+    setModal("expense");
+  }
+
+  async function saveExpense(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    try {
+      await saveAction(editingId ? "updateExpense" : "addExpense", { id: editingId, projectId: data.get("projectId"), amount: Number(data.get("amount")), incurredAt: data.get("incurredAt"), category: data.get("category"), billableToClient: data.get("billableToClient") === "on", note: data.get("note") });
+      setModal(null);
+      setEditingId(null);
+      setView("expenses");
+    } catch { setSyncState("error"); }
+  }
+
+  async function removeExpense(expense: Expense) {
+    if (!window.confirm(`למחוק את ההוצאה בסך €${expense.amount.toLocaleString()}?`)) return;
+    try { await saveAction("deleteExpense", { id: expense.id }); } catch { setSyncState("error"); }
+  }
+
   function openNew(type: EntityType) {
     setEditingId(null);
     setBillingType("fixed");
@@ -318,17 +353,19 @@ export default function Home() {
   const isManager = currentUser.role === "manager";
   const editingTimeEntry = modal === "time" && editingId ? recentTimeEntries.find((entry) => entry.id === editingId) : undefined;
   const editingPayment = modal === "payment" && editingId ? payments.find((payment) => payment.id === editingId) : undefined;
+  const editingExpense = modal === "expense" && editingId ? expenses.find((expense) => expense.id === editingId) : undefined;
   const timeEntryProjects = editingTimeEntry && editingTimeEntry.userId !== currentUser.id ? projects.filter((project) => project.workerIds.includes(editingTimeEntry.userId)) : projects;
 
   return (
     <main className="app-shell">
       <aside className="sidebar" aria-label="ניווט ראשי">
-        <button className="brand" onClick={() => navigate("dashboard")}><Image className="brand-image" src="/app-icon.jpg" width={42} height={42} alt="" /><span>מנהל עבודה</span></button>
+        <button className="brand" onClick={() => navigate("dashboard")}><Image className="brand-image" src="/app-icon.png" width={42} height={42} alt="" /><span>מנהל עבודה</span></button>
         <nav>
           <button className={`nav-item ${view === "dashboard" ? "active" : ""}`} onClick={() => navigate("dashboard")}><span>⌂</span>ראשי</button>
           <button className={`nav-item ${view === "projects" ? "active" : ""}`} onClick={() => navigate("projects")}><span>▦</span>פרויקטים</button>
           <button className={`nav-item ${view === "time" ? "active" : ""}`} onClick={() => navigate("time")}><span>◷</span>דיווחי זמן</button>
           {isManager && <button className={`nav-item ${view === "payments" ? "active" : ""}`} onClick={() => navigate("payments")}><span>€</span>תשלומים</button>}
+          {isManager && <button className={`nav-item ${view === "expenses" ? "active" : ""}`} onClick={() => navigate("expenses")}><span>−</span>הוצאות וחומרים</button>}
           {isManager && <button className={`nav-item ${view === "clients" ? "active" : ""}`} onClick={() => navigate("clients")}><span>♙</span>לקוחות</button>}
           {isManager && accountMode === "employer" && <button className={`nav-item ${view === "employees" ? "active" : ""}`} onClick={() => navigate("employees")}><span>♟</span>עובדים</button>}
           <button className="nav-item"><span>↗</span>דוחות</button>
@@ -340,7 +377,7 @@ export default function Home() {
       <section className="content">
         <header className="topbar">
           <div><p className="eyebrow">{viewTitles[view].eyebrow}</p><h1>{view === "dashboard" ? `שלום ${currentUser.displayName}, יוצאים לעבודה.` : viewTitles[view].title}</h1></div>
-          <div className="top-actions"><span className="account-badge">{!isManager ? "עובד בצוות" : accountMode === "solo" ? "מצב עובד" : "מצב מעסיק"}</span><span className={`connection ${syncState === "error" ? "sync-error" : ""}`}><i /> {syncState === "loading" ? "שומר…" : syncState === "error" ? "בעיה בשמירה" : "נשמר"}</span><button className="icon-button profile-button" onClick={() => navigate("profile")} aria-label="פתיחת הפרופיל">{currentUser.displayName.charAt(0)}</button>{view === "time" ? <button className="primary-button" onClick={openTimeEntry}><span>＋</span> דיווח חדש</button> : view === "payments" ? <button className="primary-button" onClick={() => openPayment()}><span>＋</span> תשלום חדש</button> : isManager && view !== "profile" && view !== "trash" && <button className="primary-button" onClick={() => openNew(view === "clients" ? "client" : view === "employees" ? "employee" : "project")}><span>＋</span> {view === "clients" ? "לקוח חדש" : view === "employees" ? "עובד חדש" : "פרויקט חדש"}</button>}</div>
+          <div className="top-actions"><span className="account-badge">{!isManager ? "עובד בצוות" : accountMode === "solo" ? "מצב עובד" : "מצב מעסיק"}</span><span className={`connection ${syncState === "error" ? "sync-error" : ""}`}><i /> {syncState === "loading" ? "שומר…" : syncState === "error" ? "בעיה בשמירה" : "נשמר"}</span><button className="icon-button profile-button" onClick={() => navigate("profile")} aria-label="פתיחת הפרופיל">{currentUser.displayName.charAt(0)}</button>{view === "time" ? <button className="primary-button" onClick={openTimeEntry}><span>＋</span> דיווח חדש</button> : view === "payments" ? <button className="primary-button" onClick={() => openPayment()}><span>＋</span> תשלום חדש</button> : view === "expenses" ? <button className="primary-button" onClick={() => openExpense()}><span>＋</span> הוצאה חדשה</button> : isManager && view !== "profile" && view !== "trash" && <button className="primary-button" onClick={() => openNew(view === "clients" ? "client" : view === "employees" ? "employee" : "project")}><span>＋</span> {view === "clients" ? "לקוח חדש" : view === "employees" ? "עובד חדש" : "פרויקט חדש"}</button>}</div>
         </header>
 
         {inviteNotice && <div className={`invite-notice ${inviteNotice.kind}`} role="status"><span>{inviteNotice.kind === "success" ? "✓" : "!"}</span><strong>{inviteNotice.text}</strong><button onClick={() => setInviteNotice(null)} aria-label="סגירת ההודעה">×</button></div>}
@@ -349,6 +386,7 @@ export default function Home() {
         {view === "projects" && <ProjectsView canManage={isManager} projects={visibleProjects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} activeProject={activeProject} running={running} selectProject={selectProject} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} openManual={openTimeEntry} openNew={() => openNew("project")} />}
         {view === "time" && <TimeEntriesView entries={recentTimeEntries} openNew={openTimeEntry} editEntry={openEditTimeEntry} removeEntry={(entry) => void removeTimeEntry(entry)} />}
         {isManager && view === "payments" && <PaymentsView projects={projects} payments={payments} openNew={() => openPayment()} editPayment={openPayment} removePayment={(payment) => void removePayment(payment)} />}
+        {isManager && view === "expenses" && <ExpensesView projects={projects} expenses={expenses} openNew={() => openExpense()} editExpense={openExpense} removeExpense={(expense) => void removeExpense(expense)} />}
         {isManager && view === "clients" && <ClientsView clients={clients} query={query} setQuery={setQuery} openNew={() => openNew("client")} editClient={(client) => openEdit("client", client)} removeClient={(client) => void removeRecord("client", client.id, client.name)} />}
         {isManager && view === "employees" && <EmployeesView employees={employees} openNew={() => openNew("employee")} editEmployee={(employee) => openEdit("employee", employee)} removeEmployee={(employee) => void removeRecord("employee", employee.id, employee.name)} inviteEmployee={(employee) => void inviteEmployee(employee)} />}
         {isManager && view === "trash" && <RecycleBinView trash={trash} restoreClient={(id, restoreProjects) => void restoreRecord("client", id, restoreProjects)} restoreProject={(id) => void restoreRecord("project", id)} restoreEmployee={(id) => void restoreRecord("employee", id)} />}
@@ -360,17 +398,19 @@ export default function Home() {
         <button className={view === "projects" ? "active" : ""} onClick={() => navigate("projects")}><span>▦</span>פרויקטים</button>
         <button className={view === "time" ? "active" : ""} onClick={() => navigate("time")}><span>◷</span>שעות</button>
         {isManager && <button className={view === "payments" ? "active" : ""} onClick={() => navigate("payments")}><span>€</span>כספים</button>}
+        {isManager && <button className={view === "expenses" ? "active" : ""} onClick={() => navigate("expenses")}><span>−</span>הוצאות</button>}
         <button className="mobile-timer" disabled={!projects.length} onClick={() => void toggleTimer()} aria-label={running ? "עצירת הטיימר" : "הפעלת הטיימר"}><span>{running ? "Ⅱ" : "▶"}</span></button>
         {isManager ? <button className={view === "clients" ? "active" : ""} onClick={() => navigate("clients")}><span>♙</span>לקוחות</button> : <button className={view === "profile" ? "active" : ""} onClick={() => navigate("profile")}><span>●</span>פרופיל</button>}
         {isManager && (accountMode === "employer" ? <button className={view === "employees" ? "active" : ""} onClick={() => navigate("employees")}><span>♟</span>עובדים</button> : <button className={view === "profile" ? "active" : ""} onClick={() => navigate("profile")}><span>●</span>פרופיל</button>)}
       </nav>
 
-      {modal && <Modal title={modal === "time" ? editingId ? "עריכת דיווח זמן" : "דיווח שעות ידני" : modal === "payment" ? editingId ? "עריכת תשלום" : "תשלום חדש" : `${editingId ? "עריכת" : modal === "project" ? "פרויקט" : modal === "client" ? "לקוח" : "עובד"} ${editingId ? (modal === "project" ? "פרויקט" : modal === "client" ? "לקוח" : "עובד") : "חדש"}`} close={() => { setModal(null); setEditingId(null); }}>
+      {modal && <Modal title={modal === "time" ? editingId ? "עריכת דיווח זמן" : "דיווח שעות ידני" : modal === "payment" ? editingId ? "עריכת תשלום" : "תשלום חדש" : modal === "expense" ? editingId ? "עריכת הוצאה" : "הוצאה חדשה" : `${editingId ? "עריכת" : modal === "project" ? "פרויקט" : modal === "client" ? "לקוח" : "עובד"} ${editingId ? (modal === "project" ? "פרויקט" : modal === "client" ? "לקוח" : "עובד") : "חדש"}`} close={() => { setModal(null); setEditingId(null); }}>
         {modal === "project" && <ProjectForm accountMode={accountMode} clients={clients} employees={employees} billingType={billingType} setBillingType={setBillingType} initial={projects.find((project) => project.id === editingId)} submit={addProject} />}
         {modal === "client" && <ClientForm initial={clients.find((client) => client.id === editingId)} submit={addClient} />}
         {modal === "employee" && <EmployeeForm initial={employees.find((employee) => employee.id === editingId)} submit={addEmployee} />}
         {modal === "time" && <ManualTimeForm projects={timeEntryProjects} initialProjectId={editingTimeEntry?.projectId ?? activeProject.id} initial={editingTimeEntry} submit={addManualTime} />}
         {modal === "payment" && <PaymentForm projects={projects} initial={editingPayment} submit={savePayment} />}
+        {modal === "expense" && <ExpenseForm projects={projects} initial={editingExpense} submit={saveExpense} />}
       </Modal>}
     </main>
   );
@@ -438,6 +478,17 @@ function PaymentsView({ projects, payments, openNew, editPayment, removePayment 
   return <><section className="finance-summary"><article><span>חיוב צפוי</span><strong>€{Math.round(expected).toLocaleString()}</strong></article><article><span>התקבל בפועל</span><strong>€{Math.round(received).toLocaleString()}</strong></article><article><span>יתרה פתוחה</span><strong>€{Math.round(expected - received).toLocaleString()}</strong></article></section><section className="page-card payments-card"><div className="section-head"><div><h2>תקבולים מלקוחות</h2><p>{payments.length} תשלומים שנשמרו</p></div><button className="mobile-primary" onClick={openNew}>＋ תשלום חדש</button></div>{payments.length ? <div className="payment-list">{payments.map((payment) => <article key={payment.id}><div className="payment-symbol">€</div><div><strong dir="auto">{payment.projectName}</strong><span dir="auto">{payment.clientName}{payment.note ? ` · ${payment.note}` : ""}</span></div><time>{new Date(`${payment.paidAt}T12:00:00`).toLocaleDateString("he-IL")}</time><small>{paymentMethodLabels[payment.method] ?? "אחר"}</small><b>€{payment.amount.toLocaleString()}</b><div className="payment-actions"><button onClick={() => editPayment(payment)}>עריכה</button><button className="danger" onClick={() => removePayment(payment)}>מחיקה</button></div></article>)}</div> : <div className="empty-state"><div><strong>עדיין לא נרשמו תשלומים</strong><span>הוסיפו תקבול ראשון כדי לעקוב אחר היתרה.</span><button className="restore-primary" onClick={openNew}>הוספת תשלום</button></div></div>}</section></>;
 }
 
+const expenseCategoryLabels: Record<Expense["category"], string> = { materials: "חומרים", equipment: "ציוד וכלים", travel: "נסיעות", subcontractor: "קבלן משנה", other: "אחר" };
+
+function ExpensesView({ projects, expenses, openNew, editExpense, removeExpense }: { projects: Project[]; expenses: Expense[]; openNew: () => void; editExpense: (expense: Expense) => void; removeExpense: (expense: Expense) => void }) {
+  const revenue = projects.reduce((sum, project) => sum + project.expectedAmount, 0);
+  const directCosts = expenses.reduce((sum, expense) => sum + expense.amount, 0);
+  const laborCosts = projects.reduce((sum, project) => sum + Number(project.laborCost ?? 0), 0);
+  const billable = expenses.filter((expense) => Boolean(expense.billableToClient)).reduce((sum, expense) => sum + expense.amount, 0);
+  const profit = revenue - directCosts - laborCosts;
+  return <><section className="finance-summary profit-summary"><article><span>הכנסה צפויה</span><strong>€{Math.round(revenue).toLocaleString()}</strong></article><article><span>הוצאות ישירות</span><strong>€{Math.round(directCosts).toLocaleString()}</strong></article><article><span>עלות עובדים</span><strong>€{Math.round(laborCosts).toLocaleString()}</strong></article><article className={profit < 0 ? "negative" : "positive"}><span>רווח צפוי</span><strong>€{Math.round(profit).toLocaleString()}</strong></article></section><section className="page-card payments-card"><div className="section-head"><div><h2>הוצאות וחומרים</h2><p>{expenses.length} הוצאות · €{Math.round(billable).toLocaleString()} לחיוב הלקוחות</p></div><button className="mobile-primary" onClick={openNew}>＋ הוצאה חדשה</button></div>{expenses.length ? <div className="payment-list expense-list">{expenses.map((expense) => <article key={expense.id}><div className="payment-symbol expense-symbol">−</div><div><strong dir="auto">{expense.projectName}</strong><span dir="auto">{expense.clientName}{expense.note ? ` · ${expense.note}` : ""}</span></div><time>{new Date(`${expense.incurredAt}T12:00:00`).toLocaleDateString("he-IL")}</time><small>{expenseCategoryLabels[expense.category] ?? "אחר"}</small><b>€{expense.amount.toLocaleString()}</b><div className="payment-actions"><button onClick={() => editExpense(expense)}>עריכה</button><button className="danger" onClick={() => removeExpense(expense)}>מחיקה</button></div>{Boolean(expense.billableToClient) && <span className="billable-badge">לחיוב הלקוח</span>}</article>)}</div> : <div className="empty-state"><div><strong>עדיין לא נרשמו הוצאות</strong><span>הוסיפו חומרים, ציוד או עלות אחרת כדי לראות רווחיות אמיתית.</span><button className="restore-primary" onClick={openNew}>הוספת הוצאה</button></div></div>}</section></>;
+}
+
 function ClientsView({ clients, query, setQuery, openNew, editClient, removeClient }: { clients: Client[]; query: string; setQuery: (value: string) => void; openNew: () => void; editClient: (client: Client) => void; removeClient: (client: Client) => void }) {
   const visible = clients.filter((client) => `${client.name} ${client.address}`.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
   return <section className="page-card"><div className="section-head"><div><h2>כל הלקוחות</h2><p>{clients.length} לקוחות במערכת</p></div><button className="mobile-primary" onClick={openNew}>＋ לקוח חדש</button></div><label className="search-box standalone"><span>⌕</span><input dir="auto" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="חיפוש לפי שם או כתובת" /></label><div className="record-grid">{visible.map((client) => <article className="record-card" key={client.id}><div className="record-avatar">{client.name.charAt(0)}</div><div className="record-copy"><strong dir="auto">{client.name}</strong><span dir="auto">⌖ {client.address}</span><small dir="ltr">{client.phone}</small></div><div className="record-meta"><strong>{client.projects}</strong><span>פרויקטים</span></div><div className="record-actions"><button type="button" onClick={() => editClient(client)}>עריכה</button><button type="button" className="danger" onClick={() => removeClient(client)}>לסל</button></div></article>)}</div></section>;
@@ -453,7 +504,7 @@ function EmployeesView({ employees, openNew, editEmployee, removeEmployee, invit
 }
 
 function SignInView() {
-  return <main className="sign-in-shell"><section className="sign-in-card"><Image className="sign-in-logo" src="/app-icon.jpg" width={82} height={82} alt="מנהל עבודה" /><p>מנהל עבודה</p><h1>החשבון שלך מחכה לך</h1><span>כדי לשמור על הפרויקטים והמידע הכספי שלך בנפרד, יש להתחבר לפני שממשיכים.</span><a href="/signin-with-chatgpt?return_to=%2F">התחברות עם ChatGPT</a><small>בסביבה המקומית הכניסה מתבצעת אוטומטית עם משתמש הפיתוח.</small></section></main>;
+  return <main className="sign-in-shell"><section className="sign-in-card"><Image className="sign-in-logo" src="/app-icon.png" width={82} height={82} alt="מנהל עבודה" /><p>מנהל עבודה</p><h1>החשבון שלך מחכה לך</h1><span>כדי לשמור על הפרויקטים והמידע הכספי שלך בנפרד, יש להתחבר לפני שממשיכים.</span><a href="/signin-with-chatgpt?return_to=%2F">התחברות עם ChatGPT</a><small>בסביבה המקומית הכניסה מתבצעת אוטומטית עם משתמש הפיתוח.</small></section></main>;
 }
 
 function formatDeletedAt(value: string) {
@@ -498,6 +549,10 @@ function ManualTimeForm({ projects, initialProjectId, initial, submit }: { proje
 
 function PaymentForm({ projects, initial, submit }: { projects: Project[]; initial?: Payment; submit: (event: FormEvent<HTMLFormElement>) => void }) {
   return <form className="entity-form" onSubmit={submit}><div className="form-grid"><Field label="פרויקט" wide><select name="projectId" required defaultValue={initial?.projectId ?? ""}><option value="" disabled>בחירת פרויקט</option>{projects.map((project) => <option key={project.id} value={String(project.id)}>{project.name} · {project.client}</option>)}</select></Field><Field label="סכום שהתקבל (EUR)"><input name="amount" dir="ltr" type="number" min="0.01" step="0.01" required defaultValue={initial?.amount} placeholder="0.00" /></Field><Field label="תאריך התשלום"><input name="paidAt" dir="ltr" type="date" required defaultValue={initial?.paidAt ?? new Date().toISOString().slice(0, 10)} /></Field><Field label="אמצעי תשלום"><select name="method" required defaultValue={initial?.method ?? "transfer"}>{Object.entries(paymentMethodLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field><Field label="הערה" wide><textarea name="note" dir="auto" rows={3} defaultValue={initial?.note} placeholder="מספר אסמכתא, פירוט או הערה בעברית, Deutsch or English" /></Field></div><p className="form-note">התשלום יקוזז מהיתרה הפתוחה של הפרויקט ויישמר ביומן השינויים.</p><FormActions label={initial ? "שמירת השינויים" : "שמירת תשלום"} /></form>;
+}
+
+function ExpenseForm({ projects, initial, submit }: { projects: Project[]; initial?: Expense; submit: (event: FormEvent<HTMLFormElement>) => void }) {
+  return <form className="entity-form" onSubmit={submit}><div className="form-grid"><Field label="פרויקט" wide><select name="projectId" required defaultValue={initial?.projectId ?? ""}><option value="" disabled>בחירת פרויקט</option>{projects.map((project) => <option key={project.id} value={String(project.id)}>{project.name} · {project.client}</option>)}</select></Field><Field label="סכום ההוצאה (EUR)"><input name="amount" dir="ltr" type="number" min="0.01" step="0.01" required defaultValue={initial?.amount} placeholder="0.00" /></Field><Field label="תאריך ההוצאה"><input name="incurredAt" dir="ltr" type="date" required defaultValue={initial?.incurredAt ?? new Date().toISOString().slice(0, 10)} /></Field><Field label="קטגוריה"><select name="category" required defaultValue={initial?.category ?? "materials"}>{Object.entries(expenseCategoryLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field><Field label="פירוט" wide><textarea name="note" dir="auto" rows={3} defaultValue={initial?.note} placeholder="שם החומר, ספק או הערה בעברית, Deutsch or English" /></Field><label className="billable-option" htmlFor="billableToClient" aria-label="לחייב את הלקוח בהוצאה"><input id="billableToClient" name="billableToClient" type="checkbox" defaultChecked={Boolean(initial?.billableToClient)} /><span><strong>לחייב את הלקוח בהוצאה</strong><small>הסכום יתווסף לחיוב הצפוי של הפרויקט.</small></span></label></div><p className="form-note">ההוצאה תיכלל בעלות וברווחיות הפרויקט ותישמר ביומן השינויים.</p><FormActions label={initial ? "שמירת השינויים" : "שמירת הוצאה"} /></form>;
 }
 
 function ProjectForm({ accountMode, clients, employees, billingType, setBillingType, initial, submit }: { accountMode: AccountMode; clients: Client[]; employees: Employee[]; billingType: BillingType; setBillingType: (type: BillingType) => void; initial?: Project; submit: (event: FormEvent<HTMLFormElement>) => void }) {

@@ -4,7 +4,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "מנהל עבודה | פרויקטים, שעות וכספים",
   description: "מערכת לניהול עבודות שטח, שעות עובדים וכספי פרויקטים.",
-  icons: { icon: "/app-icon.jpg", apple: "/app-icon.jpg" },
+  icons: { icon: "/app-icon.png", apple: "/app-icon.png" },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

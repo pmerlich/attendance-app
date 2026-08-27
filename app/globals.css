@@ -82,3 +82,19 @@ input,textarea { font:inherit; unicode-bidi:plaintext; text-align:start; }
 .stats-grid .clickable-stat:hover { border-color:#d7c09e; transform:translateY(-2px); box-shadow:0 9px 24px rgba(77,52,27,.08); }
 @media (max-width:760px) { .stats-grid .stat-card { min-height:130px; display:block; padding:15px; } }
 @media (max-width:390px) { .stats-grid .stat-card { min-height:96px; display:flex; } }
+
+.profit-summary { grid-template-columns:repeat(4,1fr); }
+.profit-summary article.positive { border-color:#cfe5d9; background:linear-gradient(135deg,#fff,#f2faf6); }
+.profit-summary article.positive strong { color:#277356; }
+.profit-summary article.negative { border-color:#edd4ce; background:#fff7f5; }
+.profit-summary article.negative strong { color:#a55443; }
+.expense-list article { position:relative; }
+.expense-symbol { background:#f5e9dd; color:#8c633e; }
+.billable-badge { position:absolute; inset-block-start:5px; inset-inline-end:4px; padding:3px 7px; border-radius:999px; background:#e3f2ea; color:#267054 !important; font-size:8px !important; font-weight:800; }
+.billable-option { grid-column:1/-1; min-height:68px; padding:14px; display:flex; align-items:center; gap:11px; border:1px solid #dce7e1; border-radius:11px; background:#f7faf8; cursor:pointer; }
+.billable-option input { width:17px; height:17px; accent-color:var(--green); }
+.billable-option strong,.billable-option small { display:block; }
+.billable-option strong { font-size:11px; }
+.billable-option small { margin-top:4px; color:#78857e; font-size:9px; }
+@media (max-width:900px) { .profit-summary { grid-template-columns:repeat(2,1fr); } }
+@media (max-width:760px) { .profit-summary { grid-template-columns:1fr; } .billable-badge { position:static; width:fit-content; grid-column:2/4; } }
