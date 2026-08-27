@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 async function render() {
@@ -32,5 +33,23 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.match(html, /תשלומים/);
   assert.match(html, /הוצאות וחומרים/);
   assert.match(html, /href="\/app-icon\.png"/);
+  assert.match(html, /https:\/\/www\.google\.com\/maps\/dir\/\?api=1/);
+  assert.match(html, /https:\/\/www\.waze\.com\/ul\?q=/);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Starter Project/);
+});
+
+test("ships an offline shell and an idempotent operation migration", async () => {
+  const serviceWorker = await readFile(new URL("../public/sw.js", import.meta.url), "utf8");
+  assert.match(serviceWorker, /CACHE_NAME/);
+  assert.match(serviceWorker, /url\.pathname\.startsWith\("\/api\/"\)/);
+  assert.match(serviceWorker, /caches\.match\(request\)/);
+
+  const manifest = JSON.parse(await readFile(new URL("../public/manifest.webmanifest", import.meta.url), "utf8"));
+  assert.equal(manifest.name, "מנהל עבודה");
+  assert.equal(manifest.start_url, "/");
+  assert.equal(manifest.display, "standalone");
+
+  const migration = await readFile(new URL("../drizzle/0008_cheerful_sprite.sql", import.meta.url), "utf8");
+  assert.match(migration, /CREATE TABLE `offline_operations`/);
+  assert.match(migration, /offline_operations_owner_operation_unique/);
 });

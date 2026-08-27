@@ -62,3 +62,10 @@ export const attachments = sqliteTable("attachments", {
 export const auditLog = sqliteTable("audit_log", {
   id: text("id").primaryKey(), businessId: text("business_id").notNull().references(() => businesses.id), actorId: text("actor_id").notNull().references(() => users.id), entityType: text("entity_type").notNull(), entityId: text("entity_id").notNull(), action: text("action").notNull(), detailsJson: text("details_json").notNull().default("{}"), createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
+export const offlineOperations = sqliteTable("offline_operations", {
+  id: text("id").primaryKey(),
+  businessId: text("business_id").notNull().references(() => businesses.id),
+  userId: text("user_id").notNull().references(() => users.id),
+  operationId: text("operation_id").notNull(),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [uniqueIndex("offline_operations_owner_operation_unique").on(table.businessId, table.userId, table.operationId)]);

@@ -1,9 +1,10 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
+import { enqueueOperation, readCachedState, readQueuedOperations, removeQueuedOperation, writeCachedState, type QueuedOperation } from "./offline-store";
 
-type View = "dashboard" | "projects" | "time" | "payments" | "expenses" | "clients" | "employees" | "trash" | "profile";
+type View = "dashboard" | "projects" | "time" | "payments" | "expenses" | "clients" | "employees" | "trash" | "history" | "reports" | "profile";
 type BillingType = "fixed" | "hourly" | "combined";
 type AccountMode = "solo" | "employer";
 type EntityType = "project" | "client" | "employee";
@@ -63,6 +64,8 @@ const viewTitles: Record<View, { eyebrow: string; title: string }> = {
   clients: { eyebrow: "אנשי קשר וכתובות", title: "לקוחות" },
   employees: { eyebrow: "הצוות שלך", title: "עובדים" },
   trash: { eyebrow: "שחזור מידע", title: "סל המחזור" },
+  history: { eyebrow: "בקרה ותיעוד", title: "היסטוריית שינויים" },
+  reports: { eyebrow: "סיכומים וניתוח", title: "דוחות" },
   profile: { eyebrow: "העדפות החשבון", title: "הפרופיל שלי" },
 };
 
@@ -90,8 +93,100 @@ type DeletedClient = { id: RecordId; name: string; address: string; deletedAt: s
 type DeletedProject = { id: RecordId; name: string; clientName: string; address: string; deletedAt: string };
 type DeletedEmployee = { id: RecordId; name: string; email: string; deletedAt: string };
 type TrashState = { clients: DeletedClient[]; projects: DeletedProject[]; employees: DeletedEmployee[] };
-type StoredState = { accountMode: AccountMode; user: AccountUser; clients: Client[]; employees: Employee[]; projects: StoredProject[]; activeTimer: ActiveTimer | null; recentTimeEntries: TimeEntry[]; payments: Payment[]; expenses: Expense[]; attachments: Attachment[]; trash: TrashState };
+type AuditEntry = { id: string; actorName: string; entityType: string; entityId: string; action: string; detailsJson: string; createdAt: string };
+type ReportDataRow = { projectId: string; projectName: string; billingType: BillingType; fixedPrice: number; hourlyRate: number; totalSeconds: number; paidAmount: number; expenseAmount: number; billableExpenseAmount: number; laborCost: number };
+type StoredState = { accountMode: AccountMode; user: AccountUser; clients: Client[]; employees: Employee[]; projects: StoredProject[]; activeTimer: ActiveTimer | null; recentTimeEntries: TimeEntry[]; payments: Payment[]; expenses: Expense[]; attachments: Attachment[]; trash: TrashState; auditLog: AuditEntry[] };
 
+
+const offlineCreationActions = new Set(["addClient", "addEmployee", "addProject", "addManualTime", "addPayment", "addExpense"]);
+const onlineOnlyActions = new Set(["createEmployeeInvitation", "deleteAttachment"]);
+
+function prepareQueuedOperation(action: string, values: Record<string, unknown>): QueuedOperation {
+  const prepared = { ...values };
+  if (offlineCreationActions.has(action) && !prepared.id) prepared.id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  if (action === "startTimer") {
+    if (!prepared.id) prepared.id = crypto.randomUUID();
+    prepared.startedAt = now;
+  }
+  if (action === "stopTimer") prepared.endedAt = now;
+  return { id: crypto.randomUUID(), action, values: prepared, createdAt: now };
+}
+
+function sqlTimestamp(value: unknown) {
+  const date = new Date(String(value ?? ""));
+  return (Number.isNaN(date.getTime()) ? new Date() : date).toISOString().slice(0, 19).replace("T", " ");
+}
+
+function elapsedBetween(startedAt: string, endedAt: string) {
+  const start = new Date(startedAt.replace(" ", "T") + "Z").getTime();
+  const end = new Date(endedAt.replace(" ", "T") + "Z").getTime();
+  return Math.max(1, Math.round((end - start) / 1000));
+}
+
+function applyOptimisticOperation(state: StoredState, operation: QueuedOperation): StoredState {
+  const next = structuredClone(state);
+  const values = operation.values;
+  const id = String(values.id ?? "");
+  const projectId = String(values.projectId ?? "");
+  const project = next.projects.find((item) => String(item.id) === projectId);
+  const projectName = project?.name ?? "פרויקט";
+  const clientName = project?.client ?? "";
+
+  if (operation.action === "setAccountMode") next.accountMode = values.accountMode === "employer" ? "employer" : "solo";
+  if (operation.action === "startTimer") {
+    const startedAt = sqlTimestamp(values.startedAt);
+    if (next.activeTimer) {
+      const endedAt = startedAt;
+      const durationSeconds = elapsedBetween(next.activeTimer.startedAt, endedAt);
+      next.recentTimeEntries = next.recentTimeEntries.map((entry) => entry.id === next.activeTimer?.id ? { ...entry, endedAt, durationSeconds } : entry);
+    }
+    next.activeTimer = { id, projectId, startedAt, elapsedSeconds: 0 };
+    next.recentTimeEntries = [{ id, projectId, projectName, userId: next.user.id, workerName: next.user.displayName, startedAt, endedAt: null, durationSeconds: 0, description: "", source: "timer" as const }, ...next.recentTimeEntries.filter((entry) => entry.id !== id)].slice(0, 50);
+  }
+  if (operation.action === "stopTimer" && next.activeTimer) {
+    const endedAt = sqlTimestamp(values.endedAt);
+    const durationSeconds = elapsedBetween(next.activeTimer.startedAt, endedAt);
+    next.recentTimeEntries = next.recentTimeEntries.map((entry) => entry.id === next.activeTimer?.id ? { ...entry, endedAt, durationSeconds } : entry);
+    next.activeTimer = null;
+  }
+  if (operation.action === "addManualTime") {
+    const startedAt = String(values.date ?? new Date().toISOString().slice(0, 10)) + " 12:00:00";
+    next.recentTimeEntries = [{ id, projectId, projectName, userId: next.user.id, workerName: next.user.displayName, startedAt, endedAt: startedAt, durationSeconds: Math.round(Number(values.hours ?? 0) * 3600), description: String(values.description ?? ""), source: "manual" as const }, ...next.recentTimeEntries.filter((entry) => entry.id !== id)].slice(0, 50);
+  }
+  if (operation.action === "updateTimeEntry") next.recentTimeEntries = next.recentTimeEntries.map((entry) => entry.id === id ? { ...entry, projectId, projectName, startedAt: String(values.date) + " 12:00:00", endedAt: String(values.date) + " 12:00:00", durationSeconds: Math.round(Number(values.hours ?? 0) * 3600), description: String(values.description ?? "") } : entry);
+  if (operation.action === "deleteTimeEntry") next.recentTimeEntries = next.recentTimeEntries.filter((entry) => entry.id !== id);
+
+  if (operation.action === "addClient" && !next.clients.some((client) => String(client.id) === id)) next.clients.unshift({ id, name: String(values.name ?? ""), address: String(values.address ?? ""), phone: String(values.phone ?? ""), email: String(values.email ?? ""), projects: 0 });
+  if (operation.action === "updateClient") next.clients = next.clients.map((client) => String(client.id) === id ? { ...client, name: String(values.name ?? ""), address: String(values.address ?? ""), phone: String(values.phone ?? ""), email: String(values.email ?? "") } : client);
+  if (operation.action === "deleteClient") {
+    const client = next.clients.find((item) => String(item.id) === id);
+    if (client) next.trash.clients.unshift({ id: client.id, name: client.name, address: client.address, deletedAt: new Date().toISOString(), projectCount: client.projects });
+    next.clients = next.clients.filter((item) => String(item.id) !== id);
+    next.projects = next.projects.filter((item) => item.client !== client?.name);
+  }
+
+  if (operation.action === "addEmployee" && !next.employees.some((employee) => String(employee.id) === id)) next.employees.unshift({ id, name: String(values.name ?? ""), email: String(values.email ?? ""), hourlyCost: Number(values.hourlyCost ?? 0), status: "פעיל", connectionStatus: "not_invited" });
+  if (operation.action === "updateEmployee") next.employees = next.employees.map((employee) => String(employee.id) === id ? { ...employee, name: String(values.name ?? ""), email: String(values.email ?? ""), hourlyCost: Number(values.hourlyCost ?? 0) } : employee);
+  if (operation.action === "deleteEmployee") next.employees = next.employees.filter((employee) => String(employee.id) !== id);
+
+  if (operation.action === "addProject" && !next.projects.some((item) => String(item.id) === id)) {
+    next.projects.unshift({ id, name: String(values.name ?? ""), client: String(values.client ?? ""), address: String(values.address ?? ""), tag: "בביצוע", billingType: String(values.billingType ?? "fixed") as BillingType, fixedPrice: Number(values.fixedPrice ?? 0), hourlyRate: Number(values.hourlyRate ?? 0), workerIds: Array.isArray(values.workers) ? values.workers.map(String) : [], totalSeconds: 0, paidAmount: 0, expenseAmount: 0, billableExpenseAmount: 0, laborCost: 0 });
+    next.clients = next.clients.map((client) => client.name === String(values.client ?? "") ? { ...client, projects: client.projects + 1 } : client);
+  }
+  if (operation.action === "updateProject") next.projects = next.projects.map((item) => String(item.id) === id ? { ...item, name: String(values.name ?? ""), client: String(values.client ?? ""), address: String(values.address ?? ""), billingType: String(values.billingType ?? "fixed") as BillingType, fixedPrice: Number(values.fixedPrice ?? 0), hourlyRate: Number(values.hourlyRate ?? 0), workerIds: Array.isArray(values.workers) ? values.workers.map(String) : [] } : item);
+  if (operation.action === "deleteProject") next.projects = next.projects.filter((item) => String(item.id) !== id);
+
+  if (operation.action === "addPayment" && !next.payments.some((payment) => payment.id === id)) next.payments.unshift({ id, projectId, projectName, clientName, amount: Number(values.amount ?? 0), paidAt: String(values.paidAt ?? ""), method: String(values.method ?? "other") as Payment["method"], note: String(values.note ?? "") });
+  if (operation.action === "updatePayment") next.payments = next.payments.map((payment) => payment.id === id ? { ...payment, projectId, projectName, clientName, amount: Number(values.amount ?? 0), paidAt: String(values.paidAt ?? ""), method: String(values.method ?? "other") as Payment["method"], note: String(values.note ?? "") } : payment);
+  if (operation.action === "deletePayment") next.payments = next.payments.filter((payment) => payment.id !== id);
+
+  if (operation.action === "addExpense" && !next.expenses.some((expense) => expense.id === id)) next.expenses.unshift({ id, projectId, projectName, clientName, amount: Number(values.amount ?? 0), incurredAt: String(values.incurredAt ?? ""), category: String(values.category ?? "other") as Expense["category"], billableToClient: Boolean(values.billableToClient), note: String(values.note ?? "") });
+  if (operation.action === "updateExpense") next.expenses = next.expenses.map((expense) => expense.id === id ? { ...expense, projectId, projectName, clientName, amount: Number(values.amount ?? 0), incurredAt: String(values.incurredAt ?? ""), category: String(values.category ?? "other") as Expense["category"], billableToClient: Boolean(values.billableToClient), note: String(values.note ?? "") } : expense);
+  if (operation.action === "deleteExpense") next.expenses = next.expenses.filter((expense) => expense.id !== id);
+
+  return next;
+}
 function presentProjects(items: StoredProject[]): Project[] {
   const colors: Project["color"][] = ["mint", "amber", "blue"];
   return items.map((project, index) => {
@@ -124,7 +219,9 @@ export default function Home() {
   const [editingId, setEditingId] = useState<RecordId | null>(null);
   const [billingType, setBillingType] = useState<BillingType>("fixed");
   const [accountMode, setAccountMode] = useState<AccountMode>("solo");
-  const [syncState, setSyncState] = useState<"loading" | "saved" | "error">("loading");
+  const [syncState, setSyncState] = useState<"loading" | "saved" | "error" | "offline">("loading");
+  const [pendingCount, setPendingCount] = useState(0);
+  const [offlineWithoutCache, setOfflineWithoutCache] = useState(false);
   const [currentUser, setCurrentUser] = useState<AccountUser>({ id: "demo-owner", displayName: "מנחם", email: "menachem@example.com", role: "manager", isLocal: true });
   const [authRequired, setAuthRequired] = useState(false);
   const [recentTimeEntries, setRecentTimeEntries] = useState<TimeEntry[]>([]);
@@ -132,13 +229,22 @@ export default function Home() {
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [trash, setTrash] = useState<TrashState>({ clients: [], projects: [], employees: [] });
+  const [auditLog, setAuditLog] = useState<AuditEntry[]>([]);
+  const [reportProjectId, setReportProjectId] = useState("all");
+  const [reportFrom, setReportFrom] = useState("");
+  const [reportTo, setReportTo] = useState("");
   const [inviteNotice, setInviteNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
+  const stateRef = useRef<StoredState | null>(null);
+  const syncingRef = useRef(false);
 
   function applyStoredState(data: StoredState) {
+    stateRef.current = data;
+    setOfflineWithoutCache(false);
+    void writeCachedState(data).catch(() => undefined);
     const storedProjects = presentProjects(data.projects);
     setAccountMode(data.accountMode);
     setCurrentUser(data.user);
-    if (data.user.role === "employee") setView((current) => ["payments", "expenses", "clients", "employees", "trash"].includes(current) ? "dashboard" : current);
+    if (data.user.role === "employee") setView((current) => ["payments", "expenses", "clients", "employees", "trash", "history", "reports"].includes(current) ? "dashboard" : current);
     setClients(data.clients.map((client) => ({ ...client, projects: Number(client.projects) })));
     setEmployees(data.employees.map((employee) => ({ ...employee, hourlyCost: Number(employee.hourlyCost) })));
     setProjects(storedProjects);
@@ -147,36 +253,178 @@ export default function Home() {
     setExpenses((data.expenses ?? []).map((expense) => ({ ...expense, amount: Number(expense.amount), billableToClient: Boolean(expense.billableToClient) })));
     setAttachments(data.attachments ?? []);
     setTrash(data.trash ?? { clients: [], projects: [], employees: [] });
+    setAuditLog(data.auditLog ?? []);
     if (storedProjects.length) {
       const timerProject = data.activeTimer ? storedProjects.find((project) => String(project.id) === String(data.activeTimer?.projectId)) : null;
       setActiveProject((current) => timerProject ?? storedProjects.find((project) => project.id === current.id) ?? storedProjects[0]);
     }
     setRunning(Boolean(data.activeTimer));
-    setSeconds(Number(data.activeTimer?.elapsedSeconds ?? 0));
+    const serverElapsed = Number(data.activeTimer?.elapsedSeconds ?? 0);
+    const localElapsed = data.activeTimer ? elapsedBetween(data.activeTimer.startedAt, sqlTimestamp(new Date().toISOString())) : 0;
+    setSeconds(data.activeTimer ? Math.max(serverElapsed, localElapsed) : 0);
   }
 
   async function saveAction(action: string, values: Record<string, unknown>) {
+    if (onlineOnlyActions.has(action) && !navigator.onLine) {
+      setSyncState("offline");
+      setInviteNotice({ kind: "error", text: "הפעולה הזאת דורשת חיבור לאינטרנט. שאר העבודה נשמרת במכשיר." });
+      throw new Error("הפעולה הזאת דורשת חיבור לאינטרנט");
+    }
+    const operation = prepareQueuedOperation(action, values);
+    await enqueueOperation(operation);
+    const queuedOperations = await readQueuedOperations();
+    setPendingCount(queuedOperations.length);
+
+    const keepLocally = () => {
+      const current = stateRef.current;
+      if (!current) throw new Error("אין עדיין עותק מקומי שאפשר לעדכן");
+      const optimistic = applyOptimisticOperation(current, operation);
+      applyStoredState(optimistic);
+      setSyncState("offline");
+      return optimistic;
+    };
+
+    if (!navigator.onLine || queuedOperations[0]?.id !== operation.id) {
+      const localState = keepLocally();
+      if (navigator.onLine) void syncQueuedOperations();
+      return localState;
+    }
     setSyncState("loading");
-    const response = await fetch("/api/state", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, ...values }) });
-    if (!response.ok) throw new Error("שמירת הנתונים נכשלה");
-    const data = await response.json() as StoredState;
+    let response: Response;
+    try {
+      response = await fetch("/api/state", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, ...operation.values, operationId: operation.id }) });
+    } catch {
+      return keepLocally();
+    }
+    if (!response.ok) {
+      if (response.status >= 500 || response.status === 409) return keepLocally();
+      await removeQueuedOperation(operation.id);
+      setPendingCount((await readQueuedOperations()).length);
+      const payload = await response.json().catch(() => ({})) as { error?: string };
+      setSyncState("error");
+      throw new Error(payload.error ?? "שמירת הנתונים נכשלה");
+    }
+    let data: StoredState;
+    try {
+      data = await response.json() as StoredState;
+    } catch {
+      return keepLocally();
+    }
+    await removeQueuedOperation(operation.id);
+    setPendingCount((await readQueuedOperations()).length);
     applyStoredState(data);
     setSyncState("saved");
     return data;
   }
 
+  async function syncQueuedOperations() {
+    if (syncingRef.current || !navigator.onLine) {
+      if (!navigator.onLine) setSyncState("offline");
+      return;
+    }
+    syncingRef.current = true;
+    setSyncState("loading");
+    let rejected = 0;
+    try {
+      const operations = await readQueuedOperations();
+      if (!operations.length) {
+        const response = await fetch("/api/state");
+        if (response.status === 401) { setAuthRequired(true); return; }
+        if (!response.ok) throw new Error("טעינת הנתונים נכשלה");
+        applyStoredState(await response.json() as StoredState);
+      } else {
+        for (const operation of operations) {
+          let response: Response;
+          try {
+            response = await fetch("/api/state", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: operation.action, ...operation.values, operationId: operation.id }) });
+          } catch {
+            setSyncState("offline");
+            break;
+          }
+          if (response.status === 401) { setAuthRequired(true); break; }
+          if (response.ok) {
+            applyStoredState(await response.json() as StoredState);
+            await removeQueuedOperation(operation.id);
+            continue;
+          }
+          if (response.status >= 500 || response.status === 409) {
+            setSyncState("error");
+            break;
+          }
+          await removeQueuedOperation(operation.id);
+          rejected += 1;
+        }
+      }
+
+      const remaining = await readQueuedOperations();
+      setPendingCount(remaining.length);
+      if (remaining.length && stateRef.current) {
+        const optimistic = remaining.reduce((current, operation) => applyOptimisticOperation(current, operation), stateRef.current);
+        applyStoredState(optimistic);
+        setSyncState(navigator.onLine ? "error" : "offline");
+      } else if (!authRequired) {
+        setSyncState("saved");
+      }
+      if (rejected) setInviteNotice({ kind: "error", text: rejected === 1 ? "פעולה מקומית אחת לא סונכרנה משום שהנתונים בשרת השתנו." : rejected + " פעולות מקומיות לא סונכרנו משום שהנתונים בשרת השתנו." });
+    } finally {
+      syncingRef.current = false;
+    }
+  }
+
   useEffect(() => {
     let active = true;
-    const inviteToken = new URLSearchParams(window.location.search).get("invite");
-    const request = inviteToken
-      ? fetch("/api/state", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "acceptInvitation", token: inviteToken }) })
-      : fetch("/api/state");
-    request.then(async (response) => {
-      if (response.status === 401) { setAuthRequired(true); throw new Error("נדרשת התחברות"); }
-      if (!response.ok) { const error = await response.json().catch(() => ({})) as { error?: string }; throw new Error(error.error ?? "טעינת הנתונים נכשלה"); }
-      return response.json() as Promise<StoredState>;
-    }).then((data) => { if (active) { applyStoredState(data); setSyncState("saved"); if (inviteToken) { setInviteNotice({ kind: "success", text: "ההזמנה אושרה. התחברת לצוות בהצלחה." }); window.history.replaceState({}, "", window.location.pathname); } } }).catch(async (error: Error) => { if (!active) return; setSyncState("error"); if (inviteToken) { setInviteNotice({ kind: "error", text: error.message }); const fallback = await fetch("/api/state"); if (fallback.ok && active) { applyStoredState(await fallback.json() as StoredState); setSyncState("saved"); } } });
-    return () => { active = false; };
+    const handleOnline = () => { if (active) void syncQueuedOperations(); };
+    const handleOffline = () => { if (active) setSyncState("offline"); };
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    if ("serviceWorker" in navigator) void navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+
+    void (async () => {
+      const cached = await readCachedState<StoredState>().catch(() => undefined);
+      const queued = await readQueuedOperations().catch(() => []);
+      if (!active) return;
+      setPendingCount(queued.length);
+      const inviteToken = new URLSearchParams(window.location.search).get("invite");
+
+      if (!navigator.onLine) {
+        if (cached) applyStoredState(queued.reduce((current, operation) => applyOptimisticOperation(current, operation), cached));
+        else setOfflineWithoutCache(true);
+        setSyncState("offline");
+        return;
+      }
+
+      if (inviteToken) {
+        try {
+          const response = await fetch("/api/state", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "acceptInvitation", token: inviteToken }) });
+          if (response.status === 401) { setAuthRequired(true); return; }
+          const payload = await response.json() as StoredState & { error?: string };
+          if (!response.ok) throw new Error(payload.error ?? "אישור ההזמנה נכשל");
+          applyStoredState(payload);
+          setInviteNotice({ kind: "success", text: "ההזמנה אושרה. התחברת לצוות בהצלחה." });
+          window.history.replaceState({}, "", window.location.pathname);
+        } catch (error) {
+          if (cached) applyStoredState(cached);
+          setInviteNotice({ kind: "error", text: error instanceof Error ? error.message : "אישור ההזמנה נכשל" });
+        }
+      }
+      await syncQueuedOperations();
+    })().catch(() => {
+      if (!active) return;
+      setSyncState("offline");
+      void readCachedState<StoredState>().then((cached) => {
+        if (!active) return;
+        if (cached) applyStoredState(cached);
+        else setOfflineWithoutCache(true);
+      }).catch(() => setOfflineWithoutCache(true));
+    });
+
+    return () => {
+      active = false;
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  // The startup listener intentionally captures the initial synchronizer, which reads current browser and IndexedDB state on every call.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -293,14 +541,14 @@ export default function Home() {
       setEditingId(null);
       setView("expenses");
     } catch (error) {
-      setSyncState("error");
+      setSyncState(navigator.onLine ? "error" : "offline");
       setInviteNotice({ kind: "error", text: error instanceof Error ? error.message : "העלאת הקובץ נכשלה. אפשר לנסות שוב." });
     }
   }
 
   async function removeAttachment(attachment: Attachment) {
     if (!window.confirm(`להסיר את ${attachment.fileName}?`)) return;
-    try { await saveAction("deleteAttachment", { id: attachment.id }); } catch { setSyncState("error"); }
+    try { await saveAction("deleteAttachment", { id: attachment.id }); } catch { setSyncState(navigator.onLine ? "error" : "offline"); }
   }
 
   function openNew(type: EntityType) {
@@ -358,7 +606,7 @@ export default function Home() {
       const link = `${window.location.origin}/?invite=${invited.invitationToken}`;
       await navigator.clipboard?.writeText(link).catch(() => undefined);
       setInviteNotice({ kind: "success", text: `קישור ההזמנה של ${employee.name} נוצר. אפשר להעתיק אותו מכרטיס העובד.` });
-    } catch { setSyncState("error"); setInviteNotice({ kind: "error", text: "יצירת ההזמנה נכשלה. אפשר לנסות שוב." }); }
+    } catch { setSyncState(navigator.onLine ? "error" : "offline"); setInviteNotice({ kind: "error", text: "יצירת ההזמנה נכשלה. אפשר לנסות שוב." }); }
   }
 
   async function addProject(event: FormEvent<HTMLFormElement>) {
@@ -384,6 +632,7 @@ export default function Home() {
     } catch { setSyncState("error"); }
   }
 
+  if (offlineWithoutCache) return <OfflineUnavailableView />;
   if (authRequired) return <SignInView />;
   const isManager = currentUser.role === "manager";
   const editingTimeEntry = modal === "time" && editingId ? recentTimeEntries.find((entry) => entry.id === editingId) : undefined;
@@ -404,7 +653,8 @@ export default function Home() {
           {isManager && <button className={`nav-item ${view === "expenses" ? "active" : ""}`} onClick={() => navigate("expenses")}><span>−</span>הוצאות וחומרים</button>}
           {isManager && <button className={`nav-item ${view === "clients" ? "active" : ""}`} onClick={() => navigate("clients")}><span>♙</span>לקוחות</button>}
           {isManager && accountMode === "employer" && <button className={`nav-item ${view === "employees" ? "active" : ""}`} onClick={() => navigate("employees")}><span>♟</span>עובדים</button>}
-          <button className="nav-item"><span>↗</span>דוחות</button>
+          {isManager && <button className={`nav-item ${view === "history" ? "active" : ""}`} onClick={() => navigate("history")}><span>≡</span>היסטוריה</button>}
+          {isManager && <button className={`nav-item ${view === "reports" ? "active" : ""}`} onClick={() => navigate("reports")}><span>↗</span>דוחות</button>}
           {isManager && <button className={`nav-item ${view === "trash" ? "active" : ""}`} onClick={() => navigate("trash")}><span>♲</span>סל המחזור</button>}
         </nav>
         <button className="sidebar-foot" onClick={() => navigate("profile")}><div className="user-avatar">{currentUser.displayName.charAt(0)}</div><div><strong dir="auto">{currentUser.displayName}</strong><small>{!isManager ? "עובד בצוות" : accountMode === "solo" ? "עובד עצמאי" : "מעסיק עובדים"}</small></div><span aria-hidden="true">•••</span></button>
@@ -413,10 +663,11 @@ export default function Home() {
       <section className="content">
         <header className="topbar">
           <div><p className="eyebrow">{viewTitles[view].eyebrow}</p><h1>{view === "dashboard" ? `שלום ${currentUser.displayName}, יוצאים לעבודה.` : viewTitles[view].title}</h1></div>
-          <div className="top-actions"><span className="account-badge">{!isManager ? "עובד בצוות" : accountMode === "solo" ? "מצב עובד" : "מצב מעסיק"}</span><span className={`connection ${syncState === "error" ? "sync-error" : ""}`}><i /> {syncState === "loading" ? "שומר…" : syncState === "error" ? "בעיה בשמירה" : "נשמר"}</span><button className="icon-button profile-button" onClick={() => navigate("profile")} aria-label="פתיחת הפרופיל">{currentUser.displayName.charAt(0)}</button>{view === "time" ? <button className="primary-button" onClick={openTimeEntry}><span>＋</span> דיווח חדש</button> : view === "payments" ? <button className="primary-button" onClick={() => openPayment()}><span>＋</span> תשלום חדש</button> : view === "expenses" ? <button className="primary-button" onClick={() => openExpense()}><span>＋</span> הוצאה חדשה</button> : isManager && view !== "profile" && view !== "trash" && <button className="primary-button" onClick={() => openNew(view === "clients" ? "client" : view === "employees" ? "employee" : "project")}><span>＋</span> {view === "clients" ? "לקוח חדש" : view === "employees" ? "עובד חדש" : "פרויקט חדש"}</button>}</div>
+          <div className="top-actions"><span className="account-badge">{!isManager ? "עובד בצוות" : accountMode === "solo" ? "מצב עובד" : "מצב מעסיק"}</span><span className={`connection ${syncState === "error" ? "sync-error" : syncState === "offline" || pendingCount ? "sync-offline" : ""}`}><i /> {syncState === "loading" ? "מסנכרן…" : syncState === "error" ? "בעיה בסנכרון" : syncState === "offline" ? pendingCount ? `${pendingCount} ממתינות` : "לא מחובר" : pendingCount ? `${pendingCount} ממתינות` : "מסונכרן"}</span><button className="icon-button profile-button" onClick={() => navigate("profile")} aria-label="פתיחת הפרופיל">{currentUser.displayName.charAt(0)}</button>{view === "time" ? <button className="primary-button" onClick={openTimeEntry}><span>＋</span> דיווח חדש</button> : view === "payments" ? <button className="primary-button" onClick={() => openPayment()}><span>＋</span> תשלום חדש</button> : view === "expenses" ? <button className="primary-button" onClick={() => openExpense()}><span>＋</span> הוצאה חדשה</button> : isManager && !["profile", "trash", "history", "reports"].includes(view) && <button className="primary-button" onClick={() => openNew(view === "clients" ? "client" : view === "employees" ? "employee" : "project")}><span>＋</span> {view === "clients" ? "לקוח חדש" : view === "employees" ? "עובד חדש" : "פרויקט חדש"}</button>}</div>
         </header>
 
         {inviteNotice && <div className={`invite-notice ${inviteNotice.kind}`} role="status"><span>{inviteNotice.kind === "success" ? "✓" : "!"}</span><strong>{inviteNotice.text}</strong><button onClick={() => setInviteNotice(null)} aria-label="סגירת ההודעה">×</button></div>}
+        {(syncState === "offline" || pendingCount > 0) && <div className="offline-notice" role="status"><span>⌁</span><strong>{pendingCount ? `${pendingCount} פעולות נשמרו במכשיר ויסונכרנו לפי הסדר כשהחיבור יחזור.` : "אין כרגע חיבור לאינטרנט. אפשר להמשיך לעבוד והפעולות יישמרו במכשיר."}</strong><button type="button" className="secondary-compact" onClick={() => void syncQueuedOperations()}>ניסיון סנכרון</button></div>}
 
         {view === "dashboard" && (projects.length ? <Dashboard canManage={isManager} accountMode={accountMode} activeProject={activeProject} running={running} seconds={seconds} projects={visibleProjects} recentTimeEntries={recentTimeEntries.slice(0, 8)} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} toggleTimer={() => void toggleTimer()} stopTimer={() => void stopTimer()} selectProject={selectProject} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} editTimeEntry={openEditTimeEntry} removeTimeEntry={(entry) => void removeTimeEntry(entry)} showManual={openTimeEntry} showAll={() => navigate("projects")} showAllTime={() => navigate("time")} showPayments={() => navigate("payments")} /> : <NoProjectsView isManager={isManager} openNew={() => openNew("project")} />)}
         {view === "projects" && <ProjectsView canManage={isManager} projects={visibleProjects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} activeProject={activeProject} running={running} selectProject={selectProject} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} openManual={openTimeEntry} openNew={() => openNew("project")} />}
@@ -426,7 +677,9 @@ export default function Home() {
         {isManager && view === "clients" && <ClientsView clients={clients} query={query} setQuery={setQuery} openNew={() => openNew("client")} editClient={(client) => openEdit("client", client)} removeClient={(client) => void removeRecord("client", client.id, client.name)} />}
         {isManager && view === "employees" && <EmployeesView employees={employees} openNew={() => openNew("employee")} editEmployee={(employee) => openEdit("employee", employee)} removeEmployee={(employee) => void removeRecord("employee", employee.id, employee.name)} inviteEmployee={(employee) => void inviteEmployee(employee)} />}
         {isManager && view === "trash" && <RecycleBinView trash={trash} restoreClient={(id, restoreProjects) => void restoreRecord("client", id, restoreProjects)} restoreProject={(id) => void restoreRecord("project", id)} restoreEmployee={(id) => void restoreRecord("employee", id)} />}
-        {view === "profile" && <ProfileView user={currentUser} accountMode={accountMode} setAccountMode={(mode) => { setAccountMode(mode); void saveAction("setAccountMode", { accountMode: mode }).catch(() => setSyncState("error")); }} openTrash={() => navigate("trash")} />}
+        {isManager && view === "history" && <AuditLogView entries={auditLog} />}
+        {isManager && view === "reports" && <ReportsView projects={projects} projectId={reportProjectId} setProjectId={setReportProjectId} from={reportFrom} setFrom={setReportFrom} to={reportTo} setTo={setReportTo} />}
+        {view === "profile" && <ProfileView user={currentUser} accountMode={accountMode} setAccountMode={(mode) => { setAccountMode(mode); void saveAction("setAccountMode", { accountMode: mode }).catch(() => setSyncState("error")); }} openReports={() => navigate("reports")} openHistory={() => navigate("history")} openTrash={() => navigate("trash")} />}
       </section>
 
       <nav className="mobile-nav" aria-label="ניווט נייד">
@@ -454,6 +707,25 @@ export default function Home() {
   );
 }
 
+const LONG_TIMER_SECONDS = 10 * 60 * 60;
+
+function navigationUrl(provider: "google" | "waze", address: string) {
+  const destination = encodeURIComponent(address);
+  return provider === "waze"
+    ? `https://www.waze.com/ul?q=${destination}&navigate=yes`
+    : `https://www.google.com/maps/dir/?api=1&destination=${destination}&travelmode=driving&dir_action=navigate`;
+}
+
+function NavigationChooser({ address, label = "ניווט" }: { address: string; label?: string }) {
+  return <details className="navigation-choice">
+    <summary aria-label={`בחירת אפליקציית ניווט אל ${address}`}>⌖ {label}</summary>
+    <div className="navigation-menu" role="group" aria-label="בחירת אפליקציית ניווט">
+      <a href={navigationUrl("waze", address)} target="_blank" rel="noreferrer">Waze</a>
+      <a href={navigationUrl("google", address)} target="_blank" rel="noreferrer">Google Maps</a>
+    </div>
+  </details>;
+}
+
 type ProjectListProps = { projects: Project[]; activeProject: Project; running: boolean; canManage: boolean; selectProject: (project: Project) => void; editProject: (project: Project) => void; removeProject: (project: Project) => void };
 
 function ProjectList({ projects, activeProject, running, canManage, selectProject, editProject, removeProject }: ProjectListProps) {
@@ -465,7 +737,7 @@ function ProjectList({ projects, activeProject, running, canManage, selectProjec
     <div className="project-metric"><span>שעות</span><strong>{project.hours}</strong></div>
     <div className="project-metric"><span>יתרה</span><strong>{project.balance}</strong></div>
     <button className="start-button" onClick={() => selectProject(project)} disabled={running && activeProject.id === project.id}>{running && activeProject.id === project.id ? "עובדים עכשיו" : "התחלת עבודה"}</button>
-    {canManage && <div className="record-actions"><button type="button" onClick={() => editProject(project)}>עריכה</button><button type="button" className="danger" onClick={() => removeProject(project)}>לסל</button></div>}
+    <div className="record-actions"><NavigationChooser address={project.address} />{canManage && <><button type="button" onClick={() => editProject(project)}>עריכה</button><button type="button" className="danger" onClick={() => removeProject(project)}>לסל</button></>}</div>
   </article>)}</div>;
 }
 
@@ -479,7 +751,8 @@ function Dashboard({ canManage, accountMode, activeProject, running, seconds, pr
   const totalPaid = projects.reduce((sum, project) => sum + project.paidAmount, 0);
   const averageHourly = totalHours ? totalExpected / totalHours : 0;
   return <>
-    <section className="timer-card" aria-label="טיימר עבודה"><div className="timer-glow" /><div className="timer-project"><span className="live-pill"><i /> {running ? "טיימר פעיל" : "מוכן להתחלה"}</span><h2 dir="auto">{activeProject.name}</h2><p dir="auto">♙ {activeProject.client}<span>·</span>⌖ {activeProject.address}</p></div><div className="timer-clock"><span>{formatTime(seconds)}</span><small>{running ? "הזמן נשמר גם לאחר רענון" : "בחרו פרויקט או הפעילו את הטיימר"}</small></div><div className="timer-actions"><button className="stop-button" onClick={stopTimer} disabled={!running}><span>■</span> סיום עבודה</button><button className="pause-button" onClick={toggleTimer}><span>{running ? "Ⅱ" : "▶"}</span> {running ? "השהיה" : "התחלה"}</button></div></section>
+    <section className="timer-card" aria-label="טיימר עבודה"><div className="timer-glow" /><div className="timer-project"><span className="live-pill"><i /> {running ? "טיימר פעיל" : "מוכן להתחלה"}</span><h2 dir="auto">{activeProject.name}</h2><div className="timer-location" dir="auto">♙ {activeProject.client}<span>·</span>⌖ {activeProject.address} <NavigationChooser address={activeProject.address} label="פתיחת ניווט" /></div></div><div className="timer-clock"><span>{formatTime(seconds)}</span><small>{running ? "הזמן נשמר גם לאחר רענון" : "בחרו פרויקט או הפעילו את הטיימר"}</small></div><div className="timer-actions"><button className="stop-button" onClick={stopTimer} disabled={!running}><span>■</span> סיום עבודה</button><button className="pause-button" onClick={toggleTimer}><span>{running ? "Ⅱ" : "▶"}</span> {running ? "השהיה" : "התחלה"}</button></div></section>
+    {running && seconds >= LONG_TIMER_SECONDS && <div className="timer-warning" role="alert"><span>!</span><div><strong>הטיימר פועל כבר יותר מ־10 שעות</strong><p>כדאי לוודא שלא שכחת לעצור אותו. הזמן ממשיך להישמר עד לעצירה.</p></div><button type="button" onClick={stopTimer}>עצירת הטיימר</button></div>}
     <section className="stats-grid" aria-label="סיכום שעות"><article><div className="stat-icon green">◷</div><div><span>שעות שנשמרו</span><strong>{totalHours.toFixed(1)}</strong><small>בכל הפרויקטים המוצגים</small></div></article><article><div className="stat-icon violet">€</div><div><span>{!canManage || accountMode === "solo" ? "השכר הצפוי" : "חיוב צפוי"}</span><strong>€{Math.round(totalExpected).toLocaleString()}</strong><small>לפי שיטות התמחור</small></div></article>{canManage ? <button type="button" className="stat-card clickable-stat" onClick={showPayments}><div className="stat-icon amber">◎</div><div><span>התקבל בפועל</span><strong>€{Math.round(totalPaid).toLocaleString()}</strong><small>פתיחת מסך התשלומים</small></div></button> : <article><div className="stat-icon amber">◎</div><div><span>דיווחי זמן אחרונים</span><strong>{recentTimeEntries.length}</strong><small>עד שמונה דיווחים אחרונים</small></div></article>}<article><div className="stat-icon blue">↗</div><div><span>{!canManage || accountMode === "solo" ? "ממוצע לשעת עבודה" : "ממוצע חיוב לשעה"}</span><strong>€{Math.round(averageHourly).toLocaleString()}</strong><small className="up">מחושב מהנתונים שנשמרו</small></div></article></section>
     <section className="projects-section"><div className="section-head"><div><h2>פרויקטים פעילים</h2><p>כל מה שקורה בשטח, במקום אחד</p></div><div className="section-actions"><button className="secondary-compact" onClick={showManual}>＋ דיווח ידני</button><button className="text-button" onClick={showAll}>לכל הפרויקטים ←</button></div></div><ProjectToolbar filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} /><ProjectList canManage={canManage} projects={projects} activeProject={activeProject} running={running} selectProject={selectProject} editProject={editProject} removeProject={removeProject} /></section>
     <RecentTimeEntries entries={recentTimeEntries} editEntry={editTimeEntry} removeEntry={removeTimeEntry} showAll={showAllTime} />
@@ -547,8 +820,77 @@ function EmployeesView({ employees, openNew, editEmployee, removeEmployee, invit
   })}</div></section>;
 }
 
+function OfflineUnavailableView() {
+  return <main className="sign-in-shell"><section className="sign-in-card"><Image className="sign-in-logo" src="/app-icon.png" width={82} height={82} alt="מנהל עבודה" /><p>מנהל עבודה</p><h1>אין חיבור לאינטרנט</h1><span>עדיין אין במכשיר הזה עותק מקומי של הנתונים. יש להתחבר פעם אחת לאינטרנט, ולאחר מכן האפליקציה תהיה זמינה גם אופליין.</span><button type="button" onClick={() => window.location.reload()}>ניסיון חיבור מחדש</button></section></main>;
+}
+
 function SignInView() {
   return <main className="sign-in-shell"><section className="sign-in-card"><Image className="sign-in-logo" src="/app-icon.png" width={82} height={82} alt="מנהל עבודה" /><p>מנהל עבודה</p><h1>החשבון שלך מחכה לך</h1><span>כדי לשמור על הפרויקטים והמידע הכספי שלך בנפרד, יש להתחבר לפני שממשיכים.</span><a href="/signin-with-chatgpt?return_to=%2F">התחברות עם ChatGPT</a><small>בסביבה המקומית הכניסה מתבצעת אוטומטית עם משתמש הפיתוח.</small></section></main>;
+}
+
+const auditEntityLabels: Record<string, string> = { time_entry: "דיווח זמן", payment: "תשלום", expense: "הוצאה", attachment: "קובץ" };
+const auditActionLabels: Record<string, string> = { create: "יצירה", update: "עדכון", delete: "מחיקה" };
+
+function ReportsView({ projects, projectId, setProjectId, from, setFrom, to, setTo }: { projects: Project[]; projectId: string; setProjectId: (value: string) => void; from: string; setFrom: (value: string) => void; to: string; setTo: (value: string) => void }) {
+  const [reportData, setReportData] = useState<ReportDataRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    const controller = new AbortController();
+    const params = new URLSearchParams({ report: "1", projectId });
+    if (from) params.set("from", from);
+    if (to) params.set("to", to);
+    Promise.resolve().then(async () => {
+      setLoading(true); setError("");
+      const response = await fetch("/api/state?" + params.toString(), { signal: controller.signal });
+      const payload = await response.json() as { rows?: ReportDataRow[]; error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "טעינת הדוח נכשלה");
+      return payload.rows ?? [];
+    }).then((items) => setReportData(items.map((item) => ({ ...item, fixedPrice: Number(item.fixedPrice), hourlyRate: Number(item.hourlyRate), totalSeconds: Number(item.totalSeconds), paidAmount: Number(item.paidAmount), expenseAmount: Number(item.expenseAmount), billableExpenseAmount: Number(item.billableExpenseAmount), laborCost: Number(item.laborCost) })))).catch((reason: unknown) => {
+      if (reason instanceof DOMException && reason.name === "AbortError") return;
+      setReportData([]); setError(reason instanceof Error ? reason.message : "טעינת הדוח נכשלה");
+    }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [from, projectId, to]);
+  const rows = useMemo(() => reportData.map((item) => {
+    const hours = item.totalSeconds / 3600;
+    const baseIncome = item.billingType === "fixed" ? item.fixedPrice : item.billingType === "hourly" ? hours * item.hourlyRate : item.fixedPrice + hours * item.hourlyRate;
+    const expected = baseIncome + item.billableExpenseAmount;
+    const costs = item.expenseAmount + item.laborCost;
+    return { ...item, hours, expected, costs, profit: expected - costs };
+  }), [reportData]);
+  const totals = rows.reduce((sum, row) => ({ hours: sum.hours + row.hours, expected: sum.expected + row.expected, paid: sum.paid + row.paidAmount, costs: sum.costs + row.costs, profit: sum.profit + row.profit }), { hours: 0, expected: 0, paid: 0, costs: 0, profit: 0 });
+  const receivedProfit = totals.paid - totals.costs;
+  function csvCell(value: string | number) {
+    let text = String(value);
+    if (/^[=+\-@\t\r]/.test(text)) text = "'" + text;
+    return '"' + text.replaceAll('"', '""') + '"';
+  }
+  function exportCsv() {
+    const header = ["פרויקט", "שעות", "הכנסה צפויה", "התקבל", "הוצאות עסק", "עלות עובדים", "רווח צפוי"];
+    const dataRows = rows.map((row) => [row.projectName, row.hours.toFixed(2), row.expected.toFixed(2), row.paidAmount.toFixed(2), row.expenseAmount.toFixed(2), row.laborCost.toFixed(2), row.profit.toFixed(2)]);
+    const lines = [header, ...dataRows].map((line) => line.map(csvCell).join(","));
+    const url = URL.createObjectURL(new Blob(["\ufeff" + lines.join("\n")], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a"); link.href = url; link.download = "menahel-avoda-report.csv"; link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+  function escapeHtml(value: string | number) {
+    return String(value).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" })[character] ?? character);
+  }
+  function printReport() {
+    const printWindow = window.open("", "_blank", "width=1100,height=800");
+    if (!printWindow) { setError("הדפדפן חסם את חלון ההדפסה. יש לאפשר חלונות קופצים ולנסות שוב."); return; }
+    printWindow.opener = null;
+    const tableRows = rows.map((row) => ["<tr><td>", escapeHtml(row.projectName), "</td><td>", row.hours.toFixed(1), "</td><td>€", Math.round(row.expected).toLocaleString(), "</td><td>€", Math.round(row.paidAmount).toLocaleString(), "</td><td>€", Math.round(row.expenseAmount).toLocaleString(), "</td><td>€", Math.round(row.laborCost).toLocaleString(), "</td><td>€", Math.round(row.profit).toLocaleString(), "</td></tr>"].join("")).join("");
+    const rangeLabel = from || to ? "טווח: " + (from || "התחלה") + " עד " + (to || "היום") : "כל התקופה";
+    printWindow.document.write(["<!doctype html><html lang='he' dir='rtl'><head><meta charset='utf-8'><title>דוח מנהל עבודה</title><style>body{font-family:Arial,sans-serif;color:#173b2e;padding:28px}h1{margin:0 0 8px}.meta{color:#64766e;margin-bottom:24px}.summary{display:flex;gap:24px;margin:20px 0}.summary div{padding:12px 16px;background:#eef6f2;border-radius:10px}table{width:100%;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #dfe8e3;text-align:right}th{background:#1e7a59;color:white}@media print{body{padding:0}}</style></head><body><h1>מנהל עבודה — דוח כספי</h1><div class='meta'>", escapeHtml(rangeLabel), " · הופק בתאריך ", escapeHtml(new Date().toLocaleDateString("he-IL")), "</div><div class='summary'><div>הכנסה צפויה: €", Math.round(totals.expected).toLocaleString(), "</div><div>רווח צפוי: €", Math.round(totals.profit).toLocaleString(), "</div><div>התקבל בפועל: €", Math.round(totals.paid).toLocaleString(), "</div></div><table><thead><tr><th>פרויקט</th><th>שעות</th><th>צפוי</th><th>התקבל</th><th>הוצאות</th><th>עובדים</th><th>רווח</th></tr></thead><tbody>", tableRows, "</tbody></table><script>window.addEventListener('load',function(){window.print()});</scr" + "ipt></body></html>"].join(""));
+    printWindow.document.close();
+  }
+  return <><section className="report-filters"><Field label="פרויקט"><select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="all">כל הפרויקטים</option>{projects.map((project) => <option key={project.id} value={String(project.id)}>{project.name}</option>)}</select></Field><Field label="מתאריך"><input type="date" max={to || undefined} value={from} onChange={(event) => setFrom(event.target.value)} /></Field><Field label="עד תאריך"><input type="date" min={from || undefined} value={to} onChange={(event) => setTo(event.target.value)} /></Field><div className="report-export-actions"><button type="button" className="primary-button" disabled={loading || !rows.length} onClick={exportCsv}>הורדת CSV</button><button type="button" className="secondary-compact" disabled={loading || !rows.length} onClick={printReport}>הדפסה / שמירה כ־PDF</button></div></section>{error && <div className="report-status error" role="alert">{error}</div>}{loading && <div className="report-status" role="status">טוען את כל נתוני הדוח…</div>}<section className="finance-summary report-summary"><article><span>שעות</span><strong>{totals.hours.toFixed(1)}</strong></article><article><span>הכנסה צפויה</span><strong>€{Math.round(totals.expected).toLocaleString()}</strong></article><article><span>רווח צפוי</span><strong>€{Math.round(totals.profit).toLocaleString()}</strong><small>כולל הוצאות ועלויות עובדים</small></article><article className={receivedProfit < 0 ? "negative" : "positive"}><span>רווח לפי תקבולים</span><strong>€{Math.round(receivedProfit).toLocaleString()}</strong><small>מה שהתקבל בפועל פחות כל העלויות</small></article></section><section className="page-card report-card"><div className="section-head"><div><h2>סיכום לפי פרויקט</h2><p>{rows.length} פרויקטים בדוח · התקבל בפועל: €{Math.round(totals.paid).toLocaleString()}</p></div></div><p className="report-note">בטווח תאריכים המחיר הגלובלי נשאר חלק מהכנסת הפרויקט; שעות, תקבולים, הוצאות ועלויות עובדים מסוננים לפי התאריך.</p>{!loading && rows.length ? <div className="report-table"><div className="report-table-head"><span>פרויקט</span><span>שעות</span><span>צפוי</span><span>התקבל</span><span>עלויות</span><span>רווח צפוי</span></div>{rows.map((row) => <div className="report-table-row" key={row.projectId}><strong dir="auto">{row.projectName}</strong><span>{row.hours.toFixed(1)}</span><span>€{Math.round(row.expected).toLocaleString()}</span><span>€{Math.round(row.paidAmount).toLocaleString()}</span><span title={"הוצאות: €" + Math.round(row.expenseAmount).toLocaleString() + " · עובדים: €" + Math.round(row.laborCost).toLocaleString()}>€{Math.round(row.costs).toLocaleString()}</span><b className={row.profit < 0 ? "negative-text" : "positive-text"}>€{Math.round(row.profit).toLocaleString()}</b></div>)}</div> : !loading && !error ? <div className="empty-state"><div><strong>אין נתונים בטווח שנבחר</strong><span>שנו את הפרויקט או את טווח התאריכים.</span></div></div> : null}</section></>;
+}
+
+function AuditLogView({ entries }: { entries: AuditEntry[] }) {
+  return <section className="page-card history-card"><div className="section-head"><div><h2>היסטוריית שינויים</h2><p>{entries.length ? `${entries.length} פעולות אחרונות` : "דיווחי זמן, תשלומים, הוצאות וקבצים יופיעו כאן"}</p></div><span className="trash-total">{entries.length}</span></div>{entries.length ? <div className="audit-list">{entries.map((entry) => <article className="audit-row" key={entry.id}><div className="audit-icon">≡</div><div><strong>{auditActionLabels[entry.action] ?? entry.action} {auditEntityLabels[entry.entityType] ?? entry.entityType}</strong><span>על ידי {entry.actorName}</span></div><time>{new Date(entry.createdAt.replace(" ", "T") + "Z").toLocaleString("he-IL", { dateStyle: "medium", timeStyle: "short" })}</time></article>)}</div> : <div className="empty-state"><div><strong>אין עדיין פעולות מתועדות</strong><span>יצירה, עריכה ומחיקה של דיווחי זמן, תשלומים, הוצאות וקבצים יופיעו כאן.</span></div></div>}</section>;
 }
 
 function formatDeletedAt(value: string) {
@@ -565,9 +907,9 @@ function RecycleBinView({ trash, restoreClient, restoreProject, restoreEmployee 
   </div>}</section>;
 }
 
-function ProfileView({ user, accountMode, setAccountMode, openTrash }: { user: AccountUser; accountMode: AccountMode; setAccountMode: (mode: AccountMode) => void; openTrash: () => void }) {
+function ProfileView({ user, accountMode, setAccountMode, openReports, openHistory, openTrash }: { user: AccountUser; accountMode: AccountMode; setAccountMode: (mode: AccountMode) => void; openReports: () => void; openHistory: () => void; openTrash: () => void }) {
   if (user.role === "employee") return <section className="page-card profile-card"><div className="profile-intro"><div className="profile-avatar">{user.displayName.charAt(0)}</div><div><h2 dir="auto">{user.displayName}</h2><p dir="ltr">{user.email}</p><small>עובד מחובר לצוות</small></div>{!user.isLocal && <a className="sign-out-link" href="/signout-with-chatgpt?return_to=%2F">התנתקות</a>}</div><div className="team-member-summary"><span className="mode-icon">♟</span><div><strong>חשבון עובד</strong><p>מוצגים לך רק הפרויקטים שאליהם שויכת, דיווחי הזמן שלך והשכר המחושב לפי התעריף שלך.</p></div></div></section>;
-  return <section className="page-card profile-card"><div className="profile-intro"><div className="profile-avatar">{user.displayName.charAt(0)}</div><div><h2 dir="auto">{user.displayName}</h2><p dir="ltr">{user.email}</p><small>{user.isLocal ? "משתמש פיתוח מקומי" : "חשבון מחובר"}</small></div>{!user.isLocal && <a className="sign-out-link" href="/signout-with-chatgpt?return_to=%2F">התנתקות</a>}</div><fieldset className="account-mode-options"><legend>סוג החשבון שלי</legend><label className={accountMode === "solo" ? "selected" : ""}><input type="radio" name="accountMode" checked={accountMode === "solo"} onChange={() => setAccountMode("solo")} /><span className="mode-icon">◷</span><span><strong>עובד</strong><small>אני עובד לבד ומגדיר בכל פרויקט כמה מגיע לי לפי שעה, במחיר גלובלי או בשילוב.</small></span>{accountMode === "solo" && <b>נבחר</b>}</label><label className={accountMode === "employer" ? "selected" : ""}><input type="radio" name="accountMode" checked={accountMode === "employer"} onChange={() => setAccountMode("employer")} /><span className="mode-icon">♟</span><span><strong>מעסיק עובדים</strong><small>אני מנהל צוות ומפריד בין המחיר ללקוח לבין העלות של כל עובד.</small></span>{accountMode === "employer" && <b>נבחר</b>}</label></fieldset><div className="mode-summary"><strong>{accountMode === "solo" ? "מצב עובד פעיל" : "מצב מעסיק פעיל"}</strong><span>{accountMode === "solo" ? "מסך העובדים הוסתר, ובפרויקטים יוצג רק השכר שמגיע לך." : "ניהול העובדים, עלויות השכר ורווחיות הפרויקט זמינים עבורך."}</span></div><button className="profile-trash-link" onClick={openTrash}><span>♲</span><span><strong>סל המחזור</strong><small>צפייה ושחזור של לקוחות, פרויקטים ועובדים שנמחקו</small></span><b>←</b></button></section>;
+  return <section className="page-card profile-card"><div className="profile-intro"><div className="profile-avatar">{user.displayName.charAt(0)}</div><div><h2 dir="auto">{user.displayName}</h2><p dir="ltr">{user.email}</p><small>{user.isLocal ? "משתמש פיתוח מקומי" : "חשבון מחובר"}</small></div>{!user.isLocal && <a className="sign-out-link" href="/signout-with-chatgpt?return_to=%2F">התנתקות</a>}</div><fieldset className="account-mode-options"><legend>סוג החשבון שלי</legend><label className={accountMode === "solo" ? "selected" : ""}><input type="radio" name="accountMode" checked={accountMode === "solo"} onChange={() => setAccountMode("solo")} /><span className="mode-icon">◷</span><span><strong>עובד</strong><small>אני עובד לבד ומגדיר בכל פרויקט כמה מגיע לי לפי שעה, במחיר גלובלי או בשילוב.</small></span>{accountMode === "solo" && <b>נבחר</b>}</label><label className={accountMode === "employer" ? "selected" : ""}><input type="radio" name="accountMode" checked={accountMode === "employer"} onChange={() => setAccountMode("employer")} /><span className="mode-icon">♟</span><span><strong>מעסיק עובדים</strong><small>אני מנהל צוות ומפריד בין המחיר ללקוח לבין העלות של כל עובד.</small></span>{accountMode === "employer" && <b>נבחר</b>}</label></fieldset><div className="mode-summary"><strong>{accountMode === "solo" ? "מצב עובד פעיל" : "מצב מעסיק פעיל"}</strong><span>{accountMode === "solo" ? "מסך העובדים הוסתר, ובפרויקטים יוצג רק השכר שמגיע לך." : "ניהול העובדים, עלויות השכר ורווחיות הפרויקט זמינים עבורך."}</span></div><button className="profile-trash-link" onClick={openReports}><span>↗</span><span><strong>דוחות כספיים</strong><small>סינון, CSV והדפסה או שמירה כ־PDF</small></span><b>←</b></button><button className="profile-trash-link" onClick={openHistory}><span>≡</span><span><strong>היסטוריית שינויים</strong><small>צפייה בפעולות המתועדות במערכת</small></span><b>←</b></button><button className="profile-trash-link" onClick={openTrash}><span>♲</span><span><strong>סל המחזור</strong><small>צפייה ושחזור של לקוחות, פרויקטים ועובדים שנמחקו</small></span><b>←</b></button></section>;
 }
 
 function Modal({ title, close, children }: { title: string; close: () => void; children: React.ReactNode }) {
