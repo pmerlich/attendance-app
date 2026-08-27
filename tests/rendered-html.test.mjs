@@ -53,3 +53,17 @@ test("ships an offline shell and an idempotent operation migration", async () =>
   assert.match(migration, /CREATE TABLE `offline_operations`/);
   assert.match(migration, /offline_operations_owner_operation_unique/);
 });
+test("supports employee reports and native Excel export", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const api = await readFile(new URL("../app/api/state/route.ts", import.meta.url), "utf8");
+  const excel = await readFile(new URL("../app/xlsx-export.ts", import.meta.url), "utf8");
+  assert.match(page, /כל העובדים — דוח כספי/);
+  assert.match(page, /menahel-avoda-report\.xlsx/);
+  assert.match(page, /application\/vnd\.openxmlformats-officedocument\.spreadsheetml\.sheet/);
+  assert.match(api, /employeeId !== "all"/);
+  assert.match(api, /te\.user_id = \?/);
+  assert.match(excel, /0x04034b50/);
+  assert.match(excel, /0x02014b50/);
+  assert.match(excel, /0x06054b50/);
+  assert.match(excel, /xl\/worksheets\/sheet1\.xml/);
+});
