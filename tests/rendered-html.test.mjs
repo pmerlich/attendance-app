@@ -30,6 +30,7 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.match(html, /סל המחזור/);
   assert.match(html, /דיווחי זמן/);
   assert.match(html, /תשלומים/);
-  assert.match(html, /href="\/app-icon\.jpg"/);
+  assert.match(html, /הוצאות וחומרים/);
+  assert.match(html, /href="\/app-icon\.png"/);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Starter Project/);
 });

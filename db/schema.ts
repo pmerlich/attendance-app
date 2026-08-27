@@ -53,11 +53,11 @@ export const payments = sqliteTable("payments", {
 
 export const expenses = sqliteTable("expenses", {
   id: text("id").primaryKey(), projectId: text("project_id").notNull().references(() => projects.id), amount: real("amount").notNull(), incurredAt: text("incurred_at").notNull(), category: text("category").notNull().default("materials"), billableToClient: integer("billable_to_client", { mode: "boolean" }).notNull().default(false), note: text("note"), ...timestamps,
-});
+}, (table) => [index("idx_expenses_project_id").on(table.projectId)]);
 
 export const attachments = sqliteTable("attachments", {
   id: text("id").primaryKey(), businessId: text("business_id").notNull().references(() => businesses.id), projectId: text("project_id").references(() => projects.id), expenseId: text("expense_id").references(() => expenses.id), objectKey: text("object_key").notNull().unique(), fileName: text("file_name").notNull(), contentType: text("content_type").notNull(), uploadedBy: text("uploaded_by").notNull().references(() => users.id), createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`), deletedAt: text("deleted_at"),
-});
+}, (table) => [index("idx_attachments_business_project").on(table.businessId, table.projectId)]);
 
 export const auditLog = sqliteTable("audit_log", {
   id: text("id").primaryKey(), businessId: text("business_id").notNull().references(() => businesses.id), actorId: text("actor_id").notNull().references(() => users.id), entityType: text("entity_type").notNull(), entityId: text("entity_id").notNull(), action: text("action").notNull(), detailsJson: text("details_json").notNull().default("{}"), createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
