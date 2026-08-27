@@ -303,10 +303,12 @@ export async function GET(request: Request) {
   if (!attachment) return Response.json({ error: "הקובץ לא נמצא" }, { status: 404 });
   const object = await env.FILES.get(attachment.objectKey);
   if (!object) return Response.json({ error: "תוכן הקובץ לא נמצא" }, { status: 404 });
+  const download = new URL(request.url).searchParams.get("download") === "1";
   return new Response(object.body, { headers: {
     "content-type": attachment.contentType,
-    "content-disposition": `inline; filename*=UTF-8''${encodeURIComponent(attachment.fileName)}`,
+    "content-disposition": `${download ? "attachment" : "inline"}; filename*=UTF-8''${encodeURIComponent(attachment.fileName)}`,
     "cache-control": "private, max-age=300",
+    "x-content-type-options": "nosniff",
   } });
 }
 
@@ -320,7 +322,10 @@ async function uploadAttachment(request: Request) {
   if (!(file instanceof File) || file.size <= 0) return Response.json({ error: "יש לבחור קובץ" }, { status: 400 });
   if (file.size > 10 * 1024 * 1024) return Response.json({ error: "הקובץ גדול מ־10MB" }, { status: 400 });
   const allowedTypes = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif", "application/pdf"]);
-  if (!allowedTypes.has(file.type)) return Response.json({ error: "אפשר להעלות JPG, PNG, WEBP, HEIC או PDF בלבד" }, { status: 400 });
+  const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+  const contentTypeByExtension: Record<string, string> = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", heic: "image/heic", heif: "image/heif", pdf: "application/pdf" };
+  const contentType = allowedTypes.has(file.type) ? file.type : contentTypeByExtension[extension];
+  if (!contentType) return Response.json({ error: "אפשר להעלות JPG, PNG, WEBP, HEIC או PDF בלבד" }, { status: 400 });
   const projectId = String(form.get("projectId") ?? "");
   const project = await db.prepare("SELECT id FROM projects WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(projectId, identity.businessId).first();
   if (!project) return Response.json({ error: "הפרויקט לא נמצא" }, { status: 400 });
@@ -334,13 +339,13 @@ async function uploadAttachment(request: Request) {
   const attachmentId = crypto.randomUUID();
   const safeName = file.name.replace(/[^\p{L}\p{N}._-]+/gu, "-").slice(0, 120) || "attachment";
   const objectKey = `${identity.businessId}/${attachmentId}-${safeName}`;
-  await env.FILES.put(objectKey, file.stream(), { httpMetadata: { contentType: file.type } });
+  await env.FILES.put(objectKey, file.stream(), { httpMetadata: { contentType } });
   try {
     await db.batch([
       db.prepare("INSERT INTO attachments (id, business_id, project_id, expense_id, object_key, file_name, content_type, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-        .bind(attachmentId, identity.businessId, projectId, expenseId || null, objectKey, file.name.slice(0, 180), file.type, identity.ownerId),
+        .bind(attachmentId, identity.businessId, projectId, expenseId || null, objectKey, file.name.slice(0, 180), contentType, identity.ownerId),
       db.prepare("INSERT INTO audit_log (id, business_id, actor_id, entity_type, entity_id, action, details_json) VALUES (?, ?, ?, 'attachment', ?, 'create', ?)")
-        .bind(crypto.randomUUID(), identity.businessId, identity.ownerId, attachmentId, JSON.stringify({ projectId, expenseId: expenseId || null, fileName: file.name, contentType: file.type, size: file.size })),
+        .bind(crypto.randomUUID(), identity.businessId, identity.ownerId, attachmentId, JSON.stringify({ projectId, expenseId: expenseId || null, fileName: file.name, contentType, size: file.size })),
     ]);
   } catch (error) {
     await env.FILES.delete(objectKey);
