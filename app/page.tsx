@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 
-type View = "dashboard" | "projects" | "time" | "payments" | "expenses" | "clients" | "employees" | "trash" | "history" | "profile";
+type View = "dashboard" | "projects" | "time" | "payments" | "expenses" | "clients" | "employees" | "trash" | "history" | "reports" | "profile";
 type BillingType = "fixed" | "hourly" | "combined";
 type AccountMode = "solo" | "employer";
 type EntityType = "project" | "client" | "employee";
@@ -64,6 +64,7 @@ const viewTitles: Record<View, { eyebrow: string; title: string }> = {
   employees: { eyebrow: "הצוות שלך", title: "עובדים" },
   trash: { eyebrow: "שחזור מידע", title: "סל המחזור" },
   history: { eyebrow: "בקרה ותיעוד", title: "היסטוריית שינויים" },
+  reports: { eyebrow: "סיכומים וניתוח", title: "דוחות" },
   profile: { eyebrow: "העדפות החשבון", title: "הפרופיל שלי" },
 };
 
@@ -135,6 +136,9 @@ export default function Home() {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [trash, setTrash] = useState<TrashState>({ clients: [], projects: [], employees: [] });
   const [auditLog, setAuditLog] = useState<AuditEntry[]>([]);
+  const [reportProjectId, setReportProjectId] = useState("all");
+  const [reportFrom, setReportFrom] = useState("");
+  const [reportTo, setReportTo] = useState("");
   const [inviteNotice, setInviteNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
 
   function applyStoredState(data: StoredState) {
@@ -409,7 +413,7 @@ export default function Home() {
           {isManager && <button className={`nav-item ${view === "clients" ? "active" : ""}`} onClick={() => navigate("clients")}><span>♙</span>לקוחות</button>}
           {isManager && accountMode === "employer" && <button className={`nav-item ${view === "employees" ? "active" : ""}`} onClick={() => navigate("employees")}><span>♟</span>עובדים</button>}
           {isManager && <button className={`nav-item ${view === "history" ? "active" : ""}`} onClick={() => navigate("history")}><span>≡</span>היסטוריה</button>}
-          <button className="nav-item"><span>↗</span>דוחות</button>
+          {isManager && <button className={`nav-item ${view === "reports" ? "active" : ""}`} onClick={() => navigate("reports")}><span>↗</span>דוחות</button>}
           {isManager && <button className={`nav-item ${view === "trash" ? "active" : ""}`} onClick={() => navigate("trash")}><span>♲</span>סל המחזור</button>}
         </nav>
         <button className="sidebar-foot" onClick={() => navigate("profile")}><div className="user-avatar">{currentUser.displayName.charAt(0)}</div><div><strong dir="auto">{currentUser.displayName}</strong><small>{!isManager ? "עובד בצוות" : accountMode === "solo" ? "עובד עצמאי" : "מעסיק עובדים"}</small></div><span aria-hidden="true">•••</span></button>
@@ -432,6 +436,7 @@ export default function Home() {
         {isManager && view === "employees" && <EmployeesView employees={employees} openNew={() => openNew("employee")} editEmployee={(employee) => openEdit("employee", employee)} removeEmployee={(employee) => void removeRecord("employee", employee.id, employee.name)} inviteEmployee={(employee) => void inviteEmployee(employee)} />}
         {isManager && view === "trash" && <RecycleBinView trash={trash} restoreClient={(id, restoreProjects) => void restoreRecord("client", id, restoreProjects)} restoreProject={(id) => void restoreRecord("project", id)} restoreEmployee={(id) => void restoreRecord("employee", id)} />}
         {isManager && view === "history" && <AuditLogView entries={auditLog} />}
+        {isManager && view === "reports" && <ReportsView projects={projects} entries={recentTimeEntries} payments={payments} expenses={expenses} projectId={reportProjectId} setProjectId={setReportProjectId} from={reportFrom} setFrom={setReportFrom} to={reportTo} setTo={setReportTo} />}
         {view === "profile" && <ProfileView user={currentUser} accountMode={accountMode} setAccountMode={(mode) => { setAccountMode(mode); void saveAction("setAccountMode", { accountMode: mode }).catch(() => setSyncState("error")); }} openTrash={() => navigate("trash")} />}
       </section>
 
@@ -559,6 +564,35 @@ function SignInView() {
 
 const auditEntityLabels: Record<string, string> = { time_entry: "דיווח זמן", payment: "תשלום", expense: "הוצאה", attachment: "קובץ" };
 const auditActionLabels: Record<string, string> = { create: "יצירה", update: "עדכון", delete: "מחיקה" };
+
+function ReportsView({ projects, entries, payments, expenses, projectId, setProjectId, from, setFrom, to, setTo }: { projects: Project[]; entries: TimeEntry[]; payments: Payment[]; expenses: Expense[]; projectId: string; setProjectId: (value: string) => void; from: string; setFrom: (value: string) => void; to: string; setTo: (value: string) => void }) {
+  const inRange = (value: string) => (!from || value >= from) && (!to || value <= to);
+  const filteredEntries = entries.filter((entry) => (!from || entry.startedAt.slice(0, 10) >= from) && (!to || entry.startedAt.slice(0, 10) <= to) && (projectId === "all" || String(entry.projectId) === projectId));
+  const filteredPayments = payments.filter((payment) => inRange(payment.paidAt) && (projectId === "all" || String(payment.projectId) === projectId));
+  const filteredExpenses = expenses.filter((expense) => inRange(expense.incurredAt) && (projectId === "all" || String(expense.projectId) === projectId));
+  const rows = projects.filter((project) => projectId === "all" || String(project.id) === projectId).map((project) => {
+    const projectEntries = filteredEntries.filter((entry) => String(entry.projectId) === String(project.id));
+    const projectPayments = filteredPayments.filter((payment) => String(payment.projectId) === String(project.id));
+    const projectExpenses = filteredExpenses.filter((expense) => String(expense.projectId) === String(project.id));
+    const hours = projectEntries.reduce((sum, entry) => sum + Number(entry.durationSeconds) / 3600, 0);
+    const expected = projectEntries.length || from || to ? (project.billingType === "fixed" ? project.fixedPrice : project.billingType === "hourly" ? hours * project.hourlyRate : project.fixedPrice + hours * project.hourlyRate) : project.expectedAmount;
+    const paid = projectPayments.reduce((sum, payment) => sum + payment.amount, 0);
+    const costs = projectExpenses.reduce((sum, expense) => sum + expense.amount, 0) + (projectEntries.length || from || to ? 0 : Number(project.laborCost ?? 0));
+    return { project, hours, expected, paid, expenses: costs, profit: expected - costs };
+  });
+  const totals = rows.reduce((sum, row) => ({ hours: sum.hours + row.hours, expected: sum.expected + row.expected, paid: sum.paid + row.paid, expenses: sum.expenses + row.expenses, profit: sum.profit + row.profit }), { hours: 0, expected: 0, paid: 0, expenses: 0, profit: 0 });
+  function exportCsv() {
+    const header = ["פרויקט", "שעות", "הכנסה צפויה", "התקבל", "הוצאות", "רווח"];
+    const lines = [header, ...rows.map((row) => [row.project.name, row.hours.toFixed(2), row.expected.toFixed(2), row.paid.toFixed(2), row.expenses.toFixed(2), row.profit.toFixed(2)])].map((line) => line.map((value) => `"${String(value).replaceAll('"', '""')}"`).join(","));
+    const url = URL.createObjectURL(new Blob(["\ufeff" + lines.join("\n")], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "menahel-avoda-report.csv";
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+  return <><section className="report-filters"><Field label="פרויקט"><select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="all">כל הפרויקטים</option>{projects.map((project) => <option key={project.id} value={String(project.id)}>{project.name}</option>)}</select></Field><Field label="מתאריך"><input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></Field><Field label="עד תאריך"><input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></Field><button className="primary-button report-export" onClick={exportCsv}>הורדת CSV</button></section><section className="finance-summary report-summary"><article><span>שעות</span><strong>{totals.hours.toFixed(1)}</strong></article><article><span>הכנסה צפויה</span><strong>€{Math.round(totals.expected).toLocaleString()}</strong></article><article><span>התקבל בפועל</span><strong>€{Math.round(totals.paid).toLocaleString()}</strong></article><article className={totals.profit < 0 ? "negative" : "positive"}><span>רווח</span><strong>€{Math.round(totals.profit).toLocaleString()}</strong></article></section><section className="page-card report-card"><div className="section-head"><div><h2>סיכום לפי פרויקט</h2><p>{rows.length} פרויקטים בדוח</p></div></div>{rows.length ? <div className="report-table"><div className="report-table-head"><span>פרויקט</span><span>שעות</span><span>צפוי</span><span>התקבל</span><span>הוצאות</span><span>רווח</span></div>{rows.map((row) => <div className="report-table-row" key={row.project.id}><strong dir="auto">{row.project.name}</strong><span>{row.hours.toFixed(1)}</span><span>€{Math.round(row.expected).toLocaleString()}</span><span>€{Math.round(row.paid).toLocaleString()}</span><span>€{Math.round(row.expenses).toLocaleString()}</span><b className={row.profit < 0 ? "negative-text" : "positive-text"}>€{Math.round(row.profit).toLocaleString()}</b></div>)}</div> : <div className="empty-state"><div><strong>אין נתונים בטווח שנבחר</strong><span>שנו את הפרויקט או את טווח התאריכים.</span></div></div>}</section></>;
+}
 
 function AuditLogView({ entries }: { entries: AuditEntry[] }) {
   return <section className="page-card history-card"><div className="section-head"><div><h2>היסטוריית שינויים</h2><p>{entries.length ? `${entries.length} פעולות אחרונות` : "פעולות שבוצעו במערכת יופיעו כאן"}</p></div><span className="trash-total">{entries.length}</span></div>{entries.length ? <div className="audit-list">{entries.map((entry) => <article className="audit-row" key={entry.id}><div className="audit-icon">≡</div><div><strong>{auditActionLabels[entry.action] ?? entry.action} {auditEntityLabels[entry.entityType] ?? entry.entityType}</strong><span>על ידי {entry.actorName}</span></div><time>{new Date(entry.createdAt.replace(" ", "T") + "Z").toLocaleString("he-IL", { dateStyle: "medium", timeStyle: "short" })}</time></article>)}</div> : <div className="empty-state"><div><strong>אין עדיין פעולות מתועדות</strong><span>יצירה, עריכה ומחיקה של נתונים יופיעו כאן.</span></div></div>}</section>;
