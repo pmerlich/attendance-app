@@ -265,11 +265,17 @@ async function loadState(db: D1Database, identity: Identity) {
 
 async function loadFinancialReport(db: D1Database, identity: Identity, searchParams: URLSearchParams) {
   const projectId = searchParams.get("projectId") ?? "all";
+  const employeeId = searchParams.get("employeeId") ?? "all";
   const from = searchParams.get("from") ?? "";
   const to = searchParams.get("to") ?? "";
   const validDate = /^\d{4}-\d{2}-\d{2}$/;
   if ((from && !validDate.test(from)) || (to && !validDate.test(to)) || (from && to && from > to)) {
     return { error: "טווח התאריכים אינו תקין", status: 400 as const };
+  }
+  if (employeeId !== "all") {
+    const employee = await db.prepare("SELECT id FROM users WHERE id = ? AND business_id = ? AND role = 'employee' AND deleted_at IS NULL LIMIT 1")
+      .bind(employeeId, identity.businessId).first();
+    if (!employee) return { error: "העובד שנבחר אינו זמין בדוח", status: 400 as const };
   }
   const range = [from, from, to, to];
   const result = await db.prepare([
@@ -277,7 +283,8 @@ async function loadFinancialReport(db: D1Database, identity: Identity, searchPar
     "p.fixed_price AS fixedPrice, p.client_hourly_rate AS hourlyRate,",
     "COALESCE((SELECT SUM(te.duration_seconds) FROM time_entries te",
     "WHERE te.project_id = p.id AND te.deleted_at IS NULL AND te.ended_at IS NOT NULL",
-    "AND (? = '' OR substr(te.started_at, 1, 10) >= ?) AND (? = '' OR substr(te.started_at, 1, 10) <= ?)), 0) AS totalSeconds,",
+    "AND (? = '' OR substr(te.started_at, 1, 10) >= ?) AND (? = '' OR substr(te.started_at, 1, 10) <= ?)",
+    "AND (? = 'all' OR te.user_id = ?)), 0) AS totalSeconds,",
     "COALESCE((SELECT SUM(pay.amount) FROM payments pay WHERE pay.project_id = p.id AND pay.deleted_at IS NULL",
     "AND (? = '' OR pay.paid_at >= ?) AND (? = '' OR pay.paid_at <= ?)), 0) AS paidAmount,",
     "COALESCE((SELECT SUM(ex.amount) FROM expenses ex WHERE ex.project_id = p.id AND ex.deleted_at IS NULL",
@@ -288,11 +295,21 @@ async function loadFinancialReport(db: D1Database, identity: Identity, searchPar
     "FROM time_entries te JOIN users u ON u.id = te.user_id",
     "LEFT JOIN project_workers pw ON pw.project_id = te.project_id AND pw.user_id = te.user_id",
     "WHERE te.project_id = p.id AND te.deleted_at IS NULL AND te.ended_at IS NOT NULL",
-    "AND (? = '' OR substr(te.started_at, 1, 10) >= ?) AND (? = '' OR substr(te.started_at, 1, 10) <= ?)), 0) AS laborCost",
+    "AND (? = '' OR substr(te.started_at, 1, 10) >= ?) AND (? = '' OR substr(te.started_at, 1, 10) <= ?)",
+    "AND (? = 'all' OR te.user_id = ?)), 0) AS laborCost",
     "FROM projects p WHERE p.business_id = ? AND p.deleted_at IS NULL",
-    "AND (? = 'all' OR p.id = ?) ORDER BY p.created_at DESC",
+    "AND (? = 'all' OR p.id = ?)",
+    "AND (? = 'all' OR EXISTS (SELECT 1 FROM project_workers pwf WHERE pwf.project_id = p.id AND pwf.user_id = ?)",
+    "OR EXISTS (SELECT 1 FROM time_entries tef WHERE tef.project_id = p.id AND tef.user_id = ? AND tef.deleted_at IS NULL))",
+    "ORDER BY p.created_at DESC",
   ].join(" "))
-    .bind(...range, ...range, ...range, ...range, ...range, identity.businessId, projectId, projectId)
+    .bind(
+      ...range, employeeId, employeeId,
+      ...range, ...range, ...range,
+      ...range, employeeId, employeeId,
+      identity.businessId, projectId, projectId,
+      employeeId, employeeId, employeeId,
+    )
     .all();
   return { rows: result.results, status: 200 as const };
 }

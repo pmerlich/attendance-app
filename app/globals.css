@@ -132,7 +132,7 @@ input,textarea { font:inherit; unicode-bidi:plaintext; text-align:start; }
 .audit-row strong { font-size:13px; }
 .audit-row span { margin-top:4px; color:#87938d; font-size:11px; }
 .audit-row time { color:#87938d; font-size:11px; white-space:nowrap; }
-.report-filters { max-width:1280px; margin:0 auto 18px; padding:18px; display:grid; grid-template-columns:minmax(180px,1.6fr) repeat(2,minmax(140px,1fr)) auto; gap:12px; align-items:end; border:1px solid var(--line); border-radius:14px; background:#fff; }
+.report-filters { max-width:1280px; margin:0 auto 18px; padding:18px; display:grid; grid-template-columns:minmax(150px,1.3fr) minmax(170px,1.3fr) repeat(2,minmax(130px,1fr)) auto; gap:12px; align-items:end; border:1px solid var(--line); border-radius:14px; background:#fff; }
 .report-filters .form-field input,.report-filters .form-field select { height:40px; }
 .report-export-actions { display:flex; align-items:center; gap:8px; }
 .report-export-actions .primary-button { display:block; }
@@ -147,6 +147,7 @@ input,textarea { font:inherit; unicode-bidi:plaintext; text-align:start; }
 .report-table-head { color:#84918a; font-size:10px; font-weight:800; }
 .report-table-row { font-size:11px; }
 .report-table-row span,.report-table-row b { direction:ltr; text-align:right; }
+.employee-report-summary article:first-child strong { font-size:15px; }.employee-report-table .report-table-head,.employee-report-table .report-table-row { min-width:460px; grid-template-columns:minmax(240px,2fr) 1fr 1fr; }
 .positive-text { color:#277356; }.negative-text { color:#a55443; }
 @media (max-width:760px) { .audit-row { grid-template-columns:38px minmax(0,1fr); gap:10px; }.audit-row time { grid-column:2; }.audit-icon { width:32px; height:32px; } }
 @media (max-width:760px) { .report-filters { grid-template-columns:1fr; }.report-export-actions { display:grid; grid-template-columns:1fr; }.report-export-actions button { width:100%; }.report-export-actions .primary-button { display:block; }.report-summary { grid-template-columns:1fr; } }
