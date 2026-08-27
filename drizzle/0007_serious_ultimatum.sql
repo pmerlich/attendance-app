@@ -1,0 +1,1 @@
+CREATE INDEX `idx_attachments_business_project` ON `attachments` (`business_id`,`project_id`);

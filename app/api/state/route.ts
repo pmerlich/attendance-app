@@ -72,6 +72,11 @@ async function ensureCoreSchema(db: D1Database) {
       note text, created_at text DEFAULT CURRENT_TIMESTAMP NOT NULL,
       updated_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, deleted_at text
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS attachments (
+      id text PRIMARY KEY NOT NULL, business_id text NOT NULL, project_id text, expense_id text,
+      object_key text NOT NULL UNIQUE, file_name text NOT NULL, content_type text NOT NULL, uploaded_by text NOT NULL,
+      created_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, deleted_at text
+    )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS employee_invitations (
       id text PRIMARY KEY NOT NULL, business_id text NOT NULL, employee_id text NOT NULL, email text NOT NULL,
       token text NOT NULL UNIQUE, status text DEFAULT 'pending' NOT NULL, expires_at text NOT NULL,
@@ -95,6 +100,7 @@ async function ensureCoreSchema(db: D1Database) {
     db.prepare("CREATE INDEX IF NOT EXISTS idx_time_entries_user_active ON time_entries (user_id, ended_at)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_payments_project_id ON payments (project_id)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_expenses_project_id ON expenses (project_id)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_attachments_business_project ON attachments (business_id, project_id)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_users_auth_user_id ON users (auth_user_id)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_employee_invitations_business_status ON employee_invitations (business_id, status)"),
   ]);
@@ -183,7 +189,15 @@ async function loadState(db: D1Database, identity: Identity) {
       WHERE ex.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
       ORDER BY ex.incurred_at DESC, ex.created_at DESC LIMIT 100`).bind(businessId).all()
     : managerOnly();
-  const [business, clients, employees, projects, activeTimer, recentTimeEntries, payments, expenses, deletedClients, deletedProjects, deletedEmployees] = await Promise.all([
+  const attachmentsQuery = identity.role === "manager"
+    ? db.prepare(`SELECT a.id, a.project_id AS projectId, COALESCE(p.name, '') AS projectName,
+      a.expense_id AS expenseId, COALESCE(ex.note, '') AS expenseNote, a.file_name AS fileName,
+      a.content_type AS contentType, a.created_at AS createdAt
+      FROM attachments a LEFT JOIN projects p ON p.id = a.project_id LEFT JOIN expenses ex ON ex.id = a.expense_id
+      WHERE a.business_id = ? AND a.deleted_at IS NULL AND (p.id IS NULL OR p.deleted_at IS NULL)
+      ORDER BY a.created_at DESC LIMIT 100`).bind(businessId).all()
+    : managerOnly();
+  const [business, clients, employees, projects, activeTimer, recentTimeEntries, payments, expenses, attachments, deletedClients, deletedProjects, deletedEmployees] = await Promise.all([
     db.prepare("SELECT work_mode AS workMode FROM businesses WHERE id = ? AND deleted_at IS NULL").bind(businessId).first<{ workMode: "solo" | "employer" }>(),
     identity.role === "manager" ? db.prepare(`SELECT c.id, c.name, c.address, COALESCE(c.phone, '') AS phone, COALESCE(c.email, '') AS email, COUNT(p.id) AS projects
       FROM clients c LEFT JOIN projects p ON p.client_id = c.id AND p.deleted_at IS NULL
@@ -205,6 +219,7 @@ async function loadState(db: D1Database, identity: Identity) {
     timeEntriesQuery,
     paymentsQuery,
     expensesQuery,
+    attachmentsQuery,
     identity.role === "manager" ? db.prepare(`SELECT c.id, c.name, c.address, c.deleted_at AS deletedAt,
       COUNT(p.id) AS projectCount
       FROM clients c LEFT JOIN projects p ON p.client_id = c.id AND p.deleted_at IS NOT NULL
@@ -228,6 +243,7 @@ async function loadState(db: D1Database, identity: Identity) {
     recentTimeEntries: recentTimeEntries.results,
     payments: payments.results,
     expenses: expenses.results,
+    attachments: attachments.results,
     trash: { clients: deletedClients.results, projects: deletedProjects.results, employees: deletedEmployees.results },
   };
 }
@@ -278,10 +294,63 @@ async function acceptInvitation(request: Request, token: string) {
 export async function GET(request: Request) {
   const context = await prepareRequest(request);
   if (!context) return Response.json({ error: "נדרשת התחברות" }, { status: 401 });
-  return Response.json(await loadState(context.db, context.identity));
+  const attachmentId = new URL(request.url).searchParams.get("attachment");
+  if (!attachmentId) return Response.json(await loadState(context.db, context.identity));
+  if (context.identity.role !== "manager") return Response.json({ error: "הקובץ זמין למנהל בלבד" }, { status: 403 });
+  const attachment = await context.db.prepare(`SELECT object_key AS objectKey, file_name AS fileName, content_type AS contentType
+    FROM attachments WHERE id = ? AND business_id = ? AND deleted_at IS NULL LIMIT 1`)
+    .bind(attachmentId, context.identity.businessId).first<{ objectKey: string; fileName: string; contentType: string }>();
+  if (!attachment) return Response.json({ error: "הקובץ לא נמצא" }, { status: 404 });
+  const object = await env.FILES.get(attachment.objectKey);
+  if (!object) return Response.json({ error: "תוכן הקובץ לא נמצא" }, { status: 404 });
+  return new Response(object.body, { headers: {
+    "content-type": attachment.contentType,
+    "content-disposition": `inline; filename*=UTF-8''${encodeURIComponent(attachment.fileName)}`,
+    "cache-control": "private, max-age=300",
+  } });
+}
+
+async function uploadAttachment(request: Request) {
+  const context = await prepareRequest(request);
+  if (!context) return Response.json({ error: "נדרשת התחברות" }, { status: 401 });
+  const { db, identity } = context;
+  if (identity.role !== "manager") return Response.json({ error: "הפעולה זמינה למנהל בלבד" }, { status: 403 });
+  const form = await request.formData();
+  const file = form.get("file");
+  if (!(file instanceof File) || file.size <= 0) return Response.json({ error: "יש לבחור קובץ" }, { status: 400 });
+  if (file.size > 10 * 1024 * 1024) return Response.json({ error: "הקובץ גדול מ־10MB" }, { status: 400 });
+  const allowedTypes = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif", "application/pdf"]);
+  if (!allowedTypes.has(file.type)) return Response.json({ error: "אפשר להעלות JPG, PNG, WEBP, HEIC או PDF בלבד" }, { status: 400 });
+  const projectId = String(form.get("projectId") ?? "");
+  const project = await db.prepare("SELECT id FROM projects WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(projectId, identity.businessId).first();
+  if (!project) return Response.json({ error: "הפרויקט לא נמצא" }, { status: 400 });
+  const expenseId = String(form.get("expenseId") ?? "");
+  if (expenseId) {
+    const expense = await db.prepare(`SELECT ex.id FROM expenses ex JOIN projects p ON p.id = ex.project_id
+      WHERE ex.id = ? AND ex.project_id = ? AND ex.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL LIMIT 1`)
+      .bind(expenseId, projectId, identity.businessId).first();
+    if (!expense) return Response.json({ error: "ההוצאה אינה שייכת לפרויקט שנבחר" }, { status: 400 });
+  }
+  const attachmentId = crypto.randomUUID();
+  const safeName = file.name.replace(/[^\p{L}\p{N}._-]+/gu, "-").slice(0, 120) || "attachment";
+  const objectKey = `${identity.businessId}/${attachmentId}-${safeName}`;
+  await env.FILES.put(objectKey, file.stream(), { httpMetadata: { contentType: file.type } });
+  try {
+    await db.batch([
+      db.prepare("INSERT INTO attachments (id, business_id, project_id, expense_id, object_key, file_name, content_type, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .bind(attachmentId, identity.businessId, projectId, expenseId || null, objectKey, file.name.slice(0, 180), file.type, identity.ownerId),
+      db.prepare("INSERT INTO audit_log (id, business_id, actor_id, entity_type, entity_id, action, details_json) VALUES (?, ?, ?, 'attachment', ?, 'create', ?)")
+        .bind(crypto.randomUUID(), identity.businessId, identity.ownerId, attachmentId, JSON.stringify({ projectId, expenseId: expenseId || null, fileName: file.name, contentType: file.type, size: file.size })),
+    ]);
+  } catch (error) {
+    await env.FILES.delete(objectKey);
+    throw error;
+  }
+  return Response.json(await loadState(db, identity));
 }
 
 export async function POST(request: Request) {
+  if (request.headers.get("content-type")?.includes("multipart/form-data")) return uploadAttachment(request);
   const body = await request.json() as Record<string, unknown>;
   const action = String(body.action ?? "");
   if (action === "acceptInvitation") return acceptInvitation(request, String(body.token ?? ""));
@@ -289,7 +358,7 @@ export async function POST(request: Request) {
   if (!context) return Response.json({ error: "נדרשת התחברות" }, { status: 401 });
   const { db, identity } = context;
   const businessId = identity.businessId;
-  const managerActions = new Set(["setAccountMode", "addClient", "updateClient", "deleteClient", "addEmployee", "updateEmployee", "deleteEmployee", "addProject", "updateProject", "deleteProject", "restoreClient", "restoreProject", "restoreEmployee", "createEmployeeInvitation", "addPayment", "updatePayment", "deletePayment", "addExpense", "updateExpense", "deleteExpense"]);
+  const managerActions = new Set(["setAccountMode", "addClient", "updateClient", "deleteClient", "addEmployee", "updateEmployee", "deleteEmployee", "addProject", "updateProject", "deleteProject", "restoreClient", "restoreProject", "restoreEmployee", "createEmployeeInvitation", "addPayment", "updatePayment", "deletePayment", "addExpense", "updateExpense", "deleteExpense", "deleteAttachment"]);
   if (identity.role !== "manager" && managerActions.has(action)) return Response.json({ error: "הפעולה זמינה למנהל בלבד" }, { status: 403 });
 
   if (action === "startTimer") {
@@ -441,6 +510,17 @@ export async function POST(request: Request) {
       db.prepare("UPDATE expenses SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(expenseId),
       db.prepare("INSERT INTO audit_log (id, business_id, actor_id, entity_type, entity_id, action, details_json) VALUES (?, ?, ?, 'expense', ?, 'delete', ?)").bind(crypto.randomUUID(), businessId, identity.ownerId, expenseId, JSON.stringify(expense)),
     ]);
+  } else if (action === "deleteAttachment") {
+    const attachmentId = String(body.id ?? "");
+    const attachment = await db.prepare("SELECT id, project_id AS projectId, expense_id AS expenseId, object_key AS objectKey, file_name AS fileName, content_type AS contentType FROM attachments WHERE id = ? AND business_id = ? AND deleted_at IS NULL LIMIT 1")
+      .bind(attachmentId, businessId).first<Record<string, unknown>>();
+    if (!attachment) return Response.json({ error: "הקובץ לא נמצא" }, { status: 400 });
+    await db.batch([
+      db.prepare("UPDATE attachments SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ?").bind(attachmentId, businessId),
+      db.prepare("INSERT INTO audit_log (id, business_id, actor_id, entity_type, entity_id, action, details_json) VALUES (?, ?, ?, 'attachment', ?, 'delete', ?)")
+        .bind(crypto.randomUUID(), businessId, identity.ownerId, attachmentId, JSON.stringify(attachment)),
+    ]);
+    await env.FILES.delete(String(attachment.objectKey));
   } else if (action === "setAccountMode") {
     await db.prepare("UPDATE businesses SET work_mode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(body.accountMode === "employer" ? "employer" : "solo", businessId).run();
   } else if (action === "addClient") {
