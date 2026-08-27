@@ -709,8 +709,21 @@ export default function Home() {
 
 const LONG_TIMER_SECONDS = 10 * 60 * 60;
 
-function navigationUrl(address: string) {
-  return "https://www.google.com/maps/dir/?api=1&destination=" + encodeURIComponent(address) + "&travelmode=driving&dir_action=navigate";
+function navigationUrl(provider: "google" | "waze", address: string) {
+  const destination = encodeURIComponent(address);
+  return provider === "waze"
+    ? `https://www.waze.com/ul?q=${destination}&navigate=yes`
+    : `https://www.google.com/maps/dir/?api=1&destination=${destination}&travelmode=driving&dir_action=navigate`;
+}
+
+function NavigationChooser({ address, label = "ניווט" }: { address: string; label?: string }) {
+  return <details className="navigation-choice">
+    <summary aria-label={`בחירת אפליקציית ניווט אל ${address}`}>⌖ {label}</summary>
+    <div className="navigation-menu" role="group" aria-label="בחירת אפליקציית ניווט">
+      <a href={navigationUrl("waze", address)} target="_blank" rel="noreferrer">Waze</a>
+      <a href={navigationUrl("google", address)} target="_blank" rel="noreferrer">Google Maps</a>
+    </div>
+  </details>;
 }
 
 type ProjectListProps = { projects: Project[]; activeProject: Project; running: boolean; canManage: boolean; selectProject: (project: Project) => void; editProject: (project: Project) => void; removeProject: (project: Project) => void };
@@ -724,7 +737,7 @@ function ProjectList({ projects, activeProject, running, canManage, selectProjec
     <div className="project-metric"><span>שעות</span><strong>{project.hours}</strong></div>
     <div className="project-metric"><span>יתרה</span><strong>{project.balance}</strong></div>
     <button className="start-button" onClick={() => selectProject(project)} disabled={running && activeProject.id === project.id}>{running && activeProject.id === project.id ? "עובדים עכשיו" : "התחלת עבודה"}</button>
-    <div className="record-actions"><a className="navigation-button" href={navigationUrl(project.address)} target="_blank" rel="noreferrer" aria-label={"ניווט אל " + project.address}>⌖ ניווט</a>{canManage && <><button type="button" onClick={() => editProject(project)}>עריכה</button><button type="button" className="danger" onClick={() => removeProject(project)}>לסל</button></>}</div>
+    <div className="record-actions"><NavigationChooser address={project.address} />{canManage && <><button type="button" onClick={() => editProject(project)}>עריכה</button><button type="button" className="danger" onClick={() => removeProject(project)}>לסל</button></>}</div>
   </article>)}</div>;
 }
 
@@ -738,7 +751,7 @@ function Dashboard({ canManage, accountMode, activeProject, running, seconds, pr
   const totalPaid = projects.reduce((sum, project) => sum + project.paidAmount, 0);
   const averageHourly = totalHours ? totalExpected / totalHours : 0;
   return <>
-    <section className="timer-card" aria-label="טיימר עבודה"><div className="timer-glow" /><div className="timer-project"><span className="live-pill"><i /> {running ? "טיימר פעיל" : "מוכן להתחלה"}</span><h2 dir="auto">{activeProject.name}</h2><p dir="auto">♙ {activeProject.client}<span>·</span>⌖ {activeProject.address} <a className="timer-navigation" href={navigationUrl(activeProject.address)} target="_blank" rel="noreferrer">פתיחת ניווט</a></p></div><div className="timer-clock"><span>{formatTime(seconds)}</span><small>{running ? "הזמן נשמר גם לאחר רענון" : "בחרו פרויקט או הפעילו את הטיימר"}</small></div><div className="timer-actions"><button className="stop-button" onClick={stopTimer} disabled={!running}><span>■</span> סיום עבודה</button><button className="pause-button" onClick={toggleTimer}><span>{running ? "Ⅱ" : "▶"}</span> {running ? "השהיה" : "התחלה"}</button></div></section>
+    <section className="timer-card" aria-label="טיימר עבודה"><div className="timer-glow" /><div className="timer-project"><span className="live-pill"><i /> {running ? "טיימר פעיל" : "מוכן להתחלה"}</span><h2 dir="auto">{activeProject.name}</h2><div className="timer-location" dir="auto">♙ {activeProject.client}<span>·</span>⌖ {activeProject.address} <NavigationChooser address={activeProject.address} label="פתיחת ניווט" /></div></div><div className="timer-clock"><span>{formatTime(seconds)}</span><small>{running ? "הזמן נשמר גם לאחר רענון" : "בחרו פרויקט או הפעילו את הטיימר"}</small></div><div className="timer-actions"><button className="stop-button" onClick={stopTimer} disabled={!running}><span>■</span> סיום עבודה</button><button className="pause-button" onClick={toggleTimer}><span>{running ? "Ⅱ" : "▶"}</span> {running ? "השהיה" : "התחלה"}</button></div></section>
     {running && seconds >= LONG_TIMER_SECONDS && <div className="timer-warning" role="alert"><span>!</span><div><strong>הטיימר פועל כבר יותר מ־10 שעות</strong><p>כדאי לוודא שלא שכחת לעצור אותו. הזמן ממשיך להישמר עד לעצירה.</p></div><button type="button" onClick={stopTimer}>עצירת הטיימר</button></div>}
     <section className="stats-grid" aria-label="סיכום שעות"><article><div className="stat-icon green">◷</div><div><span>שעות שנשמרו</span><strong>{totalHours.toFixed(1)}</strong><small>בכל הפרויקטים המוצגים</small></div></article><article><div className="stat-icon violet">€</div><div><span>{!canManage || accountMode === "solo" ? "השכר הצפוי" : "חיוב צפוי"}</span><strong>€{Math.round(totalExpected).toLocaleString()}</strong><small>לפי שיטות התמחור</small></div></article>{canManage ? <button type="button" className="stat-card clickable-stat" onClick={showPayments}><div className="stat-icon amber">◎</div><div><span>התקבל בפועל</span><strong>€{Math.round(totalPaid).toLocaleString()}</strong><small>פתיחת מסך התשלומים</small></div></button> : <article><div className="stat-icon amber">◎</div><div><span>דיווחי זמן אחרונים</span><strong>{recentTimeEntries.length}</strong><small>עד שמונה דיווחים אחרונים</small></div></article>}<article><div className="stat-icon blue">↗</div><div><span>{!canManage || accountMode === "solo" ? "ממוצע לשעת עבודה" : "ממוצע חיוב לשעה"}</span><strong>€{Math.round(averageHourly).toLocaleString()}</strong><small className="up">מחושב מהנתונים שנשמרו</small></div></article></section>
     <section className="projects-section"><div className="section-head"><div><h2>פרויקטים פעילים</h2><p>כל מה שקורה בשטח, במקום אחד</p></div><div className="section-actions"><button className="secondary-compact" onClick={showManual}>＋ דיווח ידני</button><button className="text-button" onClick={showAll}>לכל הפרויקטים ←</button></div></div><ProjectToolbar filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} /><ProjectList canManage={canManage} projects={projects} activeProject={activeProject} running={running} selectProject={selectProject} editProject={editProject} removeProject={removeProject} /></section>

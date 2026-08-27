@@ -34,6 +34,7 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.match(html, /הוצאות וחומרים/);
   assert.match(html, /href="\/app-icon\.png"/);
   assert.match(html, /https:\/\/www\.google\.com\/maps\/dir\/\?api=1/);
+  assert.match(html, /https:\/\/www\.waze\.com\/ul\?q=/);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Starter Project/);
 });
 
