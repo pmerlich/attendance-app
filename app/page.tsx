@@ -2,6 +2,8 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
+import { jsPDF } from "jspdf";
+import autoTable from "jspdf-autotable";
 
 type View = "dashboard" | "projects" | "time" | "payments" | "expenses" | "clients" | "employees" | "trash" | "history" | "reports" | "profile";
 type BillingType = "fixed" | "hourly" | "combined";
@@ -593,13 +595,20 @@ function ReportsView({ projects, entries, payments, expenses, projectId, setProj
     URL.revokeObjectURL(url);
   }
   function exportPdf() {
-    const popup = window.open("", "_blank", "noopener,noreferrer");
-    if (!popup) return;
-    const tableRows = rows.map((row) => `<tr><td>${row.project.name}</td><td>${row.hours.toFixed(1)}</td><td>€${Math.round(row.expected).toLocaleString()}</td><td>€${Math.round(row.paid).toLocaleString()}</td><td>€${Math.round(row.expenses).toLocaleString()}</td><td>€${Math.round(row.profit).toLocaleString()}</td></tr>`).join("");
-    popup.document.write(`<html dir="rtl"><head><title>דוח מנהל עבודה</title><style>body{font-family:Arial,sans-serif;padding:32px;color:#17251f}h1{font-size:24px}p{color:#66776f}table{width:100%;border-collapse:collapse;margin-top:24px}th,td{padding:10px;border-bottom:1px solid #dfe7e2;text-align:right}th{background:#f1f6f3}td:nth-child(n+2){direction:ltr;text-align:right}</style></head><body><h1>דוח כספי לפי פרויקט</h1><p>הופק בתאריך ${new Date().toLocaleDateString("he-IL")}</p><p>רווח צפוי: €${Math.round(totals.profit).toLocaleString()} | רווח לפי תקבולים: €${Math.round(receivedProfit).toLocaleString()}</p><table><thead><tr><th>פרויקט</th><th>שעות</th><th>הכנסה צפויה</th><th>התקבל</th><th>הוצאות</th><th>רווח צפוי</th></tr></thead><tbody>${tableRows}</tbody></table></body></html>`);
-    popup.document.close();
-    popup.focus();
-    popup.print();
+    const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+    pdf.setFontSize(18);
+    pdf.text("Menahel Avoda - Financial Report", 14, 18);
+    pdf.setFontSize(10);
+    pdf.text(`Generated: ${new Date().toLocaleDateString("en-GB")}`, 14, 25);
+    pdf.text(`Expected profit: EUR ${Math.round(totals.profit).toLocaleString()} | Received profit: EUR ${Math.round(receivedProfit).toLocaleString()}`, 14, 31);
+    autoTable(pdf, {
+      startY: 38,
+      head: [["Project", "Hours", "Expected income", "Received", "Expenses", "Expected profit"]],
+      body: rows.map((row) => [row.project.name, row.hours.toFixed(1), `EUR ${Math.round(row.expected).toLocaleString()}`, `EUR ${Math.round(row.paid).toLocaleString()}`, `EUR ${Math.round(row.expenses).toLocaleString()}`, `EUR ${Math.round(row.profit).toLocaleString()}`]),
+      styles: { fontSize: 9, cellPadding: 3 },
+      headStyles: { fillColor: [30, 122, 89] },
+    });
+    pdf.save("menahel-avoda-report.pdf");
   }
   return <><section className="report-filters"><Field label="פרויקט"><select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="all">כל הפרויקטים</option>{projects.map((project) => <option key={project.id} value={String(project.id)}>{project.name}</option>)}</select></Field><Field label="מתאריך"><input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></Field><Field label="עד תאריך"><input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></Field><div className="report-export-actions"><button className="primary-button" onClick={exportCsv}>הורדת CSV</button><button className="secondary-compact" onClick={exportPdf}>הדפסה / PDF</button></div></section><section className="finance-summary report-summary"><article><span>שעות</span><strong>{totals.hours.toFixed(1)}</strong></article><article><span>הכנסה צפויה</span><strong>€{Math.round(totals.expected).toLocaleString()}</strong></article><article><span>רווח צפוי</span><strong>€{Math.round(totals.profit).toLocaleString()}</strong><small>הכנסה צפויה פחות הוצאות</small></article><article className={receivedProfit < 0 ? "negative" : "positive"}><span>רווח לפי תקבולים</span><strong>€{Math.round(receivedProfit).toLocaleString()}</strong><small>מה שהתקבל בפועל פחות הוצאות</small></article></section><section className="page-card report-card"><div className="section-head"><div><h2>סיכום לפי פרויקט</h2><p>{rows.length} פרויקטים בדוח · התקבל בפועל: €{Math.round(totals.paid).toLocaleString()}</p></div></div>{rows.length ? <div className="report-table"><div className="report-table-head"><span>פרויקט</span><span>שעות</span><span>צפוי</span><span>התקבל</span><span>הוצאות</span><span>רווח צפוי</span></div>{rows.map((row) => <div className="report-table-row" key={row.project.id}><strong dir="auto">{row.project.name}</strong><span>{row.hours.toFixed(1)}</span><span>€{Math.round(row.expected).toLocaleString()}</span><span>€{Math.round(row.paid).toLocaleString()}</span><span>€{Math.round(row.expenses).toLocaleString()}</span><b className={row.profit < 0 ? "negative-text" : "positive-text"}>€{Math.round(row.profit).toLocaleString()}</b></div>)}</div> : <div className="empty-state"><div><strong>אין נתונים בטווח שנבחר</strong><span>שנו את הפרויקט או את טווח התאריכים.</span></div></div>}</section></>;
 }
