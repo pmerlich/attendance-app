@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 
-type View = "dashboard" | "projects" | "time" | "payments" | "expenses" | "clients" | "employees" | "trash" | "profile";
+type View = "dashboard" | "projects" | "time" | "payments" | "expenses" | "clients" | "employees" | "trash" | "history" | "profile";
 type BillingType = "fixed" | "hourly" | "combined";
 type AccountMode = "solo" | "employer";
 type EntityType = "project" | "client" | "employee";
@@ -63,6 +63,7 @@ const viewTitles: Record<View, { eyebrow: string; title: string }> = {
   clients: { eyebrow: "אנשי קשר וכתובות", title: "לקוחות" },
   employees: { eyebrow: "הצוות שלך", title: "עובדים" },
   trash: { eyebrow: "שחזור מידע", title: "סל המחזור" },
+  history: { eyebrow: "בקרה ותיעוד", title: "היסטוריית שינויים" },
   profile: { eyebrow: "העדפות החשבון", title: "הפרופיל שלי" },
 };
 
@@ -90,7 +91,8 @@ type DeletedClient = { id: RecordId; name: string; address: string; deletedAt: s
 type DeletedProject = { id: RecordId; name: string; clientName: string; address: string; deletedAt: string };
 type DeletedEmployee = { id: RecordId; name: string; email: string; deletedAt: string };
 type TrashState = { clients: DeletedClient[]; projects: DeletedProject[]; employees: DeletedEmployee[] };
-type StoredState = { accountMode: AccountMode; user: AccountUser; clients: Client[]; employees: Employee[]; projects: StoredProject[]; activeTimer: ActiveTimer | null; recentTimeEntries: TimeEntry[]; payments: Payment[]; expenses: Expense[]; attachments: Attachment[]; trash: TrashState };
+type AuditEntry = { id: string; actorName: string; entityType: string; entityId: string; action: string; detailsJson: string; createdAt: string };
+type StoredState = { accountMode: AccountMode; user: AccountUser; clients: Client[]; employees: Employee[]; projects: StoredProject[]; activeTimer: ActiveTimer | null; recentTimeEntries: TimeEntry[]; payments: Payment[]; expenses: Expense[]; attachments: Attachment[]; trash: TrashState; auditLog: AuditEntry[] };
 
 function presentProjects(items: StoredProject[]): Project[] {
   const colors: Project["color"][] = ["mint", "amber", "blue"];
@@ -132,13 +134,14 @@ export default function Home() {
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [trash, setTrash] = useState<TrashState>({ clients: [], projects: [], employees: [] });
+  const [auditLog, setAuditLog] = useState<AuditEntry[]>([]);
   const [inviteNotice, setInviteNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
 
   function applyStoredState(data: StoredState) {
     const storedProjects = presentProjects(data.projects);
     setAccountMode(data.accountMode);
     setCurrentUser(data.user);
-    if (data.user.role === "employee") setView((current) => ["payments", "expenses", "clients", "employees", "trash"].includes(current) ? "dashboard" : current);
+    if (data.user.role === "employee") setView((current) => ["payments", "expenses", "clients", "employees", "trash", "history"].includes(current) ? "dashboard" : current);
     setClients(data.clients.map((client) => ({ ...client, projects: Number(client.projects) })));
     setEmployees(data.employees.map((employee) => ({ ...employee, hourlyCost: Number(employee.hourlyCost) })));
     setProjects(storedProjects);
@@ -147,6 +150,7 @@ export default function Home() {
     setExpenses((data.expenses ?? []).map((expense) => ({ ...expense, amount: Number(expense.amount), billableToClient: Boolean(expense.billableToClient) })));
     setAttachments(data.attachments ?? []);
     setTrash(data.trash ?? { clients: [], projects: [], employees: [] });
+    setAuditLog(data.auditLog ?? []);
     if (storedProjects.length) {
       const timerProject = data.activeTimer ? storedProjects.find((project) => String(project.id) === String(data.activeTimer?.projectId)) : null;
       setActiveProject((current) => timerProject ?? storedProjects.find((project) => project.id === current.id) ?? storedProjects[0]);
@@ -404,6 +408,7 @@ export default function Home() {
           {isManager && <button className={`nav-item ${view === "expenses" ? "active" : ""}`} onClick={() => navigate("expenses")}><span>−</span>הוצאות וחומרים</button>}
           {isManager && <button className={`nav-item ${view === "clients" ? "active" : ""}`} onClick={() => navigate("clients")}><span>♙</span>לקוחות</button>}
           {isManager && accountMode === "employer" && <button className={`nav-item ${view === "employees" ? "active" : ""}`} onClick={() => navigate("employees")}><span>♟</span>עובדים</button>}
+          {isManager && <button className={`nav-item ${view === "history" ? "active" : ""}`} onClick={() => navigate("history")}><span>≡</span>היסטוריה</button>}
           <button className="nav-item"><span>↗</span>דוחות</button>
           {isManager && <button className={`nav-item ${view === "trash" ? "active" : ""}`} onClick={() => navigate("trash")}><span>♲</span>סל המחזור</button>}
         </nav>
@@ -426,6 +431,7 @@ export default function Home() {
         {isManager && view === "clients" && <ClientsView clients={clients} query={query} setQuery={setQuery} openNew={() => openNew("client")} editClient={(client) => openEdit("client", client)} removeClient={(client) => void removeRecord("client", client.id, client.name)} />}
         {isManager && view === "employees" && <EmployeesView employees={employees} openNew={() => openNew("employee")} editEmployee={(employee) => openEdit("employee", employee)} removeEmployee={(employee) => void removeRecord("employee", employee.id, employee.name)} inviteEmployee={(employee) => void inviteEmployee(employee)} />}
         {isManager && view === "trash" && <RecycleBinView trash={trash} restoreClient={(id, restoreProjects) => void restoreRecord("client", id, restoreProjects)} restoreProject={(id) => void restoreRecord("project", id)} restoreEmployee={(id) => void restoreRecord("employee", id)} />}
+        {isManager && view === "history" && <AuditLogView entries={auditLog} />}
         {view === "profile" && <ProfileView user={currentUser} accountMode={accountMode} setAccountMode={(mode) => { setAccountMode(mode); void saveAction("setAccountMode", { accountMode: mode }).catch(() => setSyncState("error")); }} openTrash={() => navigate("trash")} />}
       </section>
 
@@ -549,6 +555,13 @@ function EmployeesView({ employees, openNew, editEmployee, removeEmployee, invit
 
 function SignInView() {
   return <main className="sign-in-shell"><section className="sign-in-card"><Image className="sign-in-logo" src="/app-icon.png" width={82} height={82} alt="מנהל עבודה" /><p>מנהל עבודה</p><h1>החשבון שלך מחכה לך</h1><span>כדי לשמור על הפרויקטים והמידע הכספי שלך בנפרד, יש להתחבר לפני שממשיכים.</span><a href="/signin-with-chatgpt?return_to=%2F">התחברות עם ChatGPT</a><small>בסביבה המקומית הכניסה מתבצעת אוטומטית עם משתמש הפיתוח.</small></section></main>;
+}
+
+const auditEntityLabels: Record<string, string> = { time_entry: "דיווח זמן", payment: "תשלום", expense: "הוצאה", attachment: "קובץ" };
+const auditActionLabels: Record<string, string> = { create: "יצירה", update: "עדכון", delete: "מחיקה" };
+
+function AuditLogView({ entries }: { entries: AuditEntry[] }) {
+  return <section className="page-card history-card"><div className="section-head"><div><h2>היסטוריית שינויים</h2><p>{entries.length ? `${entries.length} פעולות אחרונות` : "פעולות שבוצעו במערכת יופיעו כאן"}</p></div><span className="trash-total">{entries.length}</span></div>{entries.length ? <div className="audit-list">{entries.map((entry) => <article className="audit-row" key={entry.id}><div className="audit-icon">≡</div><div><strong>{auditActionLabels[entry.action] ?? entry.action} {auditEntityLabels[entry.entityType] ?? entry.entityType}</strong><span>על ידי {entry.actorName}</span></div><time>{new Date(entry.createdAt.replace(" ", "T") + "Z").toLocaleString("he-IL", { dateStyle: "medium", timeStyle: "short" })}</time></article>)}</div> : <div className="empty-state"><div><strong>אין עדיין פעולות מתועדות</strong><span>יצירה, עריכה ומחיקה של נתונים יופיעו כאן.</span></div></div>}</section>;
 }
 
 function formatDeletedAt(value: string) {

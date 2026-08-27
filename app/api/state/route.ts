@@ -197,7 +197,15 @@ async function loadState(db: D1Database, identity: Identity) {
       WHERE a.business_id = ? AND a.deleted_at IS NULL AND (p.id IS NULL OR p.deleted_at IS NULL)
       ORDER BY a.created_at DESC LIMIT 100`).bind(businessId).all()
     : managerOnly();
-  const [business, clients, employees, projects, activeTimer, recentTimeEntries, payments, expenses, attachments, deletedClients, deletedProjects, deletedEmployees] = await Promise.all([
+  const auditLogQuery = identity.role === "manager"
+    ? db.prepare(`SELECT al.id, COALESCE(u.display_name, 'משתמש לא ידוע') AS actorName,
+        al.entity_type AS entityType, al.entity_id AS entityId, al.action,
+        al.details_json AS detailsJson, al.created_at AS createdAt
+        FROM audit_log al LEFT JOIN users u ON u.id = al.actor_id
+        WHERE al.business_id = ?
+        ORDER BY al.created_at DESC LIMIT 100`).bind(businessId).all()
+    : managerOnly();
+  const [business, clients, employees, projects, activeTimer, recentTimeEntries, payments, expenses, attachments, auditLog, deletedClients, deletedProjects, deletedEmployees] = await Promise.all([
     db.prepare("SELECT work_mode AS workMode FROM businesses WHERE id = ? AND deleted_at IS NULL").bind(businessId).first<{ workMode: "solo" | "employer" }>(),
     identity.role === "manager" ? db.prepare(`SELECT c.id, c.name, c.address, COALESCE(c.phone, '') AS phone, COALESCE(c.email, '') AS email, COUNT(p.id) AS projects
       FROM clients c LEFT JOIN projects p ON p.client_id = c.id AND p.deleted_at IS NULL
@@ -220,6 +228,7 @@ async function loadState(db: D1Database, identity: Identity) {
     paymentsQuery,
     expensesQuery,
     attachmentsQuery,
+    auditLogQuery,
     identity.role === "manager" ? db.prepare(`SELECT c.id, c.name, c.address, c.deleted_at AS deletedAt,
       COUNT(p.id) AS projectCount
       FROM clients c LEFT JOIN projects p ON p.client_id = c.id AND p.deleted_at IS NOT NULL
@@ -244,6 +253,7 @@ async function loadState(db: D1Database, identity: Identity) {
     payments: payments.results,
     expenses: expenses.results,
     attachments: attachments.results,
+    auditLog: auditLog.results,
     trash: { clients: deletedClients.results, projects: deletedProjects.results, employees: deletedEmployees.results },
   };
 }
