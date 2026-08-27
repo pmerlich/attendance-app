@@ -1,0 +1,14 @@
+{
+  "name": "מנהל עבודה",
+  "short_name": "מנהל עבודה",
+  "description": "ניהול פרויקטים, שעות וכספים גם בשטח",
+  "lang": "he",
+  "dir": "rtl",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f7f5",
+  "theme_color": "#1e7a59",
+  "icons": [
+    { "src": "/app-icon.png", "sizes": "any", "type": "image/png", "purpose": "any" }
+  ]
+}

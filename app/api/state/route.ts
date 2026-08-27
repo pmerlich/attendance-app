@@ -88,6 +88,11 @@ async function ensureCoreSchema(db: D1Database) {
       entity_type text NOT NULL, entity_id text NOT NULL, action text NOT NULL,
       details_json text DEFAULT '{}' NOT NULL, created_at text DEFAULT CURRENT_TIMESTAMP NOT NULL
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS offline_operations (
+      id text PRIMARY KEY NOT NULL, business_id text NOT NULL, user_id text NOT NULL,
+      operation_id text NOT NULL, created_at text DEFAULT CURRENT_TIMESTAMP NOT NULL,
+      UNIQUE(business_id, user_id, operation_id)
+    )`),
   ]);
   const userColumns = await db.prepare("PRAGMA table_info(users)").all<{ name: string }>();
   if (!userColumns.results.some((column) => column.name === "auth_user_id")) {
@@ -404,6 +409,12 @@ async function uploadAttachment(request: Request) {
   return Response.json(await loadState(db, identity));
 }
 
+function normalizeClientTimestamp(value: unknown) {
+  const parsed = new Date(String(value ?? ""));
+  if (Number.isNaN(parsed.getTime())) return new Date().toISOString().slice(0, 19).replace("T", " ");
+  return parsed.toISOString().slice(0, 19).replace("T", " ");
+}
+
 export async function POST(request: Request) {
   if (request.headers.get("content-type")?.includes("multipart/form-data")) return uploadAttachment(request);
   const body = await request.json() as Record<string, unknown>;
@@ -413,6 +424,12 @@ export async function POST(request: Request) {
   if (!context) return Response.json({ error: "נדרשת התחברות" }, { status: 401 });
   const { db, identity } = context;
   const businessId = identity.businessId;
+  const operationId = /^[a-zA-Z0-9-]{8,100}$/.test(String(body.operationId ?? "")) ? String(body.operationId) : "";
+  if (operationId) {
+    const completed = await db.prepare("SELECT id FROM offline_operations WHERE business_id = ? AND user_id = ? AND operation_id = ? LIMIT 1")
+      .bind(businessId, identity.ownerId, operationId).first();
+    if (completed) return Response.json(await loadState(db, identity));
+  }
   const managerActions = new Set(["setAccountMode", "addClient", "updateClient", "deleteClient", "addEmployee", "updateEmployee", "deleteEmployee", "addProject", "updateProject", "deleteProject", "restoreClient", "restoreProject", "restoreEmployee", "createEmployeeInvitation", "addPayment", "updatePayment", "deletePayment", "addExpense", "updateExpense", "deleteExpense", "deleteAttachment"]);
   if (identity.role !== "manager" && managerActions.has(action)) return Response.json({ error: "הפעולה זמינה למנהל בלבד" }, { status: 403 });
 
@@ -423,19 +440,21 @@ export async function POST(request: Request) {
       : await db.prepare(`SELECT p.id FROM projects p JOIN project_workers pw ON pw.project_id = p.id
         WHERE p.id = ? AND p.business_id = ? AND p.deleted_at IS NULL AND pw.user_id = ?`).bind(projectId, businessId, identity.ownerId).first();
     if (!project) return Response.json({ error: "הפרויקט לא נמצא" }, { status: 400 });
-    await db.prepare(`UPDATE time_entries SET ended_at = CURRENT_TIMESTAMP,
-      duration_seconds = MAX(1, CAST((julianday('now') - julianday(started_at)) * 86400 AS INTEGER)), updated_at = CURRENT_TIMESTAMP
+    const startedAt = normalizeClientTimestamp(body.startedAt);
+    await db.prepare(`UPDATE time_entries SET ended_at = ?,
+      duration_seconds = MAX(1, CAST((julianday(?) - julianday(started_at)) * 86400 AS INTEGER)), updated_at = CURRENT_TIMESTAMP
       WHERE user_id = ? AND ended_at IS NULL AND deleted_at IS NULL
       AND project_id IN (SELECT id FROM projects WHERE business_id = ?)`)
-      .bind(identity.ownerId, businessId).run();
-    await db.prepare("INSERT INTO time_entries (id, project_id, user_id, started_at, source) VALUES (?, ?, ?, CURRENT_TIMESTAMP, 'timer')")
-      .bind(crypto.randomUUID(), projectId, identity.ownerId).run();
+      .bind(startedAt, startedAt, identity.ownerId, businessId).run();
+    await db.prepare("INSERT INTO time_entries (id, project_id, user_id, started_at, source) VALUES (?, ?, ?, ?, 'timer')")
+      .bind(String(body.id ?? crypto.randomUUID()), projectId, identity.ownerId, startedAt).run();
   } else if (action === "stopTimer") {
-    await db.prepare(`UPDATE time_entries SET ended_at = CURRENT_TIMESTAMP,
-      duration_seconds = MAX(1, CAST((julianday('now') - julianday(started_at)) * 86400 AS INTEGER)), updated_at = CURRENT_TIMESTAMP
+    const endedAt = normalizeClientTimestamp(body.endedAt);
+    await db.prepare(`UPDATE time_entries SET ended_at = ?,
+      duration_seconds = MAX(1, CAST((julianday(?) - julianday(started_at)) * 86400 AS INTEGER)), updated_at = CURRENT_TIMESTAMP
       WHERE user_id = ? AND ended_at IS NULL AND deleted_at IS NULL
       AND project_id IN (SELECT id FROM projects WHERE business_id = ?)`)
-      .bind(identity.ownerId, businessId).run();
+      .bind(endedAt, endedAt, identity.ownerId, businessId).run();
   } else if (action === "addManualTime") {
     const projectId = String(body.projectId ?? "");
     const project = identity.role === "manager"
@@ -446,7 +465,7 @@ export async function POST(request: Request) {
     const durationSeconds = Math.round(Number(body.hours ?? 0) * 3600);
     if (!Number.isFinite(durationSeconds) || durationSeconds < 60 || durationSeconds > 86400) return Response.json({ error: "משך הזמן אינו תקין" }, { status: 400 });
     const date = /^\d{4}-\d{2}-\d{2}$/.test(String(body.date ?? "")) ? String(body.date) : new Date().toISOString().slice(0, 10);
-    const timeEntryId = crypto.randomUUID();
+    const timeEntryId = String(body.id ?? crypto.randomUUID());
     await db.batch([
       db.prepare("INSERT INTO time_entries (id, project_id, user_id, started_at, ended_at, duration_seconds, description, source) VALUES (?, ?, ?, ?, ?, ?, ?, 'manual')")
         .bind(timeEntryId, projectId, identity.ownerId, `${date} 12:00:00`, `${date} 12:00:00`, durationSeconds, String(body.description ?? "")),
@@ -502,7 +521,7 @@ export async function POST(request: Request) {
     const allowedMethods = new Set(["transfer", "cash", "card", "check", "other"]);
     const method = allowedMethods.has(String(body.method ?? "")) ? String(body.method) : "other";
     const note = String(body.note ?? "");
-    const paymentId = action === "updatePayment" ? String(body.id ?? "") : crypto.randomUUID();
+    const paymentId = action === "updatePayment" ? String(body.id ?? "") : String(body.id ?? crypto.randomUUID());
     if (action === "updatePayment") {
       const existing = await db.prepare(`SELECT pay.id, pay.project_id AS projectId, pay.amount, pay.paid_at AS paidAt, pay.method, pay.note
         FROM payments pay JOIN projects p ON p.id = pay.project_id
@@ -539,7 +558,7 @@ export async function POST(request: Request) {
     const category = allowedCategories.has(String(body.category ?? "")) ? String(body.category) : "other";
     const billableToClient = body.billableToClient === true ? 1 : 0;
     const note = String(body.note ?? "");
-    const expenseId = action === "updateExpense" ? String(body.id ?? "") : crypto.randomUUID();
+    const expenseId = action === "updateExpense" ? String(body.id ?? "") : String(body.id ?? crypto.randomUUID());
     if (action === "updateExpense") {
       const existing = await db.prepare(`SELECT ex.id, ex.project_id AS projectId, ex.amount, ex.incurred_at AS incurredAt, ex.category, ex.billable_to_client AS billableToClient, ex.note
         FROM expenses ex JOIN projects p ON p.id = ex.project_id
@@ -579,7 +598,7 @@ export async function POST(request: Request) {
   } else if (action === "setAccountMode") {
     await db.prepare("UPDATE businesses SET work_mode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(body.accountMode === "employer" ? "employer" : "solo", businessId).run();
   } else if (action === "addClient") {
-    await db.prepare("INSERT INTO clients (id, business_id, name, address, phone, email) VALUES (?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), businessId, String(body.name ?? ""), String(body.address ?? ""), String(body.phone ?? ""), String(body.email ?? "")).run();
+    await db.prepare("INSERT INTO clients (id, business_id, name, address, phone, email) VALUES (?, ?, ?, ?, ?, ?)").bind(String(body.id ?? crypto.randomUUID()), businessId, String(body.name ?? ""), String(body.address ?? ""), String(body.phone ?? ""), String(body.email ?? "")).run();
   } else if (action === "updateClient") {
     await db.prepare("UPDATE clients SET name = ?, address = ?, phone = ?, email = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(String(body.name ?? ""), String(body.address ?? ""), String(body.phone ?? ""), String(body.email ?? ""), String(body.id ?? ""), businessId).run();
   } else if (action === "deleteClient") {
@@ -589,7 +608,7 @@ export async function POST(request: Request) {
       db.prepare("UPDATE clients SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(clientId, businessId),
     ]);
   } else if (action === "addEmployee") {
-    await db.prepare("INSERT INTO users (id, business_id, email, display_name, role, hourly_cost) VALUES (?, ?, ?, ?, 'employee', ?)").bind(crypto.randomUUID(), businessId, String(body.email ?? ""), String(body.name ?? ""), Number(body.hourlyCost ?? 0)).run();
+    await db.prepare("INSERT INTO users (id, business_id, email, display_name, role, hourly_cost) VALUES (?, ?, ?, ?, 'employee', ?)").bind(String(body.id ?? crypto.randomUUID()), businessId, String(body.email ?? ""), String(body.name ?? ""), Number(body.hourlyCost ?? 0)).run();
   } else if (action === "updateEmployee") {
     const employeeId = String(body.id ?? "");
     await db.batch([
@@ -616,7 +635,7 @@ export async function POST(request: Request) {
   } else if (action === "addProject" || action === "updateProject") {
     const client = await db.prepare("SELECT id FROM clients WHERE business_id = ? AND name = ? AND deleted_at IS NULL LIMIT 1").bind(businessId, String(body.client ?? "")).first<{ id: string }>();
     if (!client) return Response.json({ error: "הלקוח לא נמצא" }, { status: 400 });
-    const projectId = action === "updateProject" ? String(body.id ?? "") : crypto.randomUUID();
+    const projectId = action === "updateProject" ? String(body.id ?? "") : String(body.id ?? crypto.randomUUID());
     if (action === "updateProject") {
       await db.prepare("UPDATE projects SET client_id = ?, name = ?, address = ?, billing_method = ?, fixed_price = ?, client_hourly_rate = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(client.id, String(body.name ?? ""), String(body.address ?? ""), String(body.billingType ?? "fixed"), Number(body.fixedPrice ?? 0), Number(body.hourlyRate ?? 0), projectId, businessId).run();
       await db.prepare("DELETE FROM project_workers WHERE project_id IN (SELECT id FROM projects WHERE id = ? AND business_id = ?)").bind(projectId, businessId).run();
@@ -650,6 +669,13 @@ export async function POST(request: Request) {
     await db.prepare("UPDATE users SET deleted_at = NULL, is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND role = 'employee' AND deleted_at IS NOT NULL").bind(String(body.id ?? ""), businessId).run();
   } else {
     return Response.json({ error: "פעולה לא מוכרת" }, { status: 400 });
+  }
+  if (operationId) {
+    await db.batch([
+      db.prepare("INSERT OR IGNORE INTO offline_operations (id, business_id, user_id, operation_id) VALUES (?, ?, ?, ?)")
+        .bind(crypto.randomUUID(), businessId, identity.ownerId, operationId),
+      db.prepare("DELETE FROM offline_operations WHERE business_id = ? AND created_at < datetime('now', '-90 days')").bind(businessId),
+    ]);
   }
   return Response.json(await loadState(db, identity));
 }
