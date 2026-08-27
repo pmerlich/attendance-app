@@ -2,8 +2,6 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
-import { jsPDF } from "jspdf";
-import autoTable from "jspdf-autotable";
 
 type View = "dashboard" | "projects" | "time" | "payments" | "expenses" | "clients" | "employees" | "trash" | "history" | "reports" | "profile";
 type BillingType = "fixed" | "hourly" | "combined";
@@ -95,6 +93,7 @@ type DeletedProject = { id: RecordId; name: string; clientName: string; address:
 type DeletedEmployee = { id: RecordId; name: string; email: string; deletedAt: string };
 type TrashState = { clients: DeletedClient[]; projects: DeletedProject[]; employees: DeletedEmployee[] };
 type AuditEntry = { id: string; actorName: string; entityType: string; entityId: string; action: string; detailsJson: string; createdAt: string };
+type ReportDataRow = { projectId: string; projectName: string; billingType: BillingType; fixedPrice: number; hourlyRate: number; totalSeconds: number; paidAmount: number; expenseAmount: number; billableExpenseAmount: number; laborCost: number };
 type StoredState = { accountMode: AccountMode; user: AccountUser; clients: Client[]; employees: Employee[]; projects: StoredProject[]; activeTimer: ActiveTimer | null; recentTimeEntries: TimeEntry[]; payments: Payment[]; expenses: Expense[]; attachments: Attachment[]; trash: TrashState; auditLog: AuditEntry[] };
 
 function presentProjects(items: StoredProject[]): Project[] {
@@ -147,7 +146,7 @@ export default function Home() {
     const storedProjects = presentProjects(data.projects);
     setAccountMode(data.accountMode);
     setCurrentUser(data.user);
-    if (data.user.role === "employee") setView((current) => ["payments", "expenses", "clients", "employees", "trash", "history"].includes(current) ? "dashboard" : current);
+    if (data.user.role === "employee") setView((current) => ["payments", "expenses", "clients", "employees", "trash", "history", "reports"].includes(current) ? "dashboard" : current);
     setClients(data.clients.map((client) => ({ ...client, projects: Number(client.projects) })));
     setEmployees(data.employees.map((employee) => ({ ...employee, hourlyCost: Number(employee.hourlyCost) })));
     setProjects(storedProjects);
@@ -438,8 +437,8 @@ export default function Home() {
         {isManager && view === "employees" && <EmployeesView employees={employees} openNew={() => openNew("employee")} editEmployee={(employee) => openEdit("employee", employee)} removeEmployee={(employee) => void removeRecord("employee", employee.id, employee.name)} inviteEmployee={(employee) => void inviteEmployee(employee)} />}
         {isManager && view === "trash" && <RecycleBinView trash={trash} restoreClient={(id, restoreProjects) => void restoreRecord("client", id, restoreProjects)} restoreProject={(id) => void restoreRecord("project", id)} restoreEmployee={(id) => void restoreRecord("employee", id)} />}
         {isManager && view === "history" && <AuditLogView entries={auditLog} />}
-        {isManager && view === "reports" && <ReportsView projects={projects} entries={recentTimeEntries} payments={payments} expenses={expenses} projectId={reportProjectId} setProjectId={setReportProjectId} from={reportFrom} setFrom={setReportFrom} to={reportTo} setTo={setReportTo} />}
-        {view === "profile" && <ProfileView user={currentUser} accountMode={accountMode} setAccountMode={(mode) => { setAccountMode(mode); void saveAction("setAccountMode", { accountMode: mode }).catch(() => setSyncState("error")); }} openTrash={() => navigate("trash")} />}
+        {isManager && view === "reports" && <ReportsView projects={projects} projectId={reportProjectId} setProjectId={setReportProjectId} from={reportFrom} setFrom={setReportFrom} to={reportTo} setTo={setReportTo} />}
+        {view === "profile" && <ProfileView user={currentUser} accountMode={accountMode} setAccountMode={(mode) => { setAccountMode(mode); void saveAction("setAccountMode", { accountMode: mode }).catch(() => setSyncState("error")); }} openReports={() => navigate("reports")} openHistory={() => navigate("history")} openTrash={() => navigate("trash")} />}
       </section>
 
       <nav className="mobile-nav" aria-label="ניווט נייד">
@@ -567,54 +566,66 @@ function SignInView() {
 const auditEntityLabels: Record<string, string> = { time_entry: "דיווח זמן", payment: "תשלום", expense: "הוצאה", attachment: "קובץ" };
 const auditActionLabels: Record<string, string> = { create: "יצירה", update: "עדכון", delete: "מחיקה" };
 
-function ReportsView({ projects, entries, payments, expenses, projectId, setProjectId, from, setFrom, to, setTo }: { projects: Project[]; entries: TimeEntry[]; payments: Payment[]; expenses: Expense[]; projectId: string; setProjectId: (value: string) => void; from: string; setFrom: (value: string) => void; to: string; setTo: (value: string) => void }) {
-  const inRange = (value: string) => (!from || value >= from) && (!to || value <= to);
-  const filteredEntries = entries.filter((entry) => (!from || entry.startedAt.slice(0, 10) >= from) && (!to || entry.startedAt.slice(0, 10) <= to) && (projectId === "all" || String(entry.projectId) === projectId));
-  const filteredPayments = payments.filter((payment) => inRange(payment.paidAt) && (projectId === "all" || String(payment.projectId) === projectId));
-  const filteredExpenses = expenses.filter((expense) => inRange(expense.incurredAt) && (projectId === "all" || String(expense.projectId) === projectId));
-  const rows = projects.filter((project) => projectId === "all" || String(project.id) === projectId).map((project) => {
-    const projectEntries = filteredEntries.filter((entry) => String(entry.projectId) === String(project.id));
-    const projectPayments = filteredPayments.filter((payment) => String(payment.projectId) === String(project.id));
-    const projectExpenses = filteredExpenses.filter((expense) => String(expense.projectId) === String(project.id));
-    const hours = projectEntries.reduce((sum, entry) => sum + Number(entry.durationSeconds) / 3600, 0);
-    const expected = projectEntries.length || from || to ? (project.billingType === "fixed" ? project.fixedPrice : project.billingType === "hourly" ? hours * project.hourlyRate : project.fixedPrice + hours * project.hourlyRate) : project.expectedAmount;
-    const paid = projectPayments.reduce((sum, payment) => sum + payment.amount, 0);
-    const costs = projectExpenses.reduce((sum, expense) => sum + expense.amount, 0) + (projectEntries.length || from || to ? 0 : Number(project.laborCost ?? 0));
-    return { project, hours, expected, paid, expenses: costs, profit: expected - costs };
-  });
-  const totals = rows.reduce((sum, row) => ({ hours: sum.hours + row.hours, expected: sum.expected + row.expected, paid: sum.paid + row.paid, expenses: sum.expenses + row.expenses, profit: sum.profit + row.profit }), { hours: 0, expected: 0, paid: 0, expenses: 0, profit: 0 });
-  const receivedProfit = totals.paid - totals.expenses;
+function ReportsView({ projects, projectId, setProjectId, from, setFrom, to, setTo }: { projects: Project[]; projectId: string; setProjectId: (value: string) => void; from: string; setFrom: (value: string) => void; to: string; setTo: (value: string) => void }) {
+  const [reportData, setReportData] = useState<ReportDataRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    const controller = new AbortController();
+    const params = new URLSearchParams({ report: "1", projectId });
+    if (from) params.set("from", from);
+    if (to) params.set("to", to);
+    Promise.resolve().then(async () => {
+      setLoading(true); setError("");
+      const response = await fetch("/api/state?" + params.toString(), { signal: controller.signal });
+      const payload = await response.json() as { rows?: ReportDataRow[]; error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "טעינת הדוח נכשלה");
+      return payload.rows ?? [];
+    }).then((items) => setReportData(items.map((item) => ({ ...item, fixedPrice: Number(item.fixedPrice), hourlyRate: Number(item.hourlyRate), totalSeconds: Number(item.totalSeconds), paidAmount: Number(item.paidAmount), expenseAmount: Number(item.expenseAmount), billableExpenseAmount: Number(item.billableExpenseAmount), laborCost: Number(item.laborCost) })))).catch((reason: unknown) => {
+      if (reason instanceof DOMException && reason.name === "AbortError") return;
+      setReportData([]); setError(reason instanceof Error ? reason.message : "טעינת הדוח נכשלה");
+    }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [from, projectId, to]);
+  const rows = useMemo(() => reportData.map((item) => {
+    const hours = item.totalSeconds / 3600;
+    const baseIncome = item.billingType === "fixed" ? item.fixedPrice : item.billingType === "hourly" ? hours * item.hourlyRate : item.fixedPrice + hours * item.hourlyRate;
+    const expected = baseIncome + item.billableExpenseAmount;
+    const costs = item.expenseAmount + item.laborCost;
+    return { ...item, hours, expected, costs, profit: expected - costs };
+  }), [reportData]);
+  const totals = rows.reduce((sum, row) => ({ hours: sum.hours + row.hours, expected: sum.expected + row.expected, paid: sum.paid + row.paidAmount, costs: sum.costs + row.costs, profit: sum.profit + row.profit }), { hours: 0, expected: 0, paid: 0, costs: 0, profit: 0 });
+  const receivedProfit = totals.paid - totals.costs;
+  function csvCell(value: string | number) {
+    let text = String(value);
+    if (/^[=+\-@\t\r]/.test(text)) text = "'" + text;
+    return '"' + text.replaceAll('"', '""') + '"';
+  }
   function exportCsv() {
-    const header = ["פרויקט", "שעות", "הכנסה צפויה", "התקבל", "הוצאות", "רווח"];
-    const lines = [header, ...rows.map((row) => [row.project.name, row.hours.toFixed(2), row.expected.toFixed(2), row.paid.toFixed(2), row.expenses.toFixed(2), row.profit.toFixed(2)])].map((line) => line.map((value) => `"${String(value).replaceAll('"', '""')}"`).join(","));
+    const header = ["פרויקט", "שעות", "הכנסה צפויה", "התקבל", "הוצאות עסק", "עלות עובדים", "רווח צפוי"];
+    const dataRows = rows.map((row) => [row.projectName, row.hours.toFixed(2), row.expected.toFixed(2), row.paidAmount.toFixed(2), row.expenseAmount.toFixed(2), row.laborCost.toFixed(2), row.profit.toFixed(2)]);
+    const lines = [header, ...dataRows].map((line) => line.map(csvCell).join(","));
     const url = URL.createObjectURL(new Blob(["\ufeff" + lines.join("\n")], { type: "text/csv;charset=utf-8" }));
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "menahel-avoda-report.csv";
-    link.click();
-    URL.revokeObjectURL(url);
+    const link = document.createElement("a"); link.href = url; link.download = "menahel-avoda-report.csv"; link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
   }
-  function exportPdf() {
-    const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
-    pdf.setFontSize(18);
-    pdf.text("Menahel Avoda - Financial Report", 14, 18);
-    pdf.setFontSize(10);
-    pdf.text(`Generated: ${new Date().toLocaleDateString("en-GB")}`, 14, 25);
-    pdf.text(`Expected profit: EUR ${Math.round(totals.profit).toLocaleString()} | Received profit: EUR ${Math.round(receivedProfit).toLocaleString()}`, 14, 31);
-    autoTable(pdf, {
-      startY: 38,
-      head: [["Project", "Hours", "Expected income", "Received", "Expenses", "Expected profit"]],
-      body: rows.map((row) => [row.project.name, row.hours.toFixed(1), `EUR ${Math.round(row.expected).toLocaleString()}`, `EUR ${Math.round(row.paid).toLocaleString()}`, `EUR ${Math.round(row.expenses).toLocaleString()}`, `EUR ${Math.round(row.profit).toLocaleString()}`]),
-      styles: { fontSize: 9, cellPadding: 3 },
-      headStyles: { fillColor: [30, 122, 89] },
-    });
-    pdf.save("menahel-avoda-report.pdf");
+  function escapeHtml(value: string | number) {
+    return String(value).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" })[character] ?? character);
   }
-  return <><section className="report-filters"><Field label="פרויקט"><select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="all">כל הפרויקטים</option>{projects.map((project) => <option key={project.id} value={String(project.id)}>{project.name}</option>)}</select></Field><Field label="מתאריך"><input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></Field><Field label="עד תאריך"><input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></Field><div className="report-export-actions"><button className="primary-button" onClick={exportCsv}>הורדת CSV</button><button className="secondary-compact" onClick={exportPdf}>הדפסה / PDF</button></div></section><section className="finance-summary report-summary"><article><span>שעות</span><strong>{totals.hours.toFixed(1)}</strong></article><article><span>הכנסה צפויה</span><strong>€{Math.round(totals.expected).toLocaleString()}</strong></article><article><span>רווח צפוי</span><strong>€{Math.round(totals.profit).toLocaleString()}</strong><small>הכנסה צפויה פחות הוצאות</small></article><article className={receivedProfit < 0 ? "negative" : "positive"}><span>רווח לפי תקבולים</span><strong>€{Math.round(receivedProfit).toLocaleString()}</strong><small>מה שהתקבל בפועל פחות הוצאות</small></article></section><section className="page-card report-card"><div className="section-head"><div><h2>סיכום לפי פרויקט</h2><p>{rows.length} פרויקטים בדוח · התקבל בפועל: €{Math.round(totals.paid).toLocaleString()}</p></div></div>{rows.length ? <div className="report-table"><div className="report-table-head"><span>פרויקט</span><span>שעות</span><span>צפוי</span><span>התקבל</span><span>הוצאות</span><span>רווח צפוי</span></div>{rows.map((row) => <div className="report-table-row" key={row.project.id}><strong dir="auto">{row.project.name}</strong><span>{row.hours.toFixed(1)}</span><span>€{Math.round(row.expected).toLocaleString()}</span><span>€{Math.round(row.paid).toLocaleString()}</span><span>€{Math.round(row.expenses).toLocaleString()}</span><b className={row.profit < 0 ? "negative-text" : "positive-text"}>€{Math.round(row.profit).toLocaleString()}</b></div>)}</div> : <div className="empty-state"><div><strong>אין נתונים בטווח שנבחר</strong><span>שנו את הפרויקט או את טווח התאריכים.</span></div></div>}</section></>;
+  function printReport() {
+    const printWindow = window.open("", "_blank", "width=1100,height=800");
+    if (!printWindow) { setError("הדפדפן חסם את חלון ההדפסה. יש לאפשר חלונות קופצים ולנסות שוב."); return; }
+    printWindow.opener = null;
+    const tableRows = rows.map((row) => ["<tr><td>", escapeHtml(row.projectName), "</td><td>", row.hours.toFixed(1), "</td><td>€", Math.round(row.expected).toLocaleString(), "</td><td>€", Math.round(row.paidAmount).toLocaleString(), "</td><td>€", Math.round(row.expenseAmount).toLocaleString(), "</td><td>€", Math.round(row.laborCost).toLocaleString(), "</td><td>€", Math.round(row.profit).toLocaleString(), "</td></tr>"].join("")).join("");
+    const rangeLabel = from || to ? "טווח: " + (from || "התחלה") + " עד " + (to || "היום") : "כל התקופה";
+    printWindow.document.write(["<!doctype html><html lang='he' dir='rtl'><head><meta charset='utf-8'><title>דוח מנהל עבודה</title><style>body{font-family:Arial,sans-serif;color:#173b2e;padding:28px}h1{margin:0 0 8px}.meta{color:#64766e;margin-bottom:24px}.summary{display:flex;gap:24px;margin:20px 0}.summary div{padding:12px 16px;background:#eef6f2;border-radius:10px}table{width:100%;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #dfe8e3;text-align:right}th{background:#1e7a59;color:white}@media print{body{padding:0}}</style></head><body><h1>מנהל עבודה — דוח כספי</h1><div class='meta'>", escapeHtml(rangeLabel), " · הופק בתאריך ", escapeHtml(new Date().toLocaleDateString("he-IL")), "</div><div class='summary'><div>הכנסה צפויה: €", Math.round(totals.expected).toLocaleString(), "</div><div>רווח צפוי: €", Math.round(totals.profit).toLocaleString(), "</div><div>התקבל בפועל: €", Math.round(totals.paid).toLocaleString(), "</div></div><table><thead><tr><th>פרויקט</th><th>שעות</th><th>צפוי</th><th>התקבל</th><th>הוצאות</th><th>עובדים</th><th>רווח</th></tr></thead><tbody>", tableRows, "</tbody></table><script>window.addEventListener('load',function(){window.print()});</scr" + "ipt></body></html>"].join(""));
+    printWindow.document.close();
+  }
+  return <><section className="report-filters"><Field label="פרויקט"><select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="all">כל הפרויקטים</option>{projects.map((project) => <option key={project.id} value={String(project.id)}>{project.name}</option>)}</select></Field><Field label="מתאריך"><input type="date" max={to || undefined} value={from} onChange={(event) => setFrom(event.target.value)} /></Field><Field label="עד תאריך"><input type="date" min={from || undefined} value={to} onChange={(event) => setTo(event.target.value)} /></Field><div className="report-export-actions"><button type="button" className="primary-button" disabled={loading || !rows.length} onClick={exportCsv}>הורדת CSV</button><button type="button" className="secondary-compact" disabled={loading || !rows.length} onClick={printReport}>הדפסה / שמירה כ־PDF</button></div></section>{error && <div className="report-status error" role="alert">{error}</div>}{loading && <div className="report-status" role="status">טוען את כל נתוני הדוח…</div>}<section className="finance-summary report-summary"><article><span>שעות</span><strong>{totals.hours.toFixed(1)}</strong></article><article><span>הכנסה צפויה</span><strong>€{Math.round(totals.expected).toLocaleString()}</strong></article><article><span>רווח צפוי</span><strong>€{Math.round(totals.profit).toLocaleString()}</strong><small>כולל הוצאות ועלויות עובדים</small></article><article className={receivedProfit < 0 ? "negative" : "positive"}><span>רווח לפי תקבולים</span><strong>€{Math.round(receivedProfit).toLocaleString()}</strong><small>מה שהתקבל בפועל פחות כל העלויות</small></article></section><section className="page-card report-card"><div className="section-head"><div><h2>סיכום לפי פרויקט</h2><p>{rows.length} פרויקטים בדוח · התקבל בפועל: €{Math.round(totals.paid).toLocaleString()}</p></div></div><p className="report-note">בטווח תאריכים המחיר הגלובלי נשאר חלק מהכנסת הפרויקט; שעות, תקבולים, הוצאות ועלויות עובדים מסוננים לפי התאריך.</p>{!loading && rows.length ? <div className="report-table"><div className="report-table-head"><span>פרויקט</span><span>שעות</span><span>צפוי</span><span>התקבל</span><span>עלויות</span><span>רווח צפוי</span></div>{rows.map((row) => <div className="report-table-row" key={row.projectId}><strong dir="auto">{row.projectName}</strong><span>{row.hours.toFixed(1)}</span><span>€{Math.round(row.expected).toLocaleString()}</span><span>€{Math.round(row.paidAmount).toLocaleString()}</span><span title={"הוצאות: €" + Math.round(row.expenseAmount).toLocaleString() + " · עובדים: €" + Math.round(row.laborCost).toLocaleString()}>€{Math.round(row.costs).toLocaleString()}</span><b className={row.profit < 0 ? "negative-text" : "positive-text"}>€{Math.round(row.profit).toLocaleString()}</b></div>)}</div> : !loading && !error ? <div className="empty-state"><div><strong>אין נתונים בטווח שנבחר</strong><span>שנו את הפרויקט או את טווח התאריכים.</span></div></div> : null}</section></>;
 }
 
 function AuditLogView({ entries }: { entries: AuditEntry[] }) {
-  return <section className="page-card history-card"><div className="section-head"><div><h2>היסטוריית שינויים</h2><p>{entries.length ? `${entries.length} פעולות אחרונות` : "פעולות שבוצעו במערכת יופיעו כאן"}</p></div><span className="trash-total">{entries.length}</span></div>{entries.length ? <div className="audit-list">{entries.map((entry) => <article className="audit-row" key={entry.id}><div className="audit-icon">≡</div><div><strong>{auditActionLabels[entry.action] ?? entry.action} {auditEntityLabels[entry.entityType] ?? entry.entityType}</strong><span>על ידי {entry.actorName}</span></div><time>{new Date(entry.createdAt.replace(" ", "T") + "Z").toLocaleString("he-IL", { dateStyle: "medium", timeStyle: "short" })}</time></article>)}</div> : <div className="empty-state"><div><strong>אין עדיין פעולות מתועדות</strong><span>יצירה, עריכה ומחיקה של נתונים יופיעו כאן.</span></div></div>}</section>;
+  return <section className="page-card history-card"><div className="section-head"><div><h2>היסטוריית שינויים</h2><p>{entries.length ? `${entries.length} פעולות אחרונות` : "דיווחי זמן, תשלומים, הוצאות וקבצים יופיעו כאן"}</p></div><span className="trash-total">{entries.length}</span></div>{entries.length ? <div className="audit-list">{entries.map((entry) => <article className="audit-row" key={entry.id}><div className="audit-icon">≡</div><div><strong>{auditActionLabels[entry.action] ?? entry.action} {auditEntityLabels[entry.entityType] ?? entry.entityType}</strong><span>על ידי {entry.actorName}</span></div><time>{new Date(entry.createdAt.replace(" ", "T") + "Z").toLocaleString("he-IL", { dateStyle: "medium", timeStyle: "short" })}</time></article>)}</div> : <div className="empty-state"><div><strong>אין עדיין פעולות מתועדות</strong><span>יצירה, עריכה ומחיקה של דיווחי זמן, תשלומים, הוצאות וקבצים יופיעו כאן.</span></div></div>}</section>;
 }
 
 function formatDeletedAt(value: string) {
@@ -631,9 +642,9 @@ function RecycleBinView({ trash, restoreClient, restoreProject, restoreEmployee 
   </div>}</section>;
 }
 
-function ProfileView({ user, accountMode, setAccountMode, openTrash }: { user: AccountUser; accountMode: AccountMode; setAccountMode: (mode: AccountMode) => void; openTrash: () => void }) {
+function ProfileView({ user, accountMode, setAccountMode, openReports, openHistory, openTrash }: { user: AccountUser; accountMode: AccountMode; setAccountMode: (mode: AccountMode) => void; openReports: () => void; openHistory: () => void; openTrash: () => void }) {
   if (user.role === "employee") return <section className="page-card profile-card"><div className="profile-intro"><div className="profile-avatar">{user.displayName.charAt(0)}</div><div><h2 dir="auto">{user.displayName}</h2><p dir="ltr">{user.email}</p><small>עובד מחובר לצוות</small></div>{!user.isLocal && <a className="sign-out-link" href="/signout-with-chatgpt?return_to=%2F">התנתקות</a>}</div><div className="team-member-summary"><span className="mode-icon">♟</span><div><strong>חשבון עובד</strong><p>מוצגים לך רק הפרויקטים שאליהם שויכת, דיווחי הזמן שלך והשכר המחושב לפי התעריף שלך.</p></div></div></section>;
-  return <section className="page-card profile-card"><div className="profile-intro"><div className="profile-avatar">{user.displayName.charAt(0)}</div><div><h2 dir="auto">{user.displayName}</h2><p dir="ltr">{user.email}</p><small>{user.isLocal ? "משתמש פיתוח מקומי" : "חשבון מחובר"}</small></div>{!user.isLocal && <a className="sign-out-link" href="/signout-with-chatgpt?return_to=%2F">התנתקות</a>}</div><fieldset className="account-mode-options"><legend>סוג החשבון שלי</legend><label className={accountMode === "solo" ? "selected" : ""}><input type="radio" name="accountMode" checked={accountMode === "solo"} onChange={() => setAccountMode("solo")} /><span className="mode-icon">◷</span><span><strong>עובד</strong><small>אני עובד לבד ומגדיר בכל פרויקט כמה מגיע לי לפי שעה, במחיר גלובלי או בשילוב.</small></span>{accountMode === "solo" && <b>נבחר</b>}</label><label className={accountMode === "employer" ? "selected" : ""}><input type="radio" name="accountMode" checked={accountMode === "employer"} onChange={() => setAccountMode("employer")} /><span className="mode-icon">♟</span><span><strong>מעסיק עובדים</strong><small>אני מנהל צוות ומפריד בין המחיר ללקוח לבין העלות של כל עובד.</small></span>{accountMode === "employer" && <b>נבחר</b>}</label></fieldset><div className="mode-summary"><strong>{accountMode === "solo" ? "מצב עובד פעיל" : "מצב מעסיק פעיל"}</strong><span>{accountMode === "solo" ? "מסך העובדים הוסתר, ובפרויקטים יוצג רק השכר שמגיע לך." : "ניהול העובדים, עלויות השכר ורווחיות הפרויקט זמינים עבורך."}</span></div><button className="profile-trash-link" onClick={openTrash}><span>♲</span><span><strong>סל המחזור</strong><small>צפייה ושחזור של לקוחות, פרויקטים ועובדים שנמחקו</small></span><b>←</b></button></section>;
+  return <section className="page-card profile-card"><div className="profile-intro"><div className="profile-avatar">{user.displayName.charAt(0)}</div><div><h2 dir="auto">{user.displayName}</h2><p dir="ltr">{user.email}</p><small>{user.isLocal ? "משתמש פיתוח מקומי" : "חשבון מחובר"}</small></div>{!user.isLocal && <a className="sign-out-link" href="/signout-with-chatgpt?return_to=%2F">התנתקות</a>}</div><fieldset className="account-mode-options"><legend>סוג החשבון שלי</legend><label className={accountMode === "solo" ? "selected" : ""}><input type="radio" name="accountMode" checked={accountMode === "solo"} onChange={() => setAccountMode("solo")} /><span className="mode-icon">◷</span><span><strong>עובד</strong><small>אני עובד לבד ומגדיר בכל פרויקט כמה מגיע לי לפי שעה, במחיר גלובלי או בשילוב.</small></span>{accountMode === "solo" && <b>נבחר</b>}</label><label className={accountMode === "employer" ? "selected" : ""}><input type="radio" name="accountMode" checked={accountMode === "employer"} onChange={() => setAccountMode("employer")} /><span className="mode-icon">♟</span><span><strong>מעסיק עובדים</strong><small>אני מנהל צוות ומפריד בין המחיר ללקוח לבין העלות של כל עובד.</small></span>{accountMode === "employer" && <b>נבחר</b>}</label></fieldset><div className="mode-summary"><strong>{accountMode === "solo" ? "מצב עובד פעיל" : "מצב מעסיק פעיל"}</strong><span>{accountMode === "solo" ? "מסך העובדים הוסתר, ובפרויקטים יוצג רק השכר שמגיע לך." : "ניהול העובדים, עלויות השכר ורווחיות הפרויקט זמינים עבורך."}</span></div><button className="profile-trash-link" onClick={openReports}><span>↗</span><span><strong>דוחות כספיים</strong><small>סינון, CSV והדפסה או שמירה כ־PDF</small></span><b>←</b></button><button className="profile-trash-link" onClick={openHistory}><span>≡</span><span><strong>היסטוריית שינויים</strong><small>צפייה בפעולות המתועדות במערכת</small></span><b>←</b></button><button className="profile-trash-link" onClick={openTrash}><span>♲</span><span><strong>סל המחזור</strong><small>צפייה ושחזור של לקוחות, פרויקטים ועובדים שנמחקו</small></span><b>←</b></button></section>;
 }
 
 function Modal({ title, close, children }: { title: string; close: () => void; children: React.ReactNode }) {

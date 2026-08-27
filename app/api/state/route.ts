@@ -201,7 +201,7 @@ async function loadState(db: D1Database, identity: Identity) {
     ? db.prepare(`SELECT al.id, COALESCE(u.display_name, 'משתמש לא ידוע') AS actorName,
         al.entity_type AS entityType, al.entity_id AS entityId, al.action,
         al.details_json AS detailsJson, al.created_at AS createdAt
-        FROM audit_log al LEFT JOIN users u ON u.id = al.actor_id
+        FROM audit_log al LEFT JOIN users u ON u.id = al.actor_id AND u.business_id = al.business_id
         WHERE al.business_id = ?
         ORDER BY al.created_at DESC LIMIT 100`).bind(businessId).all()
     : managerOnly();
@@ -258,6 +258,40 @@ async function loadState(db: D1Database, identity: Identity) {
   };
 }
 
+async function loadFinancialReport(db: D1Database, identity: Identity, searchParams: URLSearchParams) {
+  const projectId = searchParams.get("projectId") ?? "all";
+  const from = searchParams.get("from") ?? "";
+  const to = searchParams.get("to") ?? "";
+  const validDate = /^\d{4}-\d{2}-\d{2}$/;
+  if ((from && !validDate.test(from)) || (to && !validDate.test(to)) || (from && to && from > to)) {
+    return { error: "טווח התאריכים אינו תקין", status: 400 as const };
+  }
+  const range = [from, from, to, to];
+  const result = await db.prepare([
+    "SELECT p.id AS projectId, p.name AS projectName, p.billing_method AS billingType,",
+    "p.fixed_price AS fixedPrice, p.client_hourly_rate AS hourlyRate,",
+    "COALESCE((SELECT SUM(te.duration_seconds) FROM time_entries te",
+    "WHERE te.project_id = p.id AND te.deleted_at IS NULL AND te.ended_at IS NOT NULL",
+    "AND (? = '' OR substr(te.started_at, 1, 10) >= ?) AND (? = '' OR substr(te.started_at, 1, 10) <= ?)), 0) AS totalSeconds,",
+    "COALESCE((SELECT SUM(pay.amount) FROM payments pay WHERE pay.project_id = p.id AND pay.deleted_at IS NULL",
+    "AND (? = '' OR pay.paid_at >= ?) AND (? = '' OR pay.paid_at <= ?)), 0) AS paidAmount,",
+    "COALESCE((SELECT SUM(ex.amount) FROM expenses ex WHERE ex.project_id = p.id AND ex.deleted_at IS NULL",
+    "AND (? = '' OR ex.incurred_at >= ?) AND (? = '' OR ex.incurred_at <= ?)), 0) AS expenseAmount,",
+    "COALESCE((SELECT SUM(ex.amount) FROM expenses ex WHERE ex.project_id = p.id AND ex.deleted_at IS NULL AND ex.billable_to_client = 1",
+    "AND (? = '' OR ex.incurred_at >= ?) AND (? = '' OR ex.incurred_at <= ?)), 0) AS billableExpenseAmount,",
+    "COALESCE((SELECT SUM(te.duration_seconds / 3600.0 * COALESCE(pw.hourly_cost_override, u.hourly_cost, 0))",
+    "FROM time_entries te JOIN users u ON u.id = te.user_id",
+    "LEFT JOIN project_workers pw ON pw.project_id = te.project_id AND pw.user_id = te.user_id",
+    "WHERE te.project_id = p.id AND te.deleted_at IS NULL AND te.ended_at IS NOT NULL",
+    "AND (? = '' OR substr(te.started_at, 1, 10) >= ?) AND (? = '' OR substr(te.started_at, 1, 10) <= ?)), 0) AS laborCost",
+    "FROM projects p WHERE p.business_id = ? AND p.deleted_at IS NULL",
+    "AND (? = 'all' OR p.id = ?) ORDER BY p.created_at DESC",
+  ].join(" "))
+    .bind(...range, ...range, ...range, ...range, ...range, identity.businessId, projectId, projectId)
+    .all();
+  return { rows: result.results, status: 200 as const };
+}
+
 async function prepareRequest(request: Request) {
   const rawIdentity = await resolveIdentity(request);
   if (!rawIdentity) return null;
@@ -304,7 +338,13 @@ async function acceptInvitation(request: Request, token: string) {
 export async function GET(request: Request) {
   const context = await prepareRequest(request);
   if (!context) return Response.json({ error: "נדרשת התחברות" }, { status: 401 });
-  const attachmentId = new URL(request.url).searchParams.get("attachment");
+  const searchParams = new URL(request.url).searchParams;
+  if (searchParams.get("report") === "1") {
+    if (context.identity.role !== "manager") return Response.json({ error: "הדוחות זמינים למנהל בלבד" }, { status: 403 });
+    const report = await loadFinancialReport(context.db, context.identity, searchParams);
+    return report.status === 200 ? Response.json({ rows: report.rows }) : Response.json({ error: report.error }, { status: report.status });
+  }
+  const attachmentId = searchParams.get("attachment");
   if (!attachmentId) return Response.json(await loadState(context.db, context.identity));
   if (context.identity.role !== "manager") return Response.json({ error: "הקובץ זמין למנהל בלבד" }, { status: 403 });
   const attachment = await context.db.prepare(`SELECT object_key AS objectKey, file_name AS fileName, content_type AS contentType
