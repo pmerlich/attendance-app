@@ -36,6 +36,10 @@ test("server-renders the Hebrew operations dashboard", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(page, /התחלת טיימר/);
   assert.match(page, /הוספת דיווח ידני/);
+  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.ok(css.includes(".form-actions .primary-button { display:inline-flex"));
+  assert.ok(css.includes("height:100dvh"));
+  assert.ok(css.includes("safe-area-inset-bottom"));
   assert.ok(page.includes('https://www.google.com/maps/dir/?api=1'));
   assert.ok(page.includes('https://www.waze.com/ul?q='));
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Starter Project/);
