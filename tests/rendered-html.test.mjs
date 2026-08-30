@@ -67,3 +67,19 @@ test("supports employee reports and native Excel export", async () => {
   assert.match(excel, /0x06054b50/);
   assert.match(excel, /xl\/worksheets\/sheet1\.xml/);
 });
+test("enables the isolated guest demo only on the preview host", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const api = await readFile(new URL("../app/api/state/route.ts", import.meta.url), "utf8");
+  assert.match(api, /hostname === "menahel-avoda\.er2829288\.workers\.dev"/);
+  assert.match(api, /displayName: "דני לוי"/);
+  assert.match(api, /businessId: "guest-demo-business-v1"/);
+  assert.match(api, /isGuest: true/);
+  assert.match(api, /guest-employee-1/);
+  assert.match(api, /guest-project-1/);
+  assert.match(api, /guest-payment-1/);
+  assert.match(api, /guest-expense-1/);
+  assert.ok(api.indexOf("if (userId && email)") < api.indexOf('hostname === "menahel-avoda.er2829288.workers.dev"'));
+  assert.doesNotMatch(api, /מצב האורח מיועד לצפייה בלבד/);
+  assert.match(page, /מצב אורח — דני לוי/);
+  assert.match(page, /סביבת הדגמה ציבורית ומשותפת/);
+});

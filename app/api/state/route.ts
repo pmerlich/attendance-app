@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 
-type Identity = { userId: string; email: string; displayName: string; businessId: string; ownerId: string; role: "manager" | "employee"; isLocal: boolean };
+type Identity = { userId: string; email: string; displayName: string; businessId: string; ownerId: string; role: "manager" | "employee"; isLocal: boolean; isGuest: boolean };
 
 async function stableKey(value: string) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
@@ -14,11 +14,14 @@ async function resolveIdentity(request: Request): Promise<Identity | null> {
     const encodedName = request.headers.get("oai-authenticated-user-full-name");
     const displayName = encodedName && request.headers.get("oai-authenticated-user-full-name-encoding") === "percent-encoded-utf-8" ? safeDecode(encodedName) ?? email : email;
     const key = await stableKey(userId);
-    return { userId, email, displayName, businessId: `business-${key}`, ownerId: `owner-${key}`, role: "manager", isLocal: false };
+    return { userId, email, displayName, businessId: `business-${key}`, ownerId: `owner-${key}`, role: "manager", isLocal: false, isGuest: false };
   }
   const hostname = new URL(request.url).hostname;
   if (["localhost", "127.0.0.1", "::1"].includes(hostname)) {
-    return { userId: "local-demo-user", email: "menachem@example.com", displayName: "מנחם", businessId: "demo-business", ownerId: "demo-owner", role: "manager", isLocal: true };
+    return { userId: "local-demo-user", email: "menachem@example.com", displayName: "מנחם", businessId: "demo-business", ownerId: "demo-owner", role: "manager", isLocal: true, isGuest: false };
+  }
+  if (hostname === "menahel-avoda.er2829288.workers.dev") {
+    return { userId: "guest-demo-user-v1", email: "guest@menahel-avoda.demo", displayName: "דני לוי", businessId: "guest-demo-business-v1", ownerId: "guest-demo-owner-v1", role: "manager", isLocal: false, isGuest: true };
   }
   return null;
 }
@@ -118,6 +121,31 @@ async function ensureAccount(db: D1Database, identity: Identity) {
     db.prepare("INSERT OR IGNORE INTO users (id, business_id, auth_user_id, email, display_name, role, hourly_cost) VALUES (?, ?, ?, ?, ?, 'manager', NULL)").bind(identity.ownerId, identity.businessId, identity.userId, identity.email, identity.displayName),
     db.prepare("UPDATE users SET auth_user_id = ?, email = ?, display_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ?").bind(identity.userId, identity.email, identity.displayName, identity.ownerId, identity.businessId),
   ]);
+  if (identity.isGuest) {
+    await db.batch([
+      db.prepare("UPDATE businesses SET work_mode = 'employer', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(identity.businessId),
+      db.prepare("INSERT OR IGNORE INTO users (id, business_id, email, display_name, role, hourly_cost) VALUES ('guest-employee-1', ?, 'yonatan.demo@example.com', 'יונתן לוי', 'employee', 22)").bind(identity.businessId),
+      db.prepare("INSERT OR IGNORE INTO users (id, business_id, email, display_name, role, hourly_cost) VALUES ('guest-employee-2', ?, 'michael.demo@example.com', 'Michael Berger', 'employee', 26)").bind(identity.businessId),
+      db.prepare("INSERT OR IGNORE INTO users (id, business_id, email, display_name, role, hourly_cost) VALUES ('guest-employee-3', ?, 'uri.demo@example.com', 'אורי מזרחי', 'employee', 20)").bind(identity.businessId),
+      db.prepare("INSERT OR IGNORE INTO clients (id, business_id, name, address, phone) VALUES ('guest-client-1', ?, 'דניאל כהן', 'Rue de la Paix 14, Paris', '+33 6 12 34 56 78')").bind(identity.businessId),
+      db.prepare("INSERT OR IGNORE INTO clients (id, business_id, name, address, phone) VALUES ('guest-client-2', ?, 'Bauhaus Projekt GmbH', 'Kantstraße 81, Berlin', '+49 30 901820')").bind(identity.businessId),
+      db.prepare("INSERT OR IGNORE INTO clients (id, business_id, name, address, phone) VALUES ('guest-client-3', ?, 'Atelier 27', 'Boulevard Voltaire 27, Paris', '+33 1 42 01 27 27')").bind(identity.businessId),
+      db.prepare("INSERT OR IGNORE INTO projects (id, business_id, client_id, name, address, status, billing_method, fixed_price, client_hourly_rate) VALUES ('guest-project-1', ?, 'guest-client-1', 'שיפוץ דירת משפחת כהן', 'Rue de la Paix 14, Paris', 'active', 'fixed', 4200, 0)").bind(identity.businessId),
+      db.prepare("INSERT OR IGNORE INTO projects (id, business_id, client_id, name, address, status, billing_method, fixed_price, client_hourly_rate) VALUES ('guest-project-2', ?, 'guest-client-2', 'Küchenmontage Berlin', 'Kantstraße 81, Berlin', 'waiting', 'hourly', 0, 45)").bind(identity.businessId),
+      db.prepare("INSERT OR IGNORE INTO projects (id, business_id, client_id, name, address, status, billing_method, fixed_price, client_hourly_rate) VALUES ('guest-project-3', ?, 'guest-client-3', 'Office renovation — Atelier 27', 'Boulevard Voltaire 27, Paris', 'active', 'combined', 1500, 38)").bind(identity.businessId),
+      db.prepare("INSERT OR IGNORE INTO project_workers (id, project_id, user_id) VALUES ('guest-assignment-1', 'guest-project-1', 'guest-employee-1')"),
+      db.prepare("INSERT OR IGNORE INTO project_workers (id, project_id, user_id) VALUES ('guest-assignment-2', 'guest-project-2', 'guest-employee-2')"),
+      db.prepare("INSERT OR IGNORE INTO project_workers (id, project_id, user_id) VALUES ('guest-assignment-3', 'guest-project-3', 'guest-employee-1')"),
+      db.prepare("INSERT OR IGNORE INTO project_workers (id, project_id, user_id) VALUES ('guest-assignment-4', 'guest-project-3', 'guest-employee-3')"),
+      db.prepare("INSERT OR IGNORE INTO time_entries (id, project_id, user_id, started_at, ended_at, duration_seconds, description, source) VALUES ('guest-time-1', 'guest-project-1', 'guest-employee-1', '2026-08-20 08:00:00', '2026-08-20 16:30:00', 30600, 'עבודות שיפוץ', 'manual')"),
+      db.prepare("INSERT OR IGNORE INTO time_entries (id, project_id, user_id, started_at, ended_at, duration_seconds, description, source) VALUES ('guest-time-2', 'guest-project-2', 'guest-employee-2', '2026-08-21 08:00:00', '2026-08-21 14:00:00', 21600, 'Montage', 'manual')"),
+      db.prepare("INSERT OR IGNORE INTO time_entries (id, project_id, user_id, started_at, ended_at, duration_seconds, description, source) VALUES ('guest-time-3', 'guest-project-3', 'guest-employee-3', '2026-08-22 08:00:00', '2026-08-22 15:30:00', 27000, 'Renovation work', 'manual')"),
+      db.prepare("INSERT OR IGNORE INTO payments (id, project_id, amount, paid_at, method, note) VALUES ('guest-payment-1', 'guest-project-1', 1800, '2026-08-23', 'transfer', 'מקדמה לדוגמה')"),
+      db.prepare("INSERT OR IGNORE INTO expenses (id, project_id, amount, incurred_at, category, billable_to_client, note) VALUES ('guest-expense-1', 'guest-project-1', 340, '2026-08-20', 'materials', 0, 'חומרי עבודה לדוגמה')"),
+      db.prepare("INSERT OR IGNORE INTO expenses (id, project_id, amount, incurred_at, category, billable_to_client, note) VALUES ('guest-expense-2', 'guest-project-3', 125, '2026-08-22', 'travel', 1, 'נסיעה לחיוב הלקוח')"),
+    ]);
+    return;
+  }
   if (!identity.isLocal) return;
   await db.batch([
     db.prepare("INSERT OR IGNORE INTO users (id, business_id, email, display_name, role, hourly_cost) VALUES ('employee-1', ?, 'yonatan@example.com', 'יונתן לוי', 'employee', 22)").bind(identity.businessId),
@@ -249,7 +277,7 @@ async function loadState(db: D1Database, identity: Identity) {
   ]);
   return {
     accountMode: business?.workMode ?? "solo",
-    user: { id: identity.ownerId, displayName: identity.displayName, email: identity.email, role: identity.role, isLocal: identity.isLocal },
+    user: { id: identity.ownerId, displayName: identity.displayName, email: identity.email, role: identity.role, isLocal: identity.isLocal, isGuest: identity.isGuest },
     clients: clients.results,
     employees: employees.results,
     projects: projects.results,
