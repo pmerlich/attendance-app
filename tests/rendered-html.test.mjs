@@ -21,7 +21,10 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.match(html, /<html[^>]*lang="he"[^>]*dir="rtl"/i);
   assert.match(html, /<title>מנהל עבודה \| פרויקטים, שעות וכספים<\/title>/);
   assert.match(html, /כל הפרויקטים/);
-  assert.match(html, /לחיצה על פרויקט פותחת פרטים ופעולות/);
+  assert.match(html, /הפעילו טיימר ישירות או פתחו פרויקט לפרטים ודיווח ידני/);
+  assert.match(html, /aria-label="הפעלת טיימר עבור/);
+  assert.match(html, /עדכון מצב הפרויקט/);
+  assert.match(html, /הסתיים/);
   assert.match(html, /סה״כ/);
   assert.match(html, /הכנסה צפויה/);
   assert.doesNotMatch(html, /מוכן להתחלה/);
@@ -35,6 +38,8 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.ok(html.includes('href="/app-icon.png"'));
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(page, /התחלת טיימר/);
+  assert.match(page, /running && <button className="mobile-timer running"/);
+  assert.doesNotMatch(page, /בחירת פרויקט להפעלת טיימר/);
   assert.match(page, /הוספת דיווח ידני/);
   const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.ok(css.includes(".form-actions .primary-button { display:inline-flex"));
@@ -42,6 +47,8 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.ok(css.includes("safe-area-inset-bottom"));
   assert.ok(page.includes('https://www.google.com/maps/dir/?api=1'));
   assert.ok(page.includes('https://www.waze.com/ul?q='));
+  assert.match(page, /function NavigationIcon/);
+  assert.match(page, /updateProjectStatus/);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Starter Project/);
 });
 

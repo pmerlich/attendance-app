@@ -7,6 +7,7 @@ import { createXlsx, type WorkbookCell } from "./xlsx-export";
 
 type View = "dashboard" | "projects" | "time" | "payments" | "expenses" | "clients" | "employees" | "trash" | "history" | "reports" | "profile";
 type BillingType = "fixed" | "hourly" | "combined";
+type ProjectStatus = "active" | "waiting" | "completed";
 type AccountMode = "solo" | "employer";
 type EntityType = "project" | "client" | "employee";
 type ModalType = EntityType | "time" | "payment" | "expense" | "attachment" | "attachmentPreview";
@@ -19,7 +20,7 @@ type Project = {
   name: string;
   client: string;
   address: string;
-  tag: "בביצוע" | "ממתין";
+  tag: "בביצוע" | "ממתין" | "הסתיים";
   billingType: BillingType;
   billing: string;
   fixedPrice: number;
@@ -83,6 +84,19 @@ function billingLabel(type: BillingType, fixedPrice: number, hourlyRate: number)
   return `€${fixedPrice.toLocaleString()} + €${hourlyRate.toLocaleString()} לשעה`;
 }
 
+const projectStatuses: { value: ProjectStatus; label: Project["tag"] }[] = [
+  { value: "active", label: "בביצוע" },
+  { value: "waiting", label: "ממתין" },
+  { value: "completed", label: "הסתיים" },
+];
+
+function projectStatusFromTag(tag: Project["tag"]): ProjectStatus {
+  return tag === "ממתין" ? "waiting" : tag === "הסתיים" ? "completed" : "active";
+}
+
+function projectTagFromStatus(status: unknown): Project["tag"] {
+  return status === "waiting" ? "ממתין" : status === "completed" ? "הסתיים" : "בביצוע";
+}
 type StoredProject = Pick<Project, "id" | "name" | "client" | "address" | "tag" | "billingType" | "fixedPrice" | "hourlyRate"> & { workerIds: string | string[]; totalSeconds: number; paidAmount: number; expenseAmount: number; billableExpenseAmount: number; laborCost: number };
 type AccountUser = { id: string; displayName: string; email: string; role: "manager" | "employee"; isLocal: boolean; isGuest?: boolean };
 type ActiveTimer = { id: string; projectId: string; startedAt: string; elapsedSeconds: number };
@@ -172,10 +186,11 @@ function applyOptimisticOperation(state: StoredState, operation: QueuedOperation
   if (operation.action === "deleteEmployee") next.employees = next.employees.filter((employee) => String(employee.id) !== id);
 
   if (operation.action === "addProject" && !next.projects.some((item) => String(item.id) === id)) {
-    next.projects.unshift({ id, name: String(values.name ?? ""), client: String(values.client ?? ""), address: String(values.address ?? ""), tag: "בביצוע", billingType: String(values.billingType ?? "fixed") as BillingType, fixedPrice: Number(values.fixedPrice ?? 0), hourlyRate: Number(values.hourlyRate ?? 0), workerIds: Array.isArray(values.workers) ? values.workers.map(String) : [], totalSeconds: 0, paidAmount: 0, expenseAmount: 0, billableExpenseAmount: 0, laborCost: 0 });
+    next.projects.unshift({ id, name: String(values.name ?? ""), client: String(values.client ?? ""), address: String(values.address ?? ""), tag: projectTagFromStatus(values.status), billingType: String(values.billingType ?? "fixed") as BillingType, fixedPrice: Number(values.fixedPrice ?? 0), hourlyRate: Number(values.hourlyRate ?? 0), workerIds: Array.isArray(values.workers) ? values.workers.map(String) : [], totalSeconds: 0, paidAmount: 0, expenseAmount: 0, billableExpenseAmount: 0, laborCost: 0 });
     next.clients = next.clients.map((client) => client.name === String(values.client ?? "") ? { ...client, projects: client.projects + 1 } : client);
   }
-  if (operation.action === "updateProject") next.projects = next.projects.map((item) => String(item.id) === id ? { ...item, name: String(values.name ?? ""), client: String(values.client ?? ""), address: String(values.address ?? ""), billingType: String(values.billingType ?? "fixed") as BillingType, fixedPrice: Number(values.fixedPrice ?? 0), hourlyRate: Number(values.hourlyRate ?? 0), workerIds: Array.isArray(values.workers) ? values.workers.map(String) : [] } : item);
+  if (operation.action === "updateProject") next.projects = next.projects.map((item) => String(item.id) === id ? { ...item, name: String(values.name ?? ""), client: String(values.client ?? ""), address: String(values.address ?? ""), tag: projectTagFromStatus(values.status), billingType: String(values.billingType ?? "fixed") as BillingType, fixedPrice: Number(values.fixedPrice ?? 0), hourlyRate: Number(values.hourlyRate ?? 0), workerIds: Array.isArray(values.workers) ? values.workers.map(String) : [] } : item);
+  if (operation.action === "updateProjectStatus") next.projects = next.projects.map((item) => String(item.id) === id ? { ...item, tag: projectTagFromStatus(values.status) } : item);
   if (operation.action === "deleteProject") next.projects = next.projects.filter((item) => String(item.id) !== id);
 
   if (operation.action === "addPayment" && !next.payments.some((payment) => payment.id === id)) next.payments.unshift({ id, projectId, projectName, clientName, amount: Number(values.amount ?? 0), paidAt: String(values.paidAt ?? ""), method: String(values.method ?? "other") as Payment["method"], note: String(values.note ?? "") });
@@ -456,8 +471,28 @@ export default function Home() {
     setView("dashboard");
   }
 
-  async function toggleTimer() {
-    try { await saveAction(running ? "stopTimer" : "startTimer", running ? {} : { projectId: activeProject.id }); } catch { setSyncState("error"); }
+  async function toggleProjectTimer(project: Project) {
+    const isCurrentProject = running && String(activeProject.id) === String(project.id);
+    if (running && !isCurrentProject) return;
+    try {
+      if (isCurrentProject) {
+        await saveAction("stopTimer", {});
+        setSelectedDashboardProjectId(null);
+      } else {
+        setActiveProject(project);
+        setSelectedDashboardProjectId(null);
+        await saveAction("startTimer", { projectId: project.id });
+      }
+    } catch { setSyncState("error"); }
+  }
+
+  async function updateProjectStatus(project: Project, status: ProjectStatus) {
+    if (status === projectStatusFromTag(project.tag)) return;
+    if (running && String(activeProject.id) === String(project.id) && status === "completed") {
+      setInviteNotice({ kind: "error", text: "יש לעצור את הטיימר לפני סימון הפרויקט כהסתיים." });
+      return;
+    }
+    try { await saveAction("updateProjectStatus", { id: project.id, status }); } catch (error) { setSyncState("error"); setInviteNotice({ kind: "error", text: error instanceof Error ? error.message : "עדכון מצב הפרויקט נכשל." }); }
   }
 
   async function stopTimer() {
@@ -621,7 +656,7 @@ export default function Home() {
     const fixedPrice = Number(data.get("fixedPrice") || 0);
     const hourlyRate = Number(data.get("hourlyRate") || 0);
     try {
-      await saveAction(editingId ? "updateProject" : "addProject", { id: editingId, name: data.get("name"), client: data.get("client"), address: data.get("address"), billingType, fixedPrice, hourlyRate, workers: data.getAll("workers") });
+      await saveAction(editingId ? "updateProject" : "addProject", { id: editingId, name: data.get("name"), client: data.get("client"), address: data.get("address"), billingType, status: data.get("status"), fixedPrice, hourlyRate, workers: data.getAll("workers") });
       setModal(null);
       setEditingId(null);
       setView("dashboard");
@@ -652,18 +687,20 @@ export default function Home() {
       <aside className="sidebar" aria-label="ניווט ראשי">
         <button className="brand" onClick={() => navigate("dashboard")}><Image className="brand-image" src="/app-icon.png" width={42} height={42} alt="" /><span>מנהל עבודה</span></button>
         <nav>
-          <button className={`nav-item ${view === "dashboard" ? "active" : ""}`} onClick={() => navigate("dashboard")}><span>⌂</span>ראשי</button>
-          <button className={`nav-item ${view === "projects" ? "active" : ""}`} onClick={() => navigate("projects")}><span>▦</span>פרויקטים</button>
-          <button className={`nav-item ${view === "time" ? "active" : ""}`} onClick={() => navigate("time")}><span>◷</span>דיווחי זמן</button>
-          {isManager && <button className={`nav-item ${view === "payments" ? "active" : ""}`} onClick={() => navigate("payments")}><span>€</span>תשלומים</button>}
-          {isManager && <button className={`nav-item ${view === "expenses" ? "active" : ""}`} onClick={() => navigate("expenses")}><span>−</span>הוצאות וחומרים</button>}
-          {isManager && <button className={`nav-item ${view === "clients" ? "active" : ""}`} onClick={() => navigate("clients")}><span>♙</span>לקוחות</button>}
-          {isManager && accountMode === "employer" && <button className={`nav-item ${view === "employees" ? "active" : ""}`} onClick={() => navigate("employees")}><span>♟</span>עובדים</button>}
-          {isManager && <button className={`nav-item ${view === "history" ? "active" : ""}`} onClick={() => navigate("history")}><span>≡</span>היסטוריה</button>}
-          {isManager && <button className={`nav-item ${view === "reports" ? "active" : ""}`} onClick={() => navigate("reports")}><span>↗</span>דוחות</button>}
-          {isManager && <button className={`nav-item ${view === "trash" ? "active" : ""}`} onClick={() => navigate("trash")}><span>♲</span>סל המחזור</button>}
-        </nav>
-        <button className="sidebar-foot" onClick={() => navigate("profile")}><div className="user-avatar">{currentUser.displayName.charAt(0)}</div><div><strong dir="auto">{currentUser.displayName}</strong><small>{currentUser.isGuest ? "אורח הדגמה" : !isManager ? "עובד בצוות" : accountMode === "solo" ? "עובד עצמאי" : "מעסיק עובדים"}</small></div><span aria-hidden="true">•••</span></button>
+          <span className="nav-group-label">עבודה</span>
+          <button className={"nav-item " + (view === "dashboard" ? "active" : "")} onClick={() => navigate("dashboard")}><span>⌂</span>ראשי</button>
+          <button className={"nav-item " + (view === "projects" ? "active" : "")} onClick={() => navigate("projects")}><span>▦</span>כל הפרויקטים</button>
+          <button className={"nav-item " + (view === "time" ? "active" : "")} onClick={() => navigate("time")}><span>◷</span>דיווחי זמן</button>
+          {isManager && <span className="nav-group-label">כספים</span>}
+          {isManager && <button className={"nav-item " + (view === "payments" ? "active" : "")} onClick={() => navigate("payments")}><span>€</span>תשלומים</button>}
+          {isManager && <button className={"nav-item " + (view === "expenses" ? "active" : "")} onClick={() => navigate("expenses")}><span>−</span>הוצאות וחומרים</button>}
+          {isManager && <button className={"nav-item " + (view === "reports" ? "active" : "")} onClick={() => navigate("reports")}><span>↗</span>דוחות</button>}
+          {isManager && <span className="nav-group-label">ניהול</span>}
+          {isManager && <button className={"nav-item " + (view === "clients" ? "active" : "")} onClick={() => navigate("clients")}><span>♙</span>לקוחות</button>}
+          {isManager && accountMode === "employer" && <button className={"nav-item " + (view === "employees" ? "active" : "")} onClick={() => navigate("employees")}><span>♟</span>עובדים</button>}
+          {isManager && <button className={"nav-item " + (view === "history" ? "active" : "")} onClick={() => navigate("history")}><span>≡</span>היסטוריה</button>}
+          {isManager && <button className={"nav-item " + (view === "trash" ? "active" : "")} onClick={() => navigate("trash")}><span>♲</span>סל המחזור</button>}
+        </nav>        <button className="sidebar-foot" onClick={() => navigate("profile")}><div className="user-avatar">{currentUser.displayName.charAt(0)}</div><div><strong dir="auto">{currentUser.displayName}</strong><small>{currentUser.isGuest ? "אורח הדגמה" : !isManager ? "עובד בצוות" : accountMode === "solo" ? "עובד עצמאי" : "מעסיק עובדים"}</small></div><span aria-hidden="true">•••</span></button>
       </aside>
 
       <section className="content">
@@ -676,7 +713,7 @@ export default function Home() {
         {inviteNotice && <div className={`invite-notice ${inviteNotice.kind}`} role="status"><span>{inviteNotice.kind === "success" ? "✓" : "!"}</span><strong>{inviteNotice.text}</strong><button onClick={() => setInviteNotice(null)} aria-label="סגירת ההודעה">×</button></div>}
         {(syncState === "offline" || pendingCount > 0) && <div className="offline-notice" role="status"><span>⌁</span><strong>{pendingCount ? `${pendingCount} פעולות נשמרו במכשיר ויסונכרנו לפי הסדר כשהחיבור יחזור.` : "אין כרגע חיבור לאינטרנט. אפשר להמשיך לעבוד והפעולות יישמרו במכשיר."}</strong><button type="button" className="secondary-compact" onClick={() => void syncQueuedOperations()}>ניסיון סנכרון</button></div>}
 
-        {view === "dashboard" && (projects.length ? <Dashboard canManage={isManager} accountMode={accountMode} activeProject={activeProject} selectedProjectId={selectedDashboardProjectId} running={running} seconds={seconds} projects={projects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} startTimer={() => void toggleTimer()} stopTimer={() => void stopTimer()} selectProject={selectProject} closeProject={() => setSelectedDashboardProjectId(null)} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} showManual={openTimeEntry} /> : <NoProjectsView isManager={isManager} openNew={() => openNew("project")} />)}
+        {view === "dashboard" && (projects.length ? <Dashboard canManage={isManager} accountMode={accountMode} activeProject={activeProject} selectedProjectId={selectedDashboardProjectId} running={running} seconds={seconds} projects={projects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} toggleProjectTimer={(project) => void toggleProjectTimer(project)} updateProjectStatus={(project, status) => void updateProjectStatus(project, status)} stopTimer={() => void stopTimer()} selectProject={selectProject} closeProject={() => setSelectedDashboardProjectId(null)} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} showManual={openTimeEntry} /> : <NoProjectsView isManager={isManager} openNew={() => openNew("project")} />)}
         {view === "projects" && <ProjectsView canManage={isManager} projects={visibleProjects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} activeProject={activeProject} running={running} selectProject={selectProject} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} openManual={openTimeEntry} openNew={() => openNew("project")} />}
         {view === "time" && <TimeEntriesView entries={recentTimeEntries} openNew={openTimeEntry} editEntry={openEditTimeEntry} removeEntry={(entry) => void removeTimeEntry(entry)} />}
         {isManager && view === "payments" && <PaymentsView projects={projects} payments={payments} openNew={() => openPayment()} editPayment={openPayment} removePayment={(payment) => void removePayment(payment)} />}
@@ -686,18 +723,15 @@ export default function Home() {
         {isManager && view === "trash" && <RecycleBinView trash={trash} restoreClient={(id, restoreProjects) => void restoreRecord("client", id, restoreProjects)} restoreProject={(id) => void restoreRecord("project", id)} restoreEmployee={(id) => void restoreRecord("employee", id)} />}
         {isManager && view === "history" && <AuditLogView entries={auditLog} />}
         {isManager && view === "reports" && <ReportsView projects={projects} employees={employees} projectId={reportProjectId} setProjectId={setReportProjectId} employeeId={reportEmployeeId} setEmployeeId={setReportEmployeeId} from={reportFrom} setFrom={setReportFrom} to={reportTo} setTo={setReportTo} />}
-        {view === "profile" && <ProfileView user={currentUser} accountMode={accountMode} setAccountMode={(mode) => { setAccountMode(mode); void saveAction("setAccountMode", { accountMode: mode }).catch(() => setSyncState("error")); }} openReports={() => navigate("reports")} openHistory={() => navigate("history")} openTrash={() => navigate("trash")} />}
+        {view === "profile" && <ProfileView user={currentUser} accountMode={accountMode} setAccountMode={(mode) => { setAccountMode(mode); void saveAction("setAccountMode", { accountMode: mode }).catch(() => setSyncState("error")); }} openReports={() => navigate("reports")} openHistory={() => navigate("history")} openTrash={() => navigate("trash")} navigateTo={navigate} />}
       </section>
 
       <nav className="mobile-nav" aria-label="ניווט נייד">
-        <button className={view === "dashboard" ? "active" : ""} onClick={() => navigate("dashboard")}><span>⌂</span>ראשי</button>
-        <button className={view === "projects" ? "active" : ""} onClick={() => navigate("projects")}><span>▦</span>פרויקטים</button>
+        <button className={view === "dashboard" || view === "projects" ? "active" : ""} onClick={() => navigate("dashboard")}><span>⌂</span>ראשי</button>
         <button className={view === "time" ? "active" : ""} onClick={() => navigate("time")}><span>◷</span>שעות</button>
+        {running && <button className="mobile-timer running" onClick={() => void stopTimer()} aria-label="עצירת הטיימר הפעיל"><StopIcon /><small>עצירה</small></button>}
         {isManager && <button className={view === "payments" ? "active" : ""} onClick={() => navigate("payments")}><span>€</span>כספים</button>}
-        {isManager && <button className={view === "expenses" ? "active" : ""} onClick={() => navigate("expenses")}><span>−</span>הוצאות</button>}
-        <button className="mobile-timer" disabled={!projects.length} onClick={() => running ? void stopTimer() : navigate("dashboard")} aria-label={running ? "עצירת הטיימר" : "בחירת פרויקט להפעלת טיימר"}><span>{running ? "■" : "▦"}</span></button>
-        {isManager ? <button className={view === "clients" ? "active" : ""} onClick={() => navigate("clients")}><span>♙</span>לקוחות</button> : <button className={view === "profile" ? "active" : ""} onClick={() => navigate("profile")}><span>●</span>פרופיל</button>}
-        {isManager && (accountMode === "employer" ? <button className={view === "employees" ? "active" : ""} onClick={() => navigate("employees")}><span>♟</span>עובדים</button> : <button className={view === "profile" ? "active" : ""} onClick={() => navigate("profile")}><span>●</span>פרופיל</button>)}
+        <button className={view === "profile" || ["expenses", "clients", "employees", "history", "reports", "trash"].includes(view) ? "active" : ""} onClick={() => navigate("profile")}><span>•••</span>עוד</button>
       </nav>
 
       {modal && <Modal title={modal === "time" ? editingId ? "עריכת דיווח זמן" : "דיווח שעות ידני" : modal === "payment" ? editingId ? "עריכת תשלום" : "תשלום חדש" : modal === "expense" ? editingId ? "עריכת הוצאה" : "הוצאה חדשה" : modal === "attachment" ? "העלאת קבלה או תמונה" : modal === "attachmentPreview" ? "צפייה בקובץ" : `${editingId ? "עריכת" : modal === "project" ? "פרויקט" : modal === "client" ? "לקוח" : "עובד"} ${editingId ? (modal === "project" ? "פרויקט" : modal === "client" ? "לקוח" : "עובד") : "חדש"}`} close={() => { setModal(null); setEditingId(null); }}>
@@ -723,16 +757,31 @@ function navigationUrl(provider: "google" | "waze", address: string) {
     : `https://www.google.com/maps/dir/?api=1&destination=${destination}&travelmode=driving&dir_action=navigate`;
 }
 
+function PlayIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.4 5.5v13l10-6.5-10-6.5Z" fill="currentColor" /></svg>;
+}
+
+function StopIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor" /></svg>;
+}
+
+function PinIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s6-5.3 6-12a6 6 0 1 0-12 0c0 6.7 6 12 6 12Z" fill="none" stroke="currentColor" strokeWidth="1.8" /><circle cx="12" cy="9" r="2.2" fill="currentColor" /></svg>;
+}
+
+function NavigationIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 11 16-7-7 16-2.2-6.8L4 11Z" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinejoin="round" /></svg>;
+}
+
 function NavigationChooser({ address, label = "ניווט" }: { address: string; label?: string }) {
-  return <details className="navigation-choice">
-    <summary aria-label={`בחירת אפליקציית ניווט אל ${address}`}>⌖ {label}</summary>
+  return <details className={"navigation-choice" + (label ? "" : " icon-only")}>
+    <summary aria-label={"בחירת אפליקציית ניווט אל " + address}><NavigationIcon />{label && <span>{label}</span>}</summary>
     <div className="navigation-menu" role="group" aria-label="בחירת אפליקציית ניווט">
       <a href={navigationUrl("waze", address)} target="_blank" rel="noreferrer">Waze</a>
       <a href={navigationUrl("google", address)} target="_blank" rel="noreferrer">Google Maps</a>
     </div>
   </details>;
 }
-
 type ProjectListProps = { projects: Project[]; activeProject: Project; running: boolean; canManage: boolean; selectProject: (project: Project) => void; editProject: (project: Project) => void; removeProject: (project: Project) => void };
 
 function ProjectList({ projects, activeProject, running, canManage, selectProject, editProject, removeProject }: ProjectListProps) {
@@ -749,10 +798,10 @@ function ProjectList({ projects, activeProject, running, canManage, selectProjec
 }
 
 function ProjectToolbar({ filter, setFilter, query, setQuery }: { filter: string; setFilter: (value: string) => void; query: string; setQuery: (value: string) => void }) {
-  return <div className="projects-toolbar"><div className="filters" role="group" aria-label="סינון פרויקטים">{["הכול", "בביצוע", "ממתין"].map((item) => <button key={item} className={filter === item ? "selected" : ""} onClick={() => setFilter(item)}>{item}</button>)}</div><label className="search-box"><span>⌕</span><input dir="auto" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="חיפוש בעברית, Deutsch or English" aria-label="חיפוש פרויקטים" /></label></div>;
+  return <div className="projects-toolbar"><div className="filters" role="group" aria-label="סינון פרויקטים">{["הכול", "בביצוע", "ממתין", "הסתיים"].map((item) => <button key={item} className={filter === item ? "selected" : ""} onClick={() => setFilter(item)}>{item}</button>)}</div><label className="search-box"><span>⌕</span><input dir="auto" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="חיפוש בעברית, Deutsch or English" aria-label="חיפוש פרויקטים" /></label></div>;
 }
 
-function Dashboard({ canManage, accountMode, activeProject, selectedProjectId, running, seconds, projects, filter, setFilter, query, setQuery, startTimer, stopTimer, selectProject, closeProject, editProject, removeProject, showManual }: ProjectListProps & { accountMode: AccountMode; selectedProjectId: RecordId | null; seconds: number; filter: string; setFilter: (value: string) => void; query: string; setQuery: (value: string) => void; startTimer: () => void; stopTimer: () => void; closeProject: () => void; showManual: () => void }) {
+function Dashboard({ canManage, accountMode, activeProject, selectedProjectId, running, seconds, projects, filter, setFilter, query, setQuery, toggleProjectTimer, updateProjectStatus, stopTimer, selectProject, closeProject, editProject, removeProject, showManual }: ProjectListProps & { accountMode: AccountMode; selectedProjectId: RecordId | null; seconds: number; filter: string; setFilter: (value: string) => void; query: string; setQuery: (value: string) => void; toggleProjectTimer: (project: Project) => void; updateProjectStatus: (project: Project, status: ProjectStatus) => void; stopTimer: () => void; closeProject: () => void; showManual: () => void }) {
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const listedProjects = projects.filter((project) => {
     const matchesStatus = filter === "הכול" || project.tag === filter;
@@ -769,25 +818,25 @@ function Dashboard({ canManage, accountMode, activeProject, selectedProjectId, r
   return <>
     {running && <section className="timer-card active-only-timer" aria-label="טיימר עבודה פעיל">
       <div className="timer-glow" />
-      <div className="timer-project"><span className="live-pill"><i /> טיימר פעיל</span><h2 dir="auto">{activeProject.name}</h2><div className="timer-location" dir="auto">♙ {activeProject.client}<span>·</span>⌖ {activeProject.address} <NavigationChooser address={activeProject.address} label="ניווט" /></div></div>
+      <div className="timer-project"><span className="live-pill"><i /> טיימר פעיל</span><h2 dir="auto">{activeProject.name}</h2><div className="timer-location" dir="auto">♙ {activeProject.client}<span>·</span><PinIcon /> {activeProject.address} <NavigationChooser address={activeProject.address} label="ניווט" /></div></div>
       <div className="timer-clock"><span>{formatTime(seconds)}</span><small>הזמן נשמר גם לאחר רענון</small></div>
-      <div className="timer-actions"><button className="stop-button" onClick={stopTimer}><span>■</span> עצירת הטיימר</button></div>
+      <div className="timer-actions"><button className="stop-button" onClick={stopTimer}><StopIcon /> עצירת הטיימר</button></div>
     </section>}
     {running && seconds >= LONG_TIMER_SECONDS && <div className="timer-warning" role="alert"><span>!</span><div><strong>הטיימר פועל כבר יותר מ־10 שעות</strong><p>כדאי לוודא שלא שכחת לעצור אותו. הזמן ממשיך להישמר עד לעצירה.</p></div><button type="button" onClick={stopTimer}>עצירת הטיימר</button></div>}
 
     <section className="project-overview-stats" aria-label="סיכום פרויקטים">
       <article><span>סה״כ</span><strong>{projects.length}</strong><small>פרויקטים</small></article>
-      <article><span>פעילים</span><strong className="positive-text">{activeCount}</strong><small>בביצוע כעת</small></article>
+      <article><span>בביצוע</span><strong className="positive-text">{activeCount}</strong><small>פרויקטים פעילים</small></article>
       <article className={financialTotal < 0 ? "negative" : "positive"}><span>{financialLabel}</span><strong>€{financialTotal.toLocaleString(undefined, { maximumFractionDigits: 2 })}</strong><small>{canManage && accountMode === "employer" ? "הכנסות פחות עלויות" : "לפי התמחור שנשמר"}</small></article>
     </section>
 
     {selectedProject ? <section className="project-detail-card">
       <header className="project-detail-header">
         <button type="button" className="back-to-projects" onClick={closeProject}>→ חזרה לכל הפרויקטים</button>
-        <span className={"status " + selectedProject.color}>{selectedProject.tag}</span>
+        {canManage ? <label className="project-status-control"><span>מצב</span><select value={projectStatusFromTag(selectedProject.tag)} onChange={(event) => updateProjectStatus(selectedProject, event.target.value as ProjectStatus)} aria-label={"עדכון מצב הפרויקט " + selectedProject.name}>{projectStatuses.map((status) => <option key={status.value} value={status.value}>{status.label}</option>)}</select></label> : <span className={"status status-" + projectStatusFromTag(selectedProject.tag)}>{selectedProject.tag}</span>}
       </header>
       <div className="project-detail-title"><div className={"project-symbol " + selectedProject.color}>{selectedProject.name.charAt(0)}</div><div><h2 dir="auto">{selectedProject.name}</h2><p dir="auto">{selectedProject.client}</p></div></div>
-      <div className="project-detail-address"><span dir="auto">⌖ {selectedProject.address || "לא הוגדרה כתובת"}</span>{selectedProject.address && <NavigationChooser address={selectedProject.address} label="ניווט" />}</div>
+      <div className="project-detail-address"><div className="project-address-copy"><PinIcon /><span dir="auto">{selectedProject.address || "לא הוגדרה כתובת"}</span></div>{selectedProject.address && <NavigationChooser address={selectedProject.address} label="ניווט" />}</div>
       <div className="project-detail-metrics">
         <article><span>שיטת תמחור</span><strong>{selectedProject.billing}</strong></article>
         <article><span>שעות שנרשמו</span><strong>{selectedProject.hours}</strong></article>
@@ -798,7 +847,7 @@ function Dashboard({ canManage, accountMode, activeProject, selectedProjectId, r
         {canManage && <article><span>יתרה פתוחה</span><strong>{selectedProject.balance}</strong></article>}
       </div>
       <div className="project-primary-actions">
-        <button type="button" className="primary-button visible-primary" onClick={startTimer}>▶ התחלת טיימר</button>
+        <button type="button" className="primary-button visible-primary" onClick={() => toggleProjectTimer(selectedProject)} disabled={selectedProject.tag === "הסתיים"}><PlayIcon /> {selectedProject.tag === "הסתיים" ? "הפרויקט הסתיים" : "התחלת טיימר"}</button>
         <button type="button" className="secondary-compact" onClick={showManual}>＋ הוספת דיווח ידני</button>
       </div>
       <div className="project-management-actions">
@@ -806,25 +855,35 @@ function Dashboard({ canManage, accountMode, activeProject, selectedProjectId, r
         {canManage && <button type="button" className="danger" onClick={() => removeProject(selectedProject)}>העברה לסל</button>}
       </div>
     </section> : <section className="projects-section dashboard-projects">
-      <div className="section-head"><div><h2>כל הפרויקטים</h2><p>לחיצה על פרויקט פותחת פרטים ופעולות</p></div></div>
+      <div className="section-head"><div><h2>כל הפרויקטים</h2><p>הפעילו טיימר ישירות או פתחו פרויקט לפרטים ודיווח ידני</p></div></div>
       <ProjectToolbar filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} />
       {listedProjects.length ? <div className="dashboard-project-list">{listedProjects.map((project) => {
         const rate = project.billingType === "fixed" ? "גלובלי" : "€" + project.hourlyRate.toLocaleString() + "/ש׳";
         const profit = Number(project.profitAmount ?? project.expectedAmount);
-        return <button type="button" key={project.id} className="dashboard-project-card" onClick={() => selectProject(project)}>
-          <div className="dashboard-project-heading"><div><strong dir="auto">{project.name}</strong>{project.address && <span dir="auto">⌖ {project.address}</span>}</div><span className={"status " + project.color}>{project.tag}</span></div>
-          <div className="dashboard-project-metrics">
-            <div><small>תעריף</small><b>{rate}</b></div>
+        const isTimerProject = running && String(activeProject.id) === String(project.id);
+        const timerDisabled = project.tag === "הסתיים" || (running && !isTimerProject);
+        return <article key={project.id} className={"dashboard-project-card" + (isTimerProject ? " timer-running" : "")}>
+          <header className="project-card-top">
+            <button type="button" className="project-card-identity" onClick={() => selectProject(project)}><span className="project-card-title-row"><strong dir="auto">{project.name}</strong><small dir="auto">{project.client}</small></span></button>
+            <button type="button" className={"project-card-timer" + (isTimerProject ? " is-running" : "")} onClick={() => toggleProjectTimer(project)} disabled={timerDisabled} aria-label={isTimerProject ? "עצירת הטיימר של " + project.name : "הפעלת טיימר עבור " + project.name} title={isTimerProject ? "עצירת הטיימר" : project.tag === "הסתיים" ? "הפרויקט הסתיים" : "הפעלת טיימר"}>{isTimerProject ? <StopIcon /> : <PlayIcon />}</button>
+          </header>
+          <div className="project-card-meta">
+            {canManage ? <label className="project-status-control compact"><span className="sr-only">מצב הפרויקט</span><select value={projectStatusFromTag(project.tag)} onChange={(event) => updateProjectStatus(project, event.target.value as ProjectStatus)} disabled={isTimerProject} aria-label={"עדכון מצב הפרויקט " + project.name}>{projectStatuses.map((status) => <option key={status.value} value={status.value}>{status.label}</option>)}</select></label> : <span className={"status status-" + projectStatusFromTag(project.tag)}>{project.tag}</span>}
+            {isTimerProject && <span className="working-now"><i /> עובדים עכשיו</span>}
+          </div>
+          {project.address && <div className="project-card-address"><div className="project-address-copy"><PinIcon /><span dir="auto">{project.address}</span></div><NavigationChooser address={project.address} label="" /></div>}
+          <div className="project-card-metrics">
             <div><small>שעות</small><b>{project.hours}</b></div>
             <div><small>{!canManage || accountMode === "solo" ? "הכנסה" : "הכנסות"}</small><b>€{project.expectedAmount.toLocaleString()}</b></div>
             {canManage && accountMode === "employer" && <div className={profit < 0 ? "negative-text" : "positive-text"}><small>רווח</small><b>€{profit.toLocaleString()}</b></div>}
+            <div><small>תעריף</small><b>{rate}</b></div>
           </div>
-        </button>;
+          <button type="button" className="project-card-open" onClick={() => selectProject(project)}><span>לפרטי הפרויקט</span><span aria-hidden="true">←</span></button>
+        </article>;
       })}</div> : <div className="empty-state"><strong>לא נמצאו פרויקטים</strong><span>נסו חיפוש אחר או שנו את הסינון.</span></div>}
     </section>}
   </>;
 }
-
 function ProjectsView({ canManage, projects, filter, setFilter, query, setQuery, activeProject, running, selectProject, editProject, removeProject, openManual, openNew }: ProjectListProps & { filter: string; setFilter: (value: string) => void; query: string; setQuery: (value: string) => void; openManual: () => void; openNew: () => void }) {
   return <section className="page-card"><div className="section-head"><div><h2>כל הפרויקטים</h2><p>{projects.length} פרויקטים מוצגים</p></div><div className="section-actions">{projects.length > 0 && <button className="secondary-compact" onClick={openManual}>＋ דיווח שעות</button>}{canManage && <button className="mobile-primary" onClick={openNew}>＋ פרויקט חדש</button>}</div></div><ProjectToolbar filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} /><ProjectList canManage={canManage} projects={projects} activeProject={activeProject} running={running} selectProject={selectProject} editProject={editProject} removeProject={removeProject} /></section>;
 }
@@ -983,9 +1042,27 @@ function RecycleBinView({ trash, restoreClient, restoreProject, restoreEmployee 
   </div>}</section>;
 }
 
-function ProfileView({ user, accountMode, setAccountMode, openReports, openHistory, openTrash }: { user: AccountUser; accountMode: AccountMode; setAccountMode: (mode: AccountMode) => void; openReports: () => void; openHistory: () => void; openTrash: () => void }) {
-  if (user.role === "employee") return <section className="page-card profile-card"><div className="profile-intro"><div className="profile-avatar">{user.displayName.charAt(0)}</div><div><h2 dir="auto">{user.displayName}</h2><p dir="ltr">{user.email}</p><small>עובד מחובר לצוות</small></div>{!user.isLocal && !user.isGuest && <a className="sign-out-link" href="/signout-with-chatgpt?return_to=%2F">התנתקות</a>}</div><div className="team-member-summary"><span className="mode-icon">♟</span><div><strong>חשבון עובד</strong><p>מוצגים לך רק הפרויקטים שאליהם שויכת, דיווחי הזמן שלך והשכר המחושב לפי התעריף שלך.</p></div></div></section>;
-  return <section className="page-card profile-card"><div className="profile-intro"><div className="profile-avatar">{user.displayName.charAt(0)}</div><div><h2 dir="auto">{user.displayName}</h2><p dir="ltr">{user.email}</p><small>{user.isGuest ? "אורח הדגמה ציבורי" : user.isLocal ? "משתמש פיתוח מקומי" : "חשבון מחובר"}</small></div>{!user.isLocal && !user.isGuest && <a className="sign-out-link" href="/signout-with-chatgpt?return_to=%2F">התנתקות</a>}</div><fieldset className="account-mode-options"><legend>סוג החשבון שלי</legend><label className={accountMode === "solo" ? "selected" : ""}><input type="radio" name="accountMode" checked={accountMode === "solo"} onChange={() => setAccountMode("solo")} /><span className="mode-icon">◷</span><span><strong>עובד</strong><small>אני עובד לבד ומגדיר בכל פרויקט כמה מגיע לי לפי שעה, במחיר גלובלי או בשילוב.</small></span>{accountMode === "solo" && <b>נבחר</b>}</label><label className={accountMode === "employer" ? "selected" : ""}><input type="radio" name="accountMode" checked={accountMode === "employer"} onChange={() => setAccountMode("employer")} /><span className="mode-icon">♟</span><span><strong>מעסיק עובדים</strong><small>אני מנהל צוות ומפריד בין המחיר ללקוח לבין העלות של כל עובד.</small></span>{accountMode === "employer" && <b>נבחר</b>}</label></fieldset><div className="mode-summary"><strong>{accountMode === "solo" ? "מצב עובד פעיל" : "מצב מעסיק פעיל"}</strong><span>{accountMode === "solo" ? "מסך העובדים הוסתר, ובפרויקטים יוצג רק השכר שמגיע לך." : "ניהול העובדים, עלויות השכר ורווחיות הפרויקט זמינים עבורך."}</span></div><button className="profile-trash-link" onClick={openReports}><span>↗</span><span><strong>דוחות כספיים</strong><small>סינון לפי פרויקט ועובד, Excel, CSV ו־PDF</small></span><b>←</b></button><button className="profile-trash-link" onClick={openHistory}><span>≡</span><span><strong>היסטוריית שינויים</strong><small>צפייה בפעולות המתועדות במערכת</small></span><b>←</b></button><button className="profile-trash-link" onClick={openTrash}><span>♲</span><span><strong>סל המחזור</strong><small>צפייה ושחזור של לקוחות, פרויקטים ועובדים שנמחקו</small></span><b>←</b></button></section>;
+function ProfileView({ user, accountMode, setAccountMode, openReports, openHistory, openTrash, navigateTo }: { user: AccountUser; accountMode: AccountMode; setAccountMode: (mode: AccountMode) => void; openReports: () => void; openHistory: () => void; openTrash: () => void; navigateTo: (view: View) => void }) {
+  const intro = <div className="profile-intro"><div className="profile-avatar">{user.displayName.charAt(0)}</div><div><h2 dir="auto">{user.displayName}</h2><p dir="ltr">{user.email}</p><small>{user.role === "employee" ? "עובד מחובר לצוות" : user.isGuest ? "אורח הדגמה ציבורי" : user.isLocal ? "משתמש פיתוח מקומי" : "חשבון מחובר"}</small></div>{!user.isLocal && !user.isGuest && <a className="sign-out-link" href="/signout-with-chatgpt?return_to=%2F">התנתקות</a>}</div>;
+  if (user.role === "employee") return <section className="page-card profile-card">{intro}<section className="profile-quick-section"><div className="profile-section-title"><span>גישה מהירה</span><small>הפעולות השימושיות ביום עבודה</small></div><div className="profile-quick-grid"><button onClick={() => navigateTo("dashboard")}><span>▦</span><strong>הפרויקטים שלי</strong><small>פתיחת עבודה וטיימר</small></button><button onClick={() => navigateTo("time")}><span>◷</span><strong>דיווחי זמן</strong><small>צפייה ודיווח ידני</small></button></div></section><div className="team-member-summary"><span className="mode-icon">♟</span><div><strong>חשבון עובד</strong><p>מוצגים לך רק הפרויקטים שאליהם שויכת, דיווחי הזמן שלך והשכר המחושב לפי התעריף שלך.</p></div></div></section>;
+  return <section className="page-card profile-card">
+    {intro}
+    <section className="profile-quick-section">
+      <div className="profile-section-title"><span>גישה מהירה</span><small>כל אזורי הניהול במקום אחד</small></div>
+      <div className="profile-quick-grid">
+        <button onClick={() => navigateTo("dashboard")}><span>▦</span><strong>פרויקטים</strong><small>עבודה וטיימר</small></button>
+        <button onClick={() => navigateTo("time")}><span>◷</span><strong>דיווחי זמן</strong><small>שעות הצוות</small></button>
+        <button onClick={() => navigateTo("payments")}><span>€</span><strong>תשלומים</strong><small>גבייה ויתרות</small></button>
+        <button onClick={() => navigateTo("expenses")}><span>−</span><strong>הוצאות</strong><small>חומרים וקבלות</small></button>
+        <button onClick={() => navigateTo("clients")}><span>♙</span><strong>לקוחות</strong><small>פרטים וכתובות</small></button>
+        {accountMode === "employer" && <button onClick={() => navigateTo("employees")}><span>♟</span><strong>עובדים</strong><small>צוות ותעריפים</small></button>}
+        <button onClick={openReports}><span>↗</span><strong>דוחות</strong><small>סיכומים וייצוא</small></button>
+      </div>
+    </section>
+    <fieldset className="account-mode-options"><legend>סוג החשבון שלי</legend><label className={accountMode === "solo" ? "selected" : ""}><input type="radio" name="accountMode" checked={accountMode === "solo"} onChange={() => setAccountMode("solo")} /><span className="mode-icon">◷</span><span><strong>עובד</strong><small>אני עובד לבד ומגדיר בכל פרויקט כמה מגיע לי לפי שעה, במחיר גלובלי או בשילוב.</small></span>{accountMode === "solo" && <b>נבחר</b>}</label><label className={accountMode === "employer" ? "selected" : ""}><input type="radio" name="accountMode" checked={accountMode === "employer"} onChange={() => setAccountMode("employer")} /><span className="mode-icon">♟</span><span><strong>מעסיק עובדים</strong><small>אני מנהל צוות ומפריד בין המחיר ללקוח לבין העלות של כל עובד.</small></span>{accountMode === "employer" && <b>נבחר</b>}</label></fieldset>
+    <div className="mode-summary"><strong>{accountMode === "solo" ? "מצב עובד פעיל" : "מצב מעסיק פעיל"}</strong><span>{accountMode === "solo" ? "מסך העובדים מוסתר, ובפרויקטים מוצג הסכום שמגיע לך." : "ניהול העובדים, עלויות השכר ורווחיות הפרויקט זמינים עבורך."}</span></div>
+    <div className="profile-advanced"><div className="profile-section-title"><span>ניהול מתקדם</span><small>בקרה ושחזור מידע</small></div><button className="profile-trash-link" onClick={openHistory}><span>≡</span><span><strong>היסטוריית שינויים</strong><small>צפייה בפעולות המתועדות במערכת</small></span><b>←</b></button><button className="profile-trash-link" onClick={openTrash}><span>♲</span><span><strong>סל המחזור</strong><small>שחזור לקוחות, פרויקטים ועובדים שנמחקו</small></span><b>←</b></button></div>
+  </section>;
 }
 
 function Modal({ title, close, children }: { title: string; close: () => void; children: React.ReactNode }) {
@@ -1041,7 +1118,7 @@ function ExpenseForm({ projects, initial, submit }: { projects: Project[]; initi
 
 function ProjectForm({ accountMode, clients, employees, billingType, setBillingType, initial, submit }: { accountMode: AccountMode; clients: Client[]; employees: Employee[]; billingType: BillingType; setBillingType: (type: BillingType) => void; initial?: Project; submit: (event: FormEvent<HTMLFormElement>) => void }) {
   const isSolo = accountMode === "solo";
-  return <form className="entity-form project-form" onSubmit={submit}><div className="form-grid"><Field label="שם הפרויקט" wide><input name="name" dir="auto" required defaultValue={initial?.name} placeholder="שם חופשי בעברית, Deutsch or English" /></Field><Field label="לקוח"><select name="client" required defaultValue={initial?.client ?? ""}><option value="" disabled>בחירת לקוח</option>{clients.map((client) => <option key={client.id}>{client.name}</option>)}</select></Field><Field label="כתובת"><input name="address" dir="auto" required defaultValue={initial?.address} placeholder="כתובת העבודה" /></Field></div><div className="form-context"><strong>{isSolo ? "התשלום שמגיע לי בפרויקט" : "החיוב של הלקוח בפרויקט"}</strong><span>{isSolo ? "אין כאן מחיר ללקוח מול מחיר לעובד—רק הסכום שאתה מקבל." : "הסכומים כאן הם המחיר ללקוח. עלויות העובדים מחושבות בנפרד."}</span></div><fieldset className="billing-options"><legend>{isSolo ? "איך משלמים לי?" : "איך הלקוח משלם?"}</legend><label className={billingType === "fixed" ? "selected" : ""}><input type="radio" name="billingType" checked={billingType === "fixed"} onChange={() => setBillingType("fixed")} /><strong>מחיר גלובלי</strong><span>סכום קבוע שאינו תלוי בשעות</span></label><label className={billingType === "hourly" ? "selected" : ""}><input type="radio" name="billingType" checked={billingType === "hourly"} onChange={() => setBillingType("hourly")} /><strong>לפי שעה</strong><span>מספר שעות כפול {isSolo ? "השכר שלך" : "תעריף הלקוח"}</span></label><label className={billingType === "combined" ? "selected" : ""}><input type="radio" name="billingType" checked={billingType === "combined"} onChange={() => setBillingType("combined")} /><strong>גלובלי + שעות</strong><span>סכום בסיס ובנוסף תשלום שעתי</span></label></fieldset><div className="form-grid conditional-fields">{(billingType === "fixed" || billingType === "combined") && <Field label={billingType === "fixed" ? `${isSolo ? "השכר" : "המחיר"} הגלובלי (EUR)` : "סכום הבסיס (EUR)"}><input name="fixedPrice" dir="ltr" type="number" min="0" step="0.01" required defaultValue={initial?.fixedPrice} placeholder="0.00" /></Field>}{(billingType === "hourly" || billingType === "combined") && <Field label={`${isSolo ? "השכר שלי" : "תעריף ללקוח"} לשעה (EUR)`}><input name="hourlyRate" dir="ltr" type="number" min="0" step="0.01" required defaultValue={initial?.hourlyRate} placeholder="0.00" /></Field>}</div>{!isSolo && <fieldset className="worker-picker"><legend>שיוך עובדים</legend>{employees.map((employee) => <label key={employee.id}><input type="checkbox" name="workers" value={employee.id} defaultChecked={initial?.workerIds.includes(String(employee.id))} /><span className="mini-avatar">{employee.name.charAt(0)}</span><span dir="auto">{employee.name}</span><small>€{employee.hourlyCost}/שעה</small></label>)}</fieldset>}<FormActions label={initial ? "שמירת שינויים" : "יצירת פרויקט"} /></form>;
+  return <form className="entity-form project-form" onSubmit={submit}><div className="form-grid"><Field label="שם הפרויקט" wide><input name="name" dir="auto" required defaultValue={initial?.name} placeholder="שם חופשי בעברית, Deutsch or English" /></Field><Field label="לקוח"><select name="client" required defaultValue={initial?.client ?? ""}><option value="" disabled>בחירת לקוח</option>{clients.map((client) => <option key={client.id}>{client.name}</option>)}</select></Field><Field label="כתובת"><input name="address" dir="auto" required defaultValue={initial?.address} placeholder="כתובת העבודה" /></Field><Field label="מצב הפרויקט"><select name="status" defaultValue={initial ? projectStatusFromTag(initial.tag) : "active"}>{projectStatuses.map((status) => <option key={status.value} value={status.value}>{status.label}</option>)}</select></Field></div><div className="form-context"><strong>{isSolo ? "התשלום שמגיע לי בפרויקט" : "החיוב של הלקוח בפרויקט"}</strong><span>{isSolo ? "אין כאן מחיר ללקוח מול מחיר לעובד—רק הסכום שאתה מקבל." : "הסכומים כאן הם המחיר ללקוח. עלויות העובדים מחושבות בנפרד."}</span></div><fieldset className="billing-options"><legend>{isSolo ? "איך משלמים לי?" : "איך הלקוח משלם?"}</legend><label className={billingType === "fixed" ? "selected" : ""}><input type="radio" name="billingType" checked={billingType === "fixed"} onChange={() => setBillingType("fixed")} /><strong>מחיר גלובלי</strong><span>סכום קבוע שאינו תלוי בשעות</span></label><label className={billingType === "hourly" ? "selected" : ""}><input type="radio" name="billingType" checked={billingType === "hourly"} onChange={() => setBillingType("hourly")} /><strong>לפי שעה</strong><span>מספר שעות כפול {isSolo ? "השכר שלך" : "תעריף הלקוח"}</span></label><label className={billingType === "combined" ? "selected" : ""}><input type="radio" name="billingType" checked={billingType === "combined"} onChange={() => setBillingType("combined")} /><strong>גלובלי + שעות</strong><span>סכום בסיס ובנוסף תשלום שעתי</span></label></fieldset><div className="form-grid conditional-fields">{(billingType === "fixed" || billingType === "combined") && <Field label={billingType === "fixed" ? `${isSolo ? "השכר" : "המחיר"} הגלובלי (EUR)` : "סכום הבסיס (EUR)"}><input name="fixedPrice" dir="ltr" type="number" min="0" step="0.01" required defaultValue={initial?.fixedPrice} placeholder="0.00" /></Field>}{(billingType === "hourly" || billingType === "combined") && <Field label={`${isSolo ? "השכר שלי" : "תעריף ללקוח"} לשעה (EUR)`}><input name="hourlyRate" dir="ltr" type="number" min="0" step="0.01" required defaultValue={initial?.hourlyRate} placeholder="0.00" /></Field>}</div>{!isSolo && <fieldset className="worker-picker"><legend>שיוך עובדים</legend>{employees.map((employee) => <label key={employee.id}><input type="checkbox" name="workers" value={employee.id} defaultChecked={initial?.workerIds.includes(String(employee.id))} /><span className="mini-avatar">{employee.name.charAt(0)}</span><span dir="auto">{employee.name}</span><small>€{employee.hourlyCost}/שעה</small></label>)}</fieldset>}<FormActions label={initial ? "שמירת שינויים" : "יצירת פרויקט"} /></form>;
 }
 
 function FormActions({ label }: { label: string }) {
