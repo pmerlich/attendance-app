@@ -107,9 +107,9 @@ type TimeEntry = { id: string; projectId: string; projectName: string; userId: s
 type Payment = { id: string; projectId: string; projectName: string; clientName: string; amount: number; paidAt: string; method: "transfer" | "cash" | "card" | "check" | "other"; note: string };
 type Expense = { id: string; projectId: string; projectName: string; clientName: string; amount: number; incurredAt: string; category: "materials" | "equipment" | "travel" | "subcontractor" | "other"; billableToClient: boolean | number; note: string };
 type Attachment = { id: string; projectId: string; projectName: string; expenseId: string | null; expenseNote: string; fileName: string; contentType: string; createdAt: string };
-type DeletedClient = { id: RecordId; name: string; address: string; deletedAt: string; projectCount: number };
-type DeletedProject = { id: RecordId; name: string; clientName: string; address: string; deletedAt: string };
-type DeletedEmployee = { id: RecordId; name: string; email: string; deletedAt: string };
+type DeletedClient = { id: RecordId; name: string; address: string; deletedAt: string; projectCount: number; snapshot?: Client };
+type DeletedProject = { id: RecordId; name: string; clientName: string; address: string; deletedAt: string; snapshot?: StoredProject };
+type DeletedEmployee = { id: RecordId; name: string; email: string; deletedAt: string; snapshot?: Employee };
 type TrashState = { clients: DeletedClient[]; projects: DeletedProject[]; employees: DeletedEmployee[] };
 type AuditEntry = { id: string; actorName: string; entityType: string; entityId: string; action: string; detailsJson: string; createdAt: string };
 type ReportDataRow = { projectId: string; projectName: string; billingType: BillingType; fixedPrice: number; hourlyRate: number; totalSeconds: number; paidAmount: number; expenseAmount: number; billableExpenseAmount: number; laborCost: number };
@@ -179,14 +179,36 @@ function applyOptimisticOperation(state: StoredState, operation: QueuedOperation
   if (operation.action === "updateClient") next.clients = next.clients.map((client) => String(client.id) === id ? { ...client, name: String(values.name ?? ""), address: String(values.address ?? ""), phone: String(values.phone ?? ""), email: String(values.email ?? "") } : client);
   if (operation.action === "deleteClient") {
     const client = next.clients.find((item) => String(item.id) === id);
-    if (client) next.trash.clients.unshift({ id: client.id, name: client.name, address: client.address, deletedAt: new Date().toISOString(), projectCount: client.projects });
+    const deletedAt = new Date().toISOString();
+    if (client) next.trash.clients.unshift({ id: client.id, name: client.name, address: client.address, deletedAt, projectCount: client.projects, snapshot: client });
+    const relatedProjects = next.projects.filter((item) => item.client === client?.name);
+    next.trash.projects.unshift(...relatedProjects.map((item) => ({ id: item.id, name: item.name, clientName: item.client, address: item.address, deletedAt, snapshot: item })));
     next.clients = next.clients.filter((item) => String(item.id) !== id);
     next.projects = next.projects.filter((item) => item.client !== client?.name);
+  }
+  if (operation.action === "restoreClient") {
+    const deleted = next.trash.clients.find((item) => String(item.id) === id);
+    if (deleted?.snapshot && !next.clients.some((item) => String(item.id) === id)) next.clients.unshift(deleted.snapshot);
+    if (values.restoreProjects === true && deleted) {
+      const projectsToRestore = next.trash.projects.filter((item) => item.clientName === deleted.name && item.snapshot);
+      for (const item of projectsToRestore) if (item.snapshot && !next.projects.some((project) => String(project.id) === String(item.id))) next.projects.unshift(item.snapshot);
+      next.trash.projects = next.trash.projects.filter((item) => item.clientName !== deleted.name);
+    }
+    next.trash.clients = next.trash.clients.filter((item) => String(item.id) !== id);
   }
 
   if (operation.action === "addEmployee" && !next.employees.some((employee) => String(employee.id) === id)) next.employees.unshift({ id, name: String(values.name ?? ""), email: String(values.email ?? ""), hourlyCost: Number(values.hourlyCost ?? 0), status: "פעיל", connectionStatus: "not_invited" });
   if (operation.action === "updateEmployee") next.employees = next.employees.map((employee) => String(employee.id) === id ? { ...employee, name: String(values.name ?? ""), email: String(values.email ?? ""), hourlyCost: Number(values.hourlyCost ?? 0) } : employee);
-  if (operation.action === "deleteEmployee") next.employees = next.employees.filter((employee) => String(employee.id) !== id);
+  if (operation.action === "deleteEmployee") {
+    const employee = next.employees.find((item) => String(item.id) === id);
+    if (employee) next.trash.employees.unshift({ id: employee.id, name: employee.name, email: employee.email, deletedAt: new Date().toISOString(), snapshot: employee });
+    next.employees = next.employees.filter((item) => String(item.id) !== id);
+  }
+  if (operation.action === "restoreEmployee") {
+    const deleted = next.trash.employees.find((item) => String(item.id) === id);
+    if (deleted?.snapshot && !next.employees.some((item) => String(item.id) === id)) next.employees.unshift(deleted.snapshot);
+    next.trash.employees = next.trash.employees.filter((item) => String(item.id) !== id);
+  }
 
   if (operation.action === "addProject" && !next.projects.some((item) => String(item.id) === id)) {
     next.projects.unshift({ id, name: String(values.name ?? ""), client: String(values.client ?? ""), address: String(values.address ?? ""), tag: projectTagFromStatus(values.status), billingType: String(values.billingType ?? "fixed") as BillingType, fixedPrice: Number(values.fixedPrice ?? 0), hourlyRate: Number(values.hourlyRate ?? 0), workerIds: Array.isArray(values.workers) ? values.workers.map(String) : [], totalSeconds: 0, paidAmount: 0, expenseAmount: 0, billableExpenseAmount: 0, laborCost: 0 });
@@ -194,7 +216,18 @@ function applyOptimisticOperation(state: StoredState, operation: QueuedOperation
   }
   if (operation.action === "updateProject") next.projects = next.projects.map((item) => String(item.id) === id ? { ...item, name: String(values.name ?? ""), client: String(values.client ?? ""), address: String(values.address ?? ""), tag: projectTagFromStatus(values.status), billingType: String(values.billingType ?? "fixed") as BillingType, fixedPrice: Number(values.fixedPrice ?? 0), hourlyRate: Number(values.hourlyRate ?? 0), workerIds: Array.isArray(values.workers) ? values.workers.map(String) : [] } : item);
   if (operation.action === "updateProjectStatus") next.projects = next.projects.map((item) => String(item.id) === id ? { ...item, tag: projectTagFromStatus(values.status) } : item);
-  if (operation.action === "deleteProject") next.projects = next.projects.filter((item) => String(item.id) !== id);
+  if (operation.action === "deleteProject") {
+    const projectToDelete = next.projects.find((item) => String(item.id) === id);
+    if (projectToDelete) next.trash.projects.unshift({ id: projectToDelete.id, name: projectToDelete.name, clientName: projectToDelete.client, address: projectToDelete.address, deletedAt: new Date().toISOString(), snapshot: projectToDelete });
+    next.projects = next.projects.filter((item) => String(item.id) !== id);
+    next.clients = next.clients.map((client) => client.name === projectToDelete?.client ? { ...client, projects: Math.max(0, client.projects - 1) } : client);
+  }
+  if (operation.action === "restoreProject") {
+    const deleted = next.trash.projects.find((item) => String(item.id) === id);
+    if (deleted?.snapshot && !next.projects.some((item) => String(item.id) === id)) next.projects.unshift(deleted.snapshot);
+    next.clients = next.clients.map((client) => client.name === deleted?.clientName ? { ...client, projects: client.projects + 1 } : client);
+    next.trash.projects = next.trash.projects.filter((item) => String(item.id) !== id);
+  }
 
   if (operation.action === "addPayment" && !next.payments.some((payment) => payment.id === id)) next.payments.unshift({ id, projectId, projectName, clientName, amount: Number(values.amount ?? 0), paidAt: String(values.paidAt ?? ""), method: String(values.method ?? "other") as Payment["method"], note: String(values.note ?? "") });
   if (operation.action === "updatePayment") next.payments = next.payments.map((payment) => payment.id === id ? { ...payment, projectId, projectName, clientName, amount: Number(values.amount ?? 0), paidAt: String(values.paidAt ?? ""), method: String(values.method ?? "other") as Payment["method"], note: String(values.note ?? "") } : payment);
@@ -380,6 +413,14 @@ export default function Home() {
         }
       }
 
+      if (rejected) {
+        const refresh = await fetch("/api/state");
+        if (refresh.ok) {
+          const authoritative = await refresh.json() as StoredState;
+          const queuedAfterRejection = await readQueuedOperations();
+          applyStoredState(queuedAfterRejection.reduce((current, queued) => applyOptimisticOperation(current, queued), authoritative));
+        }
+      }
       const remaining = await readQueuedOperations();
       setPendingCount(remaining.length);
       if (remaining.length) {
@@ -461,6 +502,19 @@ export default function Home() {
     const interval = window.setInterval(() => setSeconds((value) => value + 1), 1000);
     return () => window.clearInterval(interval);
   }, [running]);
+
+  useEffect(() => {
+    if (!pendingCount) return;
+    const retry = () => { if (navigator.onLine && document.visibilityState === "visible") void syncQueuedOperations(); };
+    const interval = window.setInterval(retry, 30000);
+    document.addEventListener("visibilitychange", retry);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", retry);
+    };
+  // The retry invokes the current synchronizer, which reads the live queue on every call.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingCount]);
 
   const visibleProjects = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
@@ -610,17 +664,25 @@ export default function Home() {
   }
 
   function openEdit(type: EntityType, record: Client | Employee | Project) {
+    if (type === "project" && running && String(activeProject.id) === String(record.id)) {
+      setInviteNotice({ kind: "error", text: "יש לעצור את הטיימר הפעיל לפני עריכת הפרויקט." });
+      return;
+    }
     setEditingId(record.id);
     if (type === "project") setBillingType((record as Project).billingType);
     setModal(type);
   }
 
   async function removeRecord(type: EntityType, id: RecordId, name: string) {
+    const affectsActiveTimer = running && (type === "project" ? String(activeProject.id) === String(id) : type === "client" && activeProject.client === name);
+    if (affectsActiveTimer) {
+      setInviteNotice({ kind: "error", text: "יש לעצור את הטיימר הפעיל לפני העברת הפרויקט או הלקוח לסל המחזור." });
+      return;
+    }
     const extra = type === "client" ? " גם הפרויקטים של הלקוח יועברו לסל המחזור." : "";
     if (!window.confirm(`להעביר את ${name} לסל המחזור?${extra}`)) return;
     try {
       await saveAction(type === "client" ? "deleteClient" : type === "employee" ? "deleteEmployee" : "deleteProject", { id });
-      if (type === "project" && activeProject.id === id) setRunning(false);
     } catch { setSyncState("error"); }
   }
 
@@ -694,7 +756,7 @@ export default function Home() {
   const timeEntryProjects = editingTimeEntry && editingTimeEntry.userId !== currentUser.id ? projects.filter((project) => project.workerIds.includes(editingTimeEntry.userId)) : projects;
 
   return (
-    <main className={`app-shell${currentUser.isGuest ? " guest-demo" : ""}`}>
+    <main className={`app-shell${currentUser.isGuest ? " guest-demo" : ""}`}>      <a className="skip-link" href="#main-content">דילוג לתוכן הראשי</a>
       <aside className="sidebar" aria-label="ניווט ראשי">
         <button className="brand" onClick={() => navigate("dashboard")}><Image className="brand-image" src="/app-icon.png" width={42} height={42} alt="" /><span>מנהל עבודה</span></button>
         <nav>
@@ -711,10 +773,11 @@ export default function Home() {
           {isManager && accountMode === "employer" && <button className={"nav-item " + (view === "employees" ? "active" : "")} onClick={() => navigate("employees")}><span>♟</span>עובדים</button>}
           {isManager && <button className={"nav-item " + (view === "history" ? "active" : "")} onClick={() => navigate("history")}><span>≡</span>היסטוריה</button>}
           {isManager && <button className={"nav-item " + (view === "trash" ? "active" : "")} onClick={() => navigate("trash")}><span>♲</span>סל המחזור</button>}
-        </nav>        <button className="sidebar-foot" onClick={() => navigate("profile")}><div className="user-avatar">{currentUser.displayName.charAt(0)}</div><div><strong dir="auto">{currentUser.displayName}</strong><small>{currentUser.isGuest ? "אורח הדגמה" : !isManager ? "עובד בצוות" : accountMode === "solo" ? "עובד עצמאי" : "מעסיק עובדים"}</small></div><span aria-hidden="true">•••</span></button>
+        </nav>
+        <button className="sidebar-foot" onClick={() => navigate("profile")}><div className="user-avatar">{currentUser.displayName.charAt(0)}</div><div><strong dir="auto">{currentUser.displayName}</strong><small>{currentUser.isGuest ? "אורח הדגמה" : !isManager ? "עובד בצוות" : accountMode === "solo" ? "עובד עצמאי" : "מעסיק עובדים"}</small></div><span aria-hidden="true">•••</span></button>
       </aside>
 
-      <section className="content">
+      <section className="content" id="main-content" tabIndex={-1}>
         <header className={"topbar" + (view === "dashboard" ? " dashboard-topbar" : "")}>
           <div><p className="eyebrow">{viewTitles[view].eyebrow}</p><h1>{viewTitles[view].title}</h1></div>
           <div className="top-actions">
@@ -1095,7 +1158,36 @@ function ProfileView({ user, accountMode, setAccountMode, openReports, openHisto
 }
 
 function Modal({ title, close, children }: { title: string; close: () => void; children: React.ReactNode }) {
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}><section className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modal-title"><header><div><p>מנהל עבודה</p><h2 id="modal-title">{title}</h2></div><button type="button" onClick={close} aria-label="סגירה">×</button></header>{children}</section></div>;
+  const panelRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const panel = panelRef.current;
+    const focusable = panel?.querySelector<HTMLElement>("button:not([disabled]),a[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex='-1'])");
+    (focusable ?? panel)?.focus();
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      previousFocus?.focus();
+    };
+  }, []);
+
+  function handleKeyDown(event: React.KeyboardEvent) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close();
+      return;
+    }
+    if (event.key !== "Tab" || !panelRef.current) return;
+    const focusable = [...panelRef.current.querySelectorAll<HTMLElement>("button:not([disabled]),a[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex='-1'])")];
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  }
+
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }} onKeyDown={handleKeyDown}><section ref={panelRef} className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabIndex={-1}><header><div><p>מנהל עבודה</p><h2 id="modal-title">{title}</h2></div><button type="button" onClick={close} aria-label="סגירה">×</button></header>{children}</section></div>;
 }
 
 function Field({ label, children, wide = false }: { label: string; children: React.ReactNode; wide?: boolean }) {
@@ -1112,7 +1204,7 @@ function EmployeeForm({ initial, submit }: { initial?: Employee; submit: (event:
 
 function ManualTimeForm({ projects, initialProjectId, initial, submit }: { projects: Project[]; initialProjectId: RecordId; initial?: TimeEntry; submit: (event: FormEvent<HTMLFormElement>) => void }) {
   const initialDate = initial?.startedAt.slice(0, 10) ?? new Date().toISOString().slice(0, 10);
-  return <form className="entity-form" onSubmit={submit}><div className="form-grid"><Field label="פרויקט" wide><select name="projectId" required defaultValue={String(initialProjectId)}>{projects.map((project) => <option key={project.id} value={String(project.id)}>{project.name}</option>)}</select></Field><Field label="תאריך"><input name="date" dir="ltr" type="date" required defaultValue={initialDate} /></Field><Field label="מספר שעות"><input name="hours" dir="ltr" type="number" min="0.02" max="24" step="0.01" required defaultValue={initial ? (Number(initial.durationSeconds) / 3600).toFixed(2) : undefined} placeholder="לדוגמה: 2.5" /></Field><Field label="מה בוצע?" wide><textarea name="description" dir="auto" rows={3} defaultValue={initial?.description} placeholder="תיאור קצר בעברית, Deutsch or English" /></Field></div><p className="form-note">הזמן נשמר במדויק. כללי העיגול יחולו בעתיד רק על החישוב הכספי.</p><FormActions label={initial ? "שמירת השינויים" : "שמירת דיווח"} /></form>;
+  return <form className="entity-form" onSubmit={submit}><div className="form-grid"><Field label="פרויקט" wide><select name="projectId" required defaultValue={String(initialProjectId)}>{projects.map((project) => <option key={project.id} value={String(project.id)}>{project.name}</option>)}</select></Field><Field label="תאריך"><input name="date" dir="ltr" type="date" required defaultValue={initialDate} /></Field><Field label="מספר שעות"><input name="hours" dir="ltr" type="number" min="0.02" max="24" step="0.01" required defaultValue={initial ? (Number(initial.durationSeconds) / 3600).toFixed(2) : undefined} placeholder="לדוגמה: 2.5" /></Field><Field label="מה בוצע?" wide><textarea name="description" dir="auto" rows={3} defaultValue={initial?.description} placeholder="תיאור קצר בעברית, Deutsch or English" /></Field></div><p className="form-note">הזמן נשמר במדויק ומשמש כך גם לחישוב הכספי, ללא עיגול אוטומטי.</p><FormActions label={initial ? "שמירת השינויים" : "שמירת דיווח"} /></form>;
 }
 
 function PaymentForm({ projects, initial, submit }: { projects: Project[]; initial?: Payment; submit: (event: FormEvent<HTMLFormElement>) => void }) {

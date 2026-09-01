@@ -17,6 +17,9 @@ test("server-renders the Hebrew operations dashboard", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
+  assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(response.headers.get("x-frame-options"), "DENY");
+  assert.match(response.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
   const html = await response.text();
   assert.match(html, /<html[^>]*lang="he"[^>]*dir="rtl"/i);
   assert.match(html, /<title>מנהל עבודה \| פרויקטים, שעות וכספים<\/title>/);
@@ -57,6 +60,10 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.match(page, /"sync-icon-button " \+/);
   assert.match(page, /className="sync-popover"/);
   assert.doesNotMatch(page, /className="offline-notice"/);
+  assert.match(page, /restoreClient/);
+  assert.match(page, /document\.visibilityState === "visible"/);
+  assert.match(page, /event\.key === "Escape"/);
+  assert.match(page, /className="skip-link"/);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Starter Project/);
 });
 
@@ -88,6 +95,20 @@ test("supports employee reports and native Excel export", async () => {
   assert.match(excel, /0x02014b50/);
   assert.match(excel, /0x06054b50/);
   assert.match(excel, /xl\/worksheets\/sheet1\.xml/);
+});
+
+test("hardens data mutations and production delivery", async () => {
+  const route = await readFile(new URL("../app/api/state/route.ts", import.meta.url), "utf8");
+  const worker = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
+  const operations = await readFile(new URL("../docs/OPERATIONS.md", import.meta.url), "utf8");
+  assert.match(route, /matchesFileSignature/);
+  assert.match(route, /הבקשה גדולה מדי/);
+  assert.match(route, /יש לעצור את הטיימר הפעיל לפני מחיקת הפרויקט/);
+  assert.match(route, /searchParams\.get\("health"\) === "1"/);
+  assert.match(route, /appendAudit/);
+  assert.match(worker, /content-security-policy/);
+  assert.match(worker, /no-store, max-age=0/);
+  assert.match(operations, /npm run backup/);
 });
 test("enables the isolated guest demo only on the preview host", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");

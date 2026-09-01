@@ -1,4 +1,4 @@
-const CACHE_NAME = "menahel-avoda-shell-v1";
+const CACHE_NAME = "menahel-avoda-shell-v2";
 const APP_SHELL = ["/", "/app-icon.png", "/manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {
