@@ -78,6 +78,9 @@ function formatTime(seconds: number) {
   return `${hours}:${minutes}:${secs}`;
 }
 
+function eventStartedFromControl(target: EventTarget | null) {
+  return target instanceof Element && Boolean(target.closest("button,a,input,select,textarea,summary,details,label"));
+}
 function billingLabel(type: BillingType, fixedPrice: number, hourlyRate: number) {
   if (type === "fixed") return `מחיר גלובלי · €${fixedPrice.toLocaleString()}`;
   if (type === "hourly") return `€${hourlyRate.toLocaleString()} לשעה`;
@@ -238,6 +241,7 @@ export default function Home() {
   const [accountMode, setAccountMode] = useState<AccountMode>("solo");
   const [syncState, setSyncState] = useState<"loading" | "saved" | "error" | "offline">("loading");
   const [pendingCount, setPendingCount] = useState(0);
+  const [showSyncDetails, setShowSyncDetails] = useState(false);
   const [offlineWithoutCache, setOfflineWithoutCache] = useState(false);
   const [currentUser, setCurrentUser] = useState<AccountUser>({ id: "demo-owner", displayName: "מנחם", email: "menachem@example.com", role: "manager", isLocal: true, isGuest: false });
   const [authRequired, setAuthRequired] = useState(false);
@@ -283,58 +287,52 @@ export default function Home() {
   }
 
   async function saveAction(action: string, values: Record<string, unknown>) {
-    if (onlineOnlyActions.has(action) && !navigator.onLine) {
-      setSyncState("offline");
-      setInviteNotice({ kind: "error", text: "הפעולה הזאת דורשת חיבור לאינטרנט. שאר העבודה נשמרת במכשיר." });
-      throw new Error("הפעולה הזאת דורשת חיבור לאינטרנט");
+    if (onlineOnlyActions.has(action)) {
+      if (!navigator.onLine) {
+        setSyncState("offline");
+        setInviteNotice({ kind: "error", text: "הפעולה הזאת דורשת חיבור לאינטרנט. שאר העבודה נשמרת במכשיר." });
+        throw new Error("הפעולה הזאת דורשת חיבור לאינטרנט");
+      }
+      const operation = prepareQueuedOperation(action, values);
+      setSyncState("loading");
+      const response = await fetch("/api/state", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, ...operation.values, operationId: operation.id }) });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({})) as { error?: string };
+        setSyncState("error");
+        throw new Error(payload.error ?? "שמירת הנתונים נכשלה");
+      }
+      const data = await response.json() as StoredState;
+      applyStoredState(data);
+      setSyncState("saved");
+      return data;
     }
+
     const operation = prepareQueuedOperation(action, values);
-    await enqueueOperation(operation);
+    const current = stateRef.current;
+    if (!current) throw new Error("אין עדיין עותק מקומי שאפשר לעדכן");
+
+    // The interface is local-first: reflect the action immediately, then persist and sync it in the background.
+    const optimistic = applyOptimisticOperation(current, operation);
+    applyStoredState(optimistic);
+
+    try {
+      await enqueueOperation(operation);
+    } catch (error) {
+      applyStoredState(current);
+      setSyncState("error");
+      throw error;
+    }
+
     const queuedOperations = await readQueuedOperations();
     setPendingCount(queuedOperations.length);
-
-    const keepLocally = () => {
-      const current = stateRef.current;
-      if (!current) throw new Error("אין עדיין עותק מקומי שאפשר לעדכן");
-      const optimistic = applyOptimisticOperation(current, operation);
-      applyStoredState(optimistic);
+    if (navigator.onLine) {
+      setSyncState("loading");
+      void syncQueuedOperations();
+    } else {
       setSyncState("offline");
-      return optimistic;
-    };
-
-    if (!navigator.onLine || queuedOperations[0]?.id !== operation.id) {
-      const localState = keepLocally();
-      if (navigator.onLine) void syncQueuedOperations();
-      return localState;
     }
-    setSyncState("loading");
-    let response: Response;
-    try {
-      response = await fetch("/api/state", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, ...operation.values, operationId: operation.id }) });
-    } catch {
-      return keepLocally();
-    }
-    if (!response.ok) {
-      if (response.status >= 500 || response.status === 409) return keepLocally();
-      await removeQueuedOperation(operation.id);
-      setPendingCount((await readQueuedOperations()).length);
-      const payload = await response.json().catch(() => ({})) as { error?: string };
-      setSyncState("error");
-      throw new Error(payload.error ?? "שמירת הנתונים נכשלה");
-    }
-    let data: StoredState;
-    try {
-      data = await response.json() as StoredState;
-    } catch {
-      return keepLocally();
-    }
-    await removeQueuedOperation(operation.id);
-    setPendingCount((await readQueuedOperations()).length);
-    applyStoredState(data);
-    setSyncState("saved");
-    return data;
+    return optimistic;
   }
-
   async function syncQueuedOperations() {
     if (syncingRef.current || !navigator.onLine) {
       if (!navigator.onLine) setSyncState("offline");
@@ -343,29 +341,37 @@ export default function Home() {
     syncingRef.current = true;
     setSyncState("loading");
     let rejected = 0;
+    let interrupted = false;
+    let continueSync = false;
     try {
       const operations = await readQueuedOperations();
       if (!operations.length) {
         const response = await fetch("/api/state");
-        if (response.status === 401) { setAuthRequired(true); return; }
+        if (response.status === 401) { setAuthRequired(true); interrupted = true; return; }
         if (!response.ok) throw new Error("טעינת הנתונים נכשלה");
-        applyStoredState(await response.json() as StoredState);
+        const serverState = await response.json() as StoredState;
+        const queuedAfterFetch = await readQueuedOperations();
+        applyStoredState(queuedAfterFetch.reduce((current, operation) => applyOptimisticOperation(current, operation), serverState));
       } else {
         for (const operation of operations) {
           let response: Response;
           try {
             response = await fetch("/api/state", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: operation.action, ...operation.values, operationId: operation.id }) });
           } catch {
+            interrupted = true;
             setSyncState("offline");
             break;
           }
-          if (response.status === 401) { setAuthRequired(true); break; }
+          if (response.status === 401) { setAuthRequired(true); interrupted = true; break; }
           if (response.ok) {
-            applyStoredState(await response.json() as StoredState);
+            const serverState = await response.json() as StoredState;
             await removeQueuedOperation(operation.id);
+            const queuedAfterSave = await readQueuedOperations();
+            applyStoredState(queuedAfterSave.reduce((current, queued) => applyOptimisticOperation(current, queued), serverState));
             continue;
           }
           if (response.status >= 500 || response.status === 409) {
+            interrupted = true;
             setSyncState("error");
             break;
           }
@@ -376,19 +382,24 @@ export default function Home() {
 
       const remaining = await readQueuedOperations();
       setPendingCount(remaining.length);
-      if (remaining.length && stateRef.current) {
-        const optimistic = remaining.reduce((current, operation) => applyOptimisticOperation(current, operation), stateRef.current);
-        applyStoredState(optimistic);
-        setSyncState(navigator.onLine ? "error" : "offline");
+      if (remaining.length) {
+        if (!interrupted && navigator.onLine) {
+          setSyncState("loading");
+          continueSync = true;
+        } else {
+          setSyncState(navigator.onLine ? "error" : "offline");
+        }
       } else if (!authRequired) {
-        setSyncState("saved");
+        setSyncState(rejected ? "error" : "saved");
       }
-      if (rejected) setInviteNotice({ kind: "error", text: rejected === 1 ? "פעולה מקומית אחת לא סונכרנה משום שהנתונים בשרת השתנו." : rejected + " פעולות מקומיות לא סונכרנו משום שהנתונים בשרת השתנו." });
+    } catch {
+      interrupted = true;
+      setSyncState(navigator.onLine ? "error" : "offline");
     } finally {
       syncingRef.current = false;
+      if (continueSync && !interrupted) queueMicrotask(() => void syncQueuedOperations());
     }
   }
-
   useEffect(() => {
     let active = true;
     const handleOnline = () => { if (active) void syncQueuedOperations(); };
@@ -706,19 +717,32 @@ export default function Home() {
       <section className="content">
         <header className={"topbar" + (view === "dashboard" ? " dashboard-topbar" : "")}>
           <div><p className="eyebrow">{viewTitles[view].eyebrow}</p><h1>{viewTitles[view].title}</h1></div>
-          <div className="top-actions"><span className="account-badge">{currentUser.isGuest ? "מצב אורח" : !isManager ? "עובד בצוות" : accountMode === "solo" ? "מצב עובד" : "מצב מעסיק"}</span><span className={`connection ${syncState === "error" ? "sync-error" : syncState === "offline" || pendingCount ? "sync-offline" : ""}`}><i /> {syncState === "loading" ? "מסנכרן…" : syncState === "error" ? "בעיה בסנכרון" : syncState === "offline" ? pendingCount ? `${pendingCount} ממתינות` : "לא מחובר" : pendingCount ? `${pendingCount} ממתינות` : "מסונכרן"}</span><button className="icon-button profile-button" onClick={() => navigate("profile")} aria-label="פתיחת הפרופיל">{currentUser.displayName.charAt(0)}</button>{view === "time" ? <button className="primary-button" onClick={openTimeEntry}><span>＋</span> דיווח חדש</button> : view === "payments" ? <button className="primary-button" onClick={() => openPayment()}><span>＋</span> תשלום חדש</button> : view === "expenses" ? <button className="primary-button" onClick={() => openExpense()}><span>＋</span> הוצאה חדשה</button> : isManager && !["profile", "trash", "history", "reports"].includes(view) && <button className="primary-button" onClick={() => openNew(view === "clients" ? "client" : view === "employees" ? "employee" : "project")}><span>＋</span> {view === "clients" ? "לקוח חדש" : view === "employees" ? "עובד חדש" : "פרויקט חדש"}</button>}</div>
+          <div className="top-actions">
+            <span className="account-badge">{currentUser.isGuest ? "מצב אורח" : !isManager ? "עובד בצוות" : accountMode === "solo" ? "מצב עובד" : "מצב מעסיק"}</span>
+            <div className="sync-menu">
+              <button type="button" className={"sync-icon-button " + (syncState === "error" ? "has-error" : syncState === "offline" || pendingCount ? "has-pending" : syncState === "loading" ? "is-syncing" : "is-saved")} onClick={() => setShowSyncDetails((current) => !current)} aria-label={pendingCount ? pendingCount + " פעולות ממתינות לסנכרון" : syncState === "offline" ? "מצב אופליין" : syncState === "error" ? "פרטי בעיית סנכרון" : "מצב הסנכרון"} aria-expanded={showSyncDetails}>
+                <span aria-hidden="true">↻</span>{pendingCount > 0 && <b>{pendingCount > 99 ? "99+" : pendingCount}</b>}
+              </button>
+              {showSyncDetails && <div className="sync-popover">
+                <strong>{syncState === "loading" ? "מסנכרן ברקע" : syncState === "error" ? "יש פעולות שלא סונכרנו" : syncState === "offline" ? "עובדים כרגע ללא חיבור" : pendingCount ? "הפעולות נשמרו במכשיר" : "הכול מסונכרן"}</strong>
+                <p>{pendingCount ? pendingCount + " פעולות ממתינות ויישלחו אוטומטית כשהחיבור יהיה זמין." : syncState === "offline" ? "אפשר להמשיך לעבוד כרגיל. הנתונים יסתנכרנו אוטומטית בחזרת החיבור." : syncState === "error" ? "העבודה נשמרה. אפשר לנסות שוב בלי לצאת מהמסך." : "אין פעולות שממתינות לסנכרון."}</p>
+                {(pendingCount > 0 || syncState === "offline" || syncState === "error") && <button type="button" onClick={() => void syncQueuedOperations()}>ניסיון סנכרון</button>}
+              </div>}
+            </div>
+            <button className="icon-button profile-button" onClick={() => navigate("profile")} aria-label="פתיחת הפרופיל">{currentUser.displayName.charAt(0)}</button>
+            {view === "time" ? <button className="primary-button" onClick={openTimeEntry}><span>＋</span> דיווח חדש</button> : view === "payments" ? <button className="primary-button" onClick={() => openPayment()}><span>＋</span> תשלום חדש</button> : view === "expenses" ? <button className="primary-button" onClick={() => openExpense()}><span>＋</span> הוצאה חדשה</button> : isManager && !["profile", "trash", "history", "reports"].includes(view) && <button className="primary-button" onClick={() => openNew(view === "clients" ? "client" : view === "employees" ? "employee" : "project")}><span>＋</span> {view === "clients" ? "לקוח חדש" : view === "employees" ? "עובד חדש" : "פרויקט חדש"}</button>}
+          </div>
         </header>
 
         {currentUser.isGuest && <div className="guest-notice" role="status"><span>◎</span><strong>מצב אורח — דני לוי</strong><p>זו סביבת הדגמה ציבורית ומשותפת. אפשר להתנסות בכל הפעולות, והנתונים עשויים להשתנות על ידי מבקרים אחרים.</p></div>}
         {inviteNotice && <div className={`invite-notice ${inviteNotice.kind}`} role="status"><span>{inviteNotice.kind === "success" ? "✓" : "!"}</span><strong>{inviteNotice.text}</strong><button onClick={() => setInviteNotice(null)} aria-label="סגירת ההודעה">×</button></div>}
-        {(syncState === "offline" || pendingCount > 0) && <div className="offline-notice" role="status"><span>⌁</span><strong>{pendingCount ? `${pendingCount} פעולות נשמרו במכשיר ויסונכרנו לפי הסדר כשהחיבור יחזור.` : "אין כרגע חיבור לאינטרנט. אפשר להמשיך לעבוד והפעולות יישמרו במכשיר."}</strong><button type="button" className="secondary-compact" onClick={() => void syncQueuedOperations()}>ניסיון סנכרון</button></div>}
 
         {view === "dashboard" && (projects.length ? <Dashboard canManage={isManager} accountMode={accountMode} activeProject={activeProject} selectedProjectId={selectedDashboardProjectId} running={running} seconds={seconds} projects={projects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} toggleProjectTimer={(project) => void toggleProjectTimer(project)} updateProjectStatus={(project, status) => void updateProjectStatus(project, status)} stopTimer={() => void stopTimer()} selectProject={selectProject} closeProject={() => setSelectedDashboardProjectId(null)} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} showManual={openTimeEntry} /> : <NoProjectsView isManager={isManager} openNew={() => openNew("project")} />)}
         {view === "projects" && <ProjectsView canManage={isManager} projects={visibleProjects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} activeProject={activeProject} running={running} selectProject={selectProject} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} openManual={openTimeEntry} openNew={() => openNew("project")} />}
         {view === "time" && <TimeEntriesView entries={recentTimeEntries} openNew={openTimeEntry} editEntry={openEditTimeEntry} removeEntry={(entry) => void removeTimeEntry(entry)} />}
         {isManager && view === "payments" && <PaymentsView projects={projects} payments={payments} openNew={() => openPayment()} editPayment={openPayment} removePayment={(payment) => void removePayment(payment)} />}
         {isManager && view === "expenses" && <ExpensesView projects={projects} expenses={expenses} attachments={attachments} openNew={() => openExpense()} openAttachment={openAttachment} previewAttachment={openAttachmentPreview} editExpense={openExpense} removeExpense={(expense) => void removeExpense(expense)} removeAttachment={(attachment) => void removeAttachment(attachment)} />}
-        {isManager && view === "clients" && <ClientsView clients={clients} query={query} setQuery={setQuery} openNew={() => openNew("client")} editClient={(client) => openEdit("client", client)} removeClient={(client) => void removeRecord("client", client.id, client.name)} />}
+        {isManager && view === "clients" && <ClientsView clients={clients} query={query} setQuery={setQuery} openClientProjects={(client) => { setFilter("הכול"); setQuery(client.name); setView("projects"); }} openNew={() => openNew("client")} editClient={(client) => openEdit("client", client)} removeClient={(client) => void removeRecord("client", client.id, client.name)} />}
         {isManager && view === "employees" && <EmployeesView employees={employees} openNew={() => openNew("employee")} editEmployee={(employee) => openEdit("employee", employee)} removeEmployee={(employee) => void removeRecord("employee", employee.id, employee.name)} inviteEmployee={(employee) => void inviteEmployee(employee)} />}
         {isManager && view === "trash" && <RecycleBinView trash={trash} restoreClient={(id, restoreProjects) => void restoreRecord("client", id, restoreProjects)} restoreProject={(id) => void restoreRecord("project", id)} restoreEmployee={(id) => void restoreRecord("employee", id)} />}
         {isManager && view === "history" && <AuditLogView entries={auditLog} />}
@@ -862,7 +886,7 @@ function Dashboard({ canManage, accountMode, activeProject, selectedProjectId, r
         const profit = Number(project.profitAmount ?? project.expectedAmount);
         const isTimerProject = running && String(activeProject.id) === String(project.id);
         const timerDisabled = project.tag === "הסתיים" || (running && !isTimerProject);
-        return <article key={project.id} className={"dashboard-project-card" + (isTimerProject ? " timer-running" : "")}>
+        return <div key={project.id} className={"dashboard-project-card" + (isTimerProject ? " timer-running" : "")} role="button" tabIndex={0} aria-label={"פתיחת פרטי הפרויקט " + project.name} onClick={(event) => { if (!eventStartedFromControl(event.target)) selectProject(project); }} onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); selectProject(project); } }}>
           <header className="project-card-top">
             <button type="button" className="project-card-identity" onClick={() => selectProject(project)}><span className="project-card-title-row"><strong dir="auto">{project.name}</strong><small dir="auto">{project.client}</small></span></button>
             <button type="button" className={"project-card-timer" + (isTimerProject ? " is-running" : "")} onClick={() => toggleProjectTimer(project)} disabled={timerDisabled} aria-label={isTimerProject ? "עצירת הטיימר של " + project.name : "הפעלת טיימר עבור " + project.name} title={isTimerProject ? "עצירת הטיימר" : project.tag === "הסתיים" ? "הפרויקט הסתיים" : "הפעלת טיימר"}>{isTimerProject ? <StopIcon /> : <PlayIcon />}</button>
@@ -879,7 +903,7 @@ function Dashboard({ canManage, accountMode, activeProject, selectedProjectId, r
             <div><small>תעריף</small><b>{rate}</b></div>
           </div>
           <button type="button" className="project-card-open" onClick={() => selectProject(project)}><span>לפרטי הפרויקט</span><span aria-hidden="true">←</span></button>
-        </article>;
+        </div>;
       })}</div> : <div className="empty-state"><strong>לא נמצאו פרויקטים</strong><span>נסו חיפוש אחר או שנו את הסינון.</span></div>}
     </section>}
   </>;
@@ -926,11 +950,16 @@ function ExpensesView({ projects, expenses, attachments, openNew, openAttachment
     <section className="page-card documents-card"><div className="section-head"><div><h2>קבלות ותמונות</h2><p>{attachments.length ? `${attachments.length} קבצים משויכים` : "תמונות ו־PDF לפי פרויקט או הוצאה"}</p></div><button className="secondary-compact" onClick={() => openAttachment()}>＋ העלאת קובץ</button></div>{attachments.length ? <div className="attachment-grid">{attachments.map((attachment) => <article className="attachment-card" key={attachment.id}><span className="attachment-icon">{attachment.contentType === "application/pdf" ? "PDF" : "▧"}</span><div><strong dir="auto">{attachment.fileName}</strong><span dir="auto">{attachment.projectName}{attachment.expenseId ? " · משויך להוצאה" : " · קובץ פרויקט"}</span><small>{new Date(attachment.createdAt.replace(" ", "T") + "Z").toLocaleDateString("he-IL")}</small></div><div className="attachment-actions"><button type="button" onClick={() => previewAttachment(attachment)}>צפייה</button><button className="danger" onClick={() => removeAttachment(attachment)}>הסרה</button></div></article>)}</div> : <div className="documents-empty"><span>▧</span><strong>אין עדיין קבלות או תמונות</strong><p>אפשר לצלם מהטלפון או לבחור JPG, PNG, WEBP, HEIC או PDF עד 10MB.</p><button className="restore-primary" onClick={() => openAttachment()}>העלאת קובץ ראשון</button></div>}</section>
   </>;
 }
-function ClientsView({ clients, query, setQuery, openNew, editClient, removeClient }: { clients: Client[]; query: string; setQuery: (value: string) => void; openNew: () => void; editClient: (client: Client) => void; removeClient: (client: Client) => void }) {
-  const visible = clients.filter((client) => `${client.name} ${client.address}`.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
-  return <section className="page-card"><div className="section-head"><div><h2>כל הלקוחות</h2><p>{clients.length} לקוחות במערכת</p></div><button className="mobile-primary" onClick={openNew}>＋ לקוח חדש</button></div><label className="search-box standalone"><span>⌕</span><input dir="auto" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="חיפוש לפי שם או כתובת" /></label><div className="record-grid">{visible.map((client) => <article className="record-card" key={client.id}><div className="record-avatar">{client.name.charAt(0)}</div><div className="record-copy"><strong dir="auto">{client.name}</strong><span dir="auto">⌖ {client.address}</span><small dir="ltr">{client.phone}</small></div><div className="record-meta"><strong>{client.projects}</strong><span>פרויקטים</span></div><div className="record-actions"><button type="button" onClick={() => editClient(client)}>עריכה</button><button type="button" className="danger" onClick={() => removeClient(client)}>לסל</button></div></article>)}</div></section>;
+function ClientsView({ clients, query, setQuery, openClientProjects, openNew, editClient, removeClient }: { clients: Client[]; query: string; setQuery: (value: string) => void; openClientProjects: (client: Client) => void; openNew: () => void; editClient: (client: Client) => void; removeClient: (client: Client) => void }) {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const visible = clients.filter((client) => (client.name + " " + client.address).toLocaleLowerCase().includes(normalizedQuery));
+  return <section className="page-card"><div className="section-head"><div><h2>כל הלקוחות</h2><p>{clients.length} לקוחות במערכת · לחיצה על לקוח מציגה את הפרויקטים שלו</p></div><button className="mobile-primary" onClick={openNew}>＋ לקוח חדש</button></div><label className="search-box standalone"><span>⌕</span><input dir="auto" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="חיפוש לפי שם או כתובת" /></label><div className="record-grid">{visible.map((client) => <div className="record-card client-record-card" key={client.id} role="button" tabIndex={0} aria-label={"פתיחת הפרויקטים של " + client.name} onClick={(event) => { if (!eventStartedFromControl(event.target)) openClientProjects(client); }} onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); openClientProjects(client); } }}>
+    <button type="button" className="client-open-button" onClick={() => openClientProjects(client)} aria-label={"פתיחת הפרויקטים של " + client.name}><span className="record-avatar">{client.name.charAt(0)}</span></button>
+    <div className="record-copy"><strong dir="auto">{client.name}</strong><span dir="auto">⌖ {client.address}</span><small dir="ltr">{client.phone}</small></div>
+    <div className="record-meta"><strong>{client.projects}</strong><span>פרויקטים</span></div>
+    <div className="record-actions"><button type="button" onClick={() => editClient(client)}>עריכה</button><button type="button" className="danger" onClick={() => removeClient(client)}>לסל</button></div>
+  </div>)}</div></section>;
 }
-
 function EmployeesView({ employees, openNew, editEmployee, removeEmployee, inviteEmployee }: { employees: Employee[]; openNew: () => void; editEmployee: (employee: Employee) => void; removeEmployee: (employee: Employee) => void; inviteEmployee: (employee: Employee) => void }) {
   const connected = employees.filter((employee) => employee.connectionStatus === "connected").length;
   const pending = employees.filter((employee) => employee.connectionStatus === "pending").length;

@@ -49,6 +49,14 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.ok(page.includes('https://www.waze.com/ul?q='));
   assert.match(page, /function NavigationIcon/);
   assert.match(page, /updateProjectStatus/);
+  assert.match(page, /eventStartedFromControl/);
+  assert.match(page, /reflect the action immediately/);
+  assert.ok(page.indexOf('applyStoredState(optimistic)') < page.indexOf('await enqueueOperation(operation)'), 'optimistic state must render before queue persistence');
+  assert.match(page, /openClientProjects/);
+  assert.match(page, /לחיצה על לקוח מציגה את הפרויקטים שלו/);
+  assert.match(page, /"sync-icon-button " \+/);
+  assert.match(page, /className="sync-popover"/);
+  assert.doesNotMatch(page, /className="offline-notice"/);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Starter Project/);
 });
 
