@@ -43,7 +43,7 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.match(page, /התחלת טיימר/);
   assert.match(page, /running && <button className="mobile-timer running"/);
   assert.doesNotMatch(page, /בחירת פרויקט להפעלת טיימר/);
-  assert.match(page, /הוספת דיווח ידני/);
+  assert.match(page, /project-entry-action/);
   const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.ok(css.includes(".form-actions .primary-button { display:inline-flex"));
   assert.ok(css.includes("height:100dvh"));
@@ -67,8 +67,13 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.match(page, /event\.key === "Escape"/);
   assert.match(page, /className="skip-link"/);
   assert.match(page, /project-detail-metric-link/);
-  assert.match(page, /€ דיווח תשלום/);
-  assert.match(page, /− דיווח הוצאה/);
+  assert.match(page, /<span>הוצאות<\/span><strong>€\{Number\(selectedProject\.expenseAmount/);
+  assert.match(page, /formatTime\(Number\(entry\.durationSeconds\)\)/);
+  assert.match(page, /formatTime\(totalSeconds\)/);
+  assert.match(page, /backToProject=\{\(\) => contextProject && selectProject\(contextProject\)\}/);
+  assert.match(page, /→ חזרה לפרויקט/);
+  assert.match(page, /€ תשלום/);
+  assert.match(page, /− הוצאה/);
   assert.match(page, /defaultChecked={initial \? Boolean\(initial\.billableToClient\) : true}/);
   assert.match(page, /if \(nextView === "dashboard"\) setSelectedDashboardProjectId\(null\)/);
   assert.match(page, /projectActivity=/);
