@@ -385,6 +385,45 @@ async function acceptInvitation(request: Request, token: string) {
   return Response.json(await loadState(db, identity));
 }
 
+async function loadProjectActivity(db: D1Database, identity: Identity, projectId: string) {
+  if (!validRecordId(projectId)) return null;
+  const access = identity.role === "manager"
+    ? await db.prepare("SELECT id FROM projects WHERE id = ? AND business_id = ? AND deleted_at IS NULL LIMIT 1").bind(projectId, identity.businessId).first()
+    : await db.prepare(`SELECT p.id FROM projects p JOIN project_workers pw ON pw.project_id = p.id
+        WHERE p.id = ? AND p.business_id = ? AND p.deleted_at IS NULL AND pw.user_id = ? LIMIT 1`)
+      .bind(projectId, identity.businessId, identity.ownerId).first();
+  if (!access) return null;
+  const timeEntries = await db.prepare(`SELECT te.id, te.project_id AS projectId, p.name AS projectName, te.user_id AS userId,
+      u.display_name AS workerName, te.started_at AS startedAt, te.ended_at AS endedAt,
+      COALESCE(te.duration_seconds, CAST((julianday('now') - julianday(te.started_at)) * 86400 AS INTEGER)) AS durationSeconds,
+      te.description, te.source
+      FROM time_entries te JOIN projects p ON p.id = te.project_id JOIN users u ON u.id = te.user_id
+      WHERE te.project_id = ? AND te.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
+        AND (? = 'manager' OR te.user_id = ?)
+      ORDER BY te.started_at DESC LIMIT 1000`).bind(projectId, identity.businessId, identity.role, identity.ownerId).all();
+  if (identity.role !== "manager") return { timeEntries: timeEntries.results, payments: [], expenses: [], attachments: [] };
+  const [payments, expenses, attachments] = await Promise.all([
+    db.prepare(`SELECT pay.id, pay.project_id AS projectId, p.name AS projectName, c.name AS clientName,
+      pay.amount, pay.paid_at AS paidAt, COALESCE(pay.method, '') AS method, COALESCE(pay.note, '') AS note
+      FROM payments pay JOIN projects p ON p.id = pay.project_id JOIN clients c ON c.id = p.client_id
+      WHERE pay.project_id = ? AND pay.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
+      ORDER BY pay.paid_at DESC, pay.created_at DESC LIMIT 1000`).bind(projectId, identity.businessId).all(),
+    db.prepare(`SELECT ex.id, ex.project_id AS projectId, p.name AS projectName, c.name AS clientName,
+      ex.amount, ex.incurred_at AS incurredAt, ex.category, ex.billable_to_client AS billableToClient,
+      COALESCE(ex.note, '') AS note
+      FROM expenses ex JOIN projects p ON p.id = ex.project_id JOIN clients c ON c.id = p.client_id
+      WHERE ex.project_id = ? AND ex.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
+      ORDER BY ex.incurred_at DESC, ex.created_at DESC LIMIT 1000`).bind(projectId, identity.businessId).all(),
+    db.prepare(`SELECT a.id, a.project_id AS projectId, p.name AS projectName,
+      a.expense_id AS expenseId, COALESCE(ex.note, '') AS expenseNote, a.file_name AS fileName,
+      a.content_type AS contentType, a.created_at AS createdAt
+      FROM attachments a JOIN projects p ON p.id = a.project_id LEFT JOIN expenses ex ON ex.id = a.expense_id
+      WHERE a.project_id = ? AND a.business_id = ? AND a.deleted_at IS NULL AND p.deleted_at IS NULL
+      ORDER BY a.created_at DESC LIMIT 1000`).bind(projectId, identity.businessId).all(),
+  ]);
+  return { timeEntries: timeEntries.results, payments: payments.results, expenses: expenses.results, attachments: attachments.results };
+}
+
 export async function GET(request: Request) {
   const context = await prepareRequest(request);
   if (!context) return Response.json({ error: "נדרשת התחברות" }, { status: 401 });
@@ -392,6 +431,11 @@ export async function GET(request: Request) {
   if (searchParams.get("health") === "1") {
     await context.db.prepare("SELECT 1").first();
     return Response.json({ status: "ok", database: "reachable", timestamp: new Date().toISOString() });
+  }
+  const projectActivityId = searchParams.get("projectActivity");
+  if (projectActivityId) {
+    const activity = await loadProjectActivity(context.db, context.identity, projectActivityId);
+    return activity ? Response.json(activity) : Response.json({ error: "הפרויקט לא נמצא" }, { status: 404 });
   }
   if (searchParams.get("report") === "1") {
     if (context.identity.role !== "manager") return Response.json({ error: "הדוחות זמינים למנהל בלבד" }, { status: 403 });

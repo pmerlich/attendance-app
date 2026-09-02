@@ -685,3 +685,45 @@ html,body { max-width:100%; overflow-x:hidden; }
   .section-head>div { min-width:0; }
   .section-head p { overflow-wrap:anywhere; }
 }
+
+/* Final readability and clickable project detail metrics */
+.project-detail-metrics>button { min-height:88px; padding:15px; border:1px solid #dbe3ee; border-radius:11px; color:inherit; background:#f8faff; text-align:right; cursor:pointer; }
+.project-detail-metrics>button:hover { border-color:#8ea9e4; background:#f2f6ff; transform:translateY(-1px); box-shadow:var(--shadow-sm); }
+.project-detail-metrics>button span,.project-detail-metrics>button strong,.project-detail-metrics>button small { display:block; }
+.project-detail-metrics>button small { margin-top:7px; color:#315fc5; font-size:13px; font-weight:800; }
+.project-detail-metrics>.positive strong { color:var(--success); }
+.project-detail-metrics>.negative strong { color:var(--danger); }
+body { font-size:16px; }
+.section-head h2 { font-size:28px; }
+.section-head p,.project-detail-title p,.project-detail-address,.project-address-copy span { font-size:14px; }
+.dashboard-project-card .project-card-title-row strong { font-size:19px; }
+.dashboard-project-card .project-card-title-row small { font-size:14px; }
+.project-status-control,.project-status-control.compact select,.working-now { font-size:13px; }
+.dashboard-project-card .project-card-metrics small { font-size:13px; }
+.dashboard-project-card .project-card-metrics b { font-size:17px; }
+.dashboard-project-card .project-card-open,.navigation-choice summary,.navigation-menu a { font-size:14px; }
+.project-detail-metrics span { font-size:14px; }
+.project-detail-metrics strong { font-size:20px; }
+.primary-button,.secondary-compact,.secondary-button,.start-button,.record-actions button { font-size:14px; }
+.form-field>span,.form-fieldset legend,.form-note { font-size:14px; }
+.form-field input,.form-field select,.form-field textarea { font-size:16px; }
+@media (max-width:760px) {
+  .topbar h1 { font-size:27px; }
+  .section-head h2 { font-size:22px; }
+  .section-head p { font-size:13px; }
+  .project-overview-stats span { font-size:13px; }
+  .project-overview-stats strong { font-size:26px; }
+  .project-overview-stats small { font-size:11px; }
+  .dashboard-project-card .project-card-title-row strong { font-size:17px; }
+  .dashboard-project-card .project-card-title-row small,.project-address-copy span { font-size:13px; }
+  .dashboard-project-card .project-card-metrics small { font-size:12px; }
+  .dashboard-project-card .project-card-metrics b { font-size:16px; }
+  .dashboard-project-card .project-card-open { font-size:13px; }
+  .project-detail-metrics>button,.project-detail-metrics article { min-height:94px; padding:13px; }
+  .project-detail-metrics span { font-size:13px; }
+  .project-detail-metrics strong { font-size:18px; }
+  .project-detail-metrics>button small { font-size:11px; }
+  .mobile-nav>button:not(.mobile-timer) { font-size:11px; }
+  .mobile-nav>button:not(.mobile-timer) span { font-size:21px; }
+  .primary-button,.secondary-compact,.secondary-button { font-size:13px; }
+}

@@ -48,7 +48,8 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.ok(css.includes(".form-actions .primary-button { display:inline-flex"));
   assert.ok(css.includes("height:100dvh"));
   assert.ok(css.includes("safe-area-inset-bottom"));
-  assert.ok(page.includes('https://www.google.com/maps/dir/?api=1'));
+  assert.ok(page.includes('https://www.google.com/maps/search/?api=1'));
+  assert.doesNotMatch(page, /navigate=yes|dir_action=navigate/);
   assert.ok(page.includes('https://www.waze.com/ul?q='));
   assert.match(page, /function NavigationIcon/);
   assert.match(page, /updateProjectStatus/);
@@ -64,6 +65,13 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.match(page, /document\.visibilityState === "visible"/);
   assert.match(page, /event\.key === "Escape"/);
   assert.match(page, /className="skip-link"/);
+  assert.match(page, /project-detail-metric-link/);
+  assert.match(page, /€ דיווח תשלום/);
+  assert.match(page, /− דיווח הוצאה/);
+  assert.match(page, /defaultChecked={initial \? Boolean\(initial\.billableToClient\) : true}/);
+  assert.match(page, /if \(nextView === "dashboard"\) setSelectedDashboardProjectId\(null\)/);
+  assert.match(page, /projectActivity=/);
+  assert.match(css, /dashboard-project-card \.project-card-title-row strong \{ font-size:19px/);
   assert.doesNotMatch(html, /codex-preview|SkeletonPreview|Starter Project/);
 });
 
@@ -106,6 +114,8 @@ test("hardens data mutations and production delivery", async () => {
   assert.match(route, /יש לעצור את הטיימר הפעיל לפני מחיקת הפרויקט/);
   assert.match(route, /searchParams\.get\("health"\) === "1"/);
   assert.match(route, /appendAudit/);
+  assert.match(route, /loadProjectActivity/);
+  assert.match(route, /ORDER BY te\.started_at DESC LIMIT 1000/);
   assert.match(worker, /content-security-policy/);
   assert.match(worker, /no-store, max-age=0/);
   assert.match(operations, /npm run backup/);

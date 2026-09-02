@@ -114,6 +114,7 @@ type TrashState = { clients: DeletedClient[]; projects: DeletedProject[]; employ
 type AuditEntry = { id: string; actorName: string; entityType: string; entityId: string; action: string; detailsJson: string; createdAt: string };
 type ReportDataRow = { projectId: string; projectName: string; billingType: BillingType; fixedPrice: number; hourlyRate: number; totalSeconds: number; paidAmount: number; expenseAmount: number; billableExpenseAmount: number; laborCost: number };
 type StoredState = { accountMode: AccountMode; user: AccountUser; clients: Client[]; employees: Employee[]; projects: StoredProject[]; activeTimer: ActiveTimer | null; recentTimeEntries: TimeEntry[]; payments: Payment[]; expenses: Expense[]; attachments: Attachment[]; trash: TrashState; auditLog: AuditEntry[] };
+type ProjectActivity = { timeEntries: TimeEntry[]; payments: Payment[]; expenses: Expense[]; attachments: Attachment[] };
 
 
 const offlineCreationActions = new Set(["addClient", "addEmployee", "addProject", "addManualTime", "addPayment", "addExpense"]);
@@ -264,6 +265,7 @@ export default function Home() {
   const [projects, setProjects] = useState(initialProjects);
   const [activeProject, setActiveProject] = useState(initialProjects[0]);
   const [selectedDashboardProjectId, setSelectedDashboardProjectId] = useState<RecordId | null>(null);
+  const [contextProjectId, setContextProjectId] = useState<RecordId | null>(null);
   const [running, setRunning] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [filter, setFilter] = useState("הכול");
@@ -528,12 +530,40 @@ export default function Home() {
   function navigate(nextView: View) {
     setView(nextView);
     setQuery("");
+    setContextProjectId(null);
+    if (nextView === "dashboard") setSelectedDashboardProjectId(null);
   }
 
   function selectProject(project: Project) {
     setActiveProject(project);
     setSelectedDashboardProjectId(project.id);
+    setContextProjectId(project.id);
     setView("dashboard");
+  }
+
+  async function openProjectSection(project: Project, nextView: "time" | "payments" | "expenses") {
+    setActiveProject(project);
+    setSelectedDashboardProjectId(null);
+    setContextProjectId(project.id);
+    setView(nextView);
+    if (!navigator.onLine || !stateRef.current) return;
+    try {
+      const response = await fetch("/api/state?projectActivity=" + encodeURIComponent(String(project.id)));
+      if (!response.ok) return;
+      const activity = await response.json() as ProjectActivity;
+      const current = stateRef.current;
+      if (!current) return;
+      const outsideProject = <T extends { projectId: RecordId }>(rows: T[]) => rows.filter((row) => String(row.projectId) !== String(project.id));
+      applyStoredState({
+        ...current,
+        recentTimeEntries: [...activity.timeEntries, ...outsideProject(current.recentTimeEntries)],
+        payments: [...activity.payments, ...outsideProject(current.payments)],
+        expenses: [...activity.expenses, ...outsideProject(current.expenses)],
+        attachments: [...activity.attachments, ...outsideProject(current.attachments)],
+      });
+    } catch {
+      // The cached project activity remains usable while connectivity recovers.
+    }
   }
 
   async function toggleProjectTimer(project: Project) {
@@ -567,14 +597,16 @@ export default function Home() {
     } catch { setSyncState("error"); }
   }
 
-  function openTimeEntry() {
+  function openTimeEntry(projectId?: RecordId) {
     setEditingId(null);
+    if (projectId !== undefined) setContextProjectId(projectId);
     setModal("time");
   }
 
   function openEditTimeEntry(entry: TimeEntry) {
     if (!entry.endedAt) return;
     setEditingId(entry.id);
+    setContextProjectId(entry.projectId);
     setModal("time");
   }
 
@@ -583,8 +615,10 @@ export default function Home() {
     try { await saveAction("deleteTimeEntry", { id: entry.id }); } catch { setSyncState("error"); }
   }
 
-  function openPayment(payment?: Payment) {
+  function openPayment(payment?: Payment, projectId?: RecordId) {
     setEditingId(payment?.id ?? null);
+    if (payment) setContextProjectId(payment.projectId);
+    else if (projectId !== undefined) setContextProjectId(projectId);
     setModal("payment");
   }
 
@@ -595,7 +629,6 @@ export default function Home() {
       await saveAction(editingId ? "updatePayment" : "addPayment", { id: editingId, projectId: data.get("projectId"), amount: Number(data.get("amount")), paidAt: data.get("paidAt"), method: data.get("method"), note: data.get("note") });
       setModal(null);
       setEditingId(null);
-      setView("payments");
     } catch { setSyncState("error"); }
   }
 
@@ -604,8 +637,10 @@ export default function Home() {
     try { await saveAction("deletePayment", { id: payment.id }); } catch { setSyncState("error"); }
   }
 
-  function openExpense(expense?: Expense) {
+  function openExpense(expense?: Expense, projectId?: RecordId) {
     setEditingId(expense?.id ?? null);
+    if (expense) setContextProjectId(expense.projectId);
+    else if (projectId !== undefined) setContextProjectId(projectId);
     setModal("expense");
   }
 
@@ -616,7 +651,6 @@ export default function Home() {
       await saveAction(editingId ? "updateExpense" : "addExpense", { id: editingId, projectId: data.get("projectId"), amount: Number(data.get("amount")), incurredAt: data.get("incurredAt"), category: data.get("category"), billableToClient: data.get("billableToClient") === "on", note: data.get("note") });
       setModal(null);
       setEditingId(null);
-      setView("expenses");
     } catch { setSyncState("error"); }
   }
 
@@ -754,9 +788,14 @@ export default function Home() {
   const editingExpense = modal === "expense" && editingId ? expenses.find((expense) => expense.id === editingId) : undefined;
   const editingAttachment = modal === "attachmentPreview" && editingId ? attachments.find((attachment) => attachment.id === editingId) : undefined;
   const timeEntryProjects = editingTimeEntry && editingTimeEntry.userId !== currentUser.id ? projects.filter((project) => project.workerIds.includes(editingTimeEntry.userId)) : projects;
+  const contextProject = contextProjectId === null ? undefined : projects.find((project) => String(project.id) === String(contextProjectId));
+  const visibleTimeEntries = contextProject ? recentTimeEntries.filter((entry) => String(entry.projectId) === String(contextProject.id)) : recentTimeEntries;
+  const visiblePayments = contextProject ? payments.filter((payment) => String(payment.projectId) === String(contextProject.id)) : payments;
+  const visibleExpenses = contextProject ? expenses.filter((expense) => String(expense.projectId) === String(contextProject.id)) : expenses;
 
   return (
-    <main className={`app-shell${currentUser.isGuest ? " guest-demo" : ""}`}>      <a className="skip-link" href="#main-content">דילוג לתוכן הראשי</a>
+    <main className={`app-shell${currentUser.isGuest ? " guest-demo" : ""}`}>
+      <a className="skip-link" href="#main-content">דילוג לתוכן הראשי</a>
       <aside className="sidebar" aria-label="ניווט ראשי">
         <button className="brand" onClick={() => navigate("dashboard")}><Image className="brand-image" src="/app-icon.png" width={42} height={42} alt="" /><span>מנהל עבודה</span></button>
         <nav>
@@ -793,18 +832,18 @@ export default function Home() {
               </div>}
             </div>
             <button className="icon-button profile-button" onClick={() => navigate("profile")} aria-label="פתיחת הפרופיל">{currentUser.displayName.charAt(0)}</button>
-            {view === "time" ? <button className="primary-button" onClick={openTimeEntry}><span>＋</span> דיווח חדש</button> : view === "payments" ? <button className="primary-button" onClick={() => openPayment()}><span>＋</span> תשלום חדש</button> : view === "expenses" ? <button className="primary-button" onClick={() => openExpense()}><span>＋</span> הוצאה חדשה</button> : isManager && !["profile", "trash", "history", "reports"].includes(view) && <button className="primary-button" onClick={() => openNew(view === "clients" ? "client" : view === "employees" ? "employee" : "project")}><span>＋</span> {view === "clients" ? "לקוח חדש" : view === "employees" ? "עובד חדש" : "פרויקט חדש"}</button>}
+            {view === "time" ? <button className="primary-button" onClick={() => openTimeEntry()}><span>＋</span> דיווח חדש</button> : view === "payments" ? <button className="primary-button" onClick={() => openPayment()}><span>＋</span> תשלום חדש</button> : view === "expenses" ? <button className="primary-button" onClick={() => openExpense()}><span>＋</span> הוצאה חדשה</button> : isManager && !["profile", "trash", "history", "reports"].includes(view) && <button className="primary-button" onClick={() => openNew(view === "clients" ? "client" : view === "employees" ? "employee" : "project")}><span>＋</span> {view === "clients" ? "לקוח חדש" : view === "employees" ? "עובד חדש" : "פרויקט חדש"}</button>}
           </div>
         </header>
 
         {currentUser.isGuest && <div className="guest-notice" role="status"><span>◎</span><strong>מצב אורח — דני לוי</strong><p>זו סביבת הדגמה ציבורית ומשותפת. אפשר להתנסות בכל הפעולות, והנתונים עשויים להשתנות על ידי מבקרים אחרים.</p></div>}
         {inviteNotice && <div className={`invite-notice ${inviteNotice.kind}`} role="status"><span>{inviteNotice.kind === "success" ? "✓" : "!"}</span><strong>{inviteNotice.text}</strong><button onClick={() => setInviteNotice(null)} aria-label="סגירת ההודעה">×</button></div>}
 
-        {view === "dashboard" && (projects.length ? <Dashboard canManage={isManager} accountMode={accountMode} activeProject={activeProject} selectedProjectId={selectedDashboardProjectId} running={running} seconds={seconds} projects={projects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} toggleProjectTimer={(project) => void toggleProjectTimer(project)} updateProjectStatus={(project, status) => void updateProjectStatus(project, status)} stopTimer={() => void stopTimer()} selectProject={selectProject} closeProject={() => setSelectedDashboardProjectId(null)} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} showManual={openTimeEntry} /> : <NoProjectsView isManager={isManager} openNew={() => openNew("project")} />)}
-        {view === "projects" && <ProjectsView canManage={isManager} projects={visibleProjects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} activeProject={activeProject} running={running} selectProject={selectProject} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} openManual={openTimeEntry} openNew={() => openNew("project")} />}
-        {view === "time" && <TimeEntriesView entries={recentTimeEntries} openNew={openTimeEntry} editEntry={openEditTimeEntry} removeEntry={(entry) => void removeTimeEntry(entry)} />}
-        {isManager && view === "payments" && <PaymentsView projects={projects} payments={payments} openNew={() => openPayment()} editPayment={openPayment} removePayment={(payment) => void removePayment(payment)} />}
-        {isManager && view === "expenses" && <ExpensesView projects={projects} expenses={expenses} attachments={attachments} openNew={() => openExpense()} openAttachment={openAttachment} previewAttachment={openAttachmentPreview} editExpense={openExpense} removeExpense={(expense) => void removeExpense(expense)} removeAttachment={(attachment) => void removeAttachment(attachment)} />}
+        {view === "dashboard" && (projects.length ? <Dashboard canManage={isManager} accountMode={accountMode} activeProject={activeProject} selectedProjectId={selectedDashboardProjectId} running={running} seconds={seconds} projects={projects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} toggleProjectTimer={(project) => void toggleProjectTimer(project)} updateProjectStatus={(project, status) => void updateProjectStatus(project, status)} stopTimer={() => void stopTimer()} selectProject={selectProject} closeProject={() => setSelectedDashboardProjectId(null)} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} showManual={() => openTimeEntry(activeProject.id)} openProjectSection={openProjectSection} openPayment={(project) => openPayment(undefined, project.id)} openExpense={(project) => openExpense(undefined, project.id)} /> : <NoProjectsView isManager={isManager} openNew={() => openNew("project")} />)}
+        {view === "projects" && <ProjectsView canManage={isManager} projects={visibleProjects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} activeProject={activeProject} running={running} selectProject={selectProject} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} openManual={() => openTimeEntry()} openNew={() => openNew("project")} />}
+        {view === "time" && <TimeEntriesView entries={visibleTimeEntries} contextProject={contextProject} showAll={() => setContextProjectId(null)} openNew={() => openTimeEntry(contextProject?.id)} editEntry={openEditTimeEntry} removeEntry={(entry) => void removeTimeEntry(entry)} />}
+        {isManager && view === "payments" && <PaymentsView projects={projects} payments={visiblePayments} contextProject={contextProject} showAll={() => setContextProjectId(null)} openNew={() => openPayment(undefined, contextProject?.id)} editPayment={(payment) => openPayment(payment)} removePayment={(payment) => void removePayment(payment)} />}
+        {isManager && view === "expenses" && <ExpensesView projects={projects} expenses={visibleExpenses} attachments={contextProject ? attachments.filter((attachment) => String(attachment.projectId) === String(contextProject.id)) : attachments} contextProject={contextProject} showAll={() => setContextProjectId(null)} openNew={() => openExpense(undefined, contextProject?.id)} openAttachment={openAttachment} previewAttachment={openAttachmentPreview} editExpense={openExpense} removeExpense={(expense) => void removeExpense(expense)} removeAttachment={(attachment) => void removeAttachment(attachment)} />}
         {isManager && view === "clients" && <ClientsView clients={clients} query={query} setQuery={setQuery} openClientProjects={(client) => { setFilter("הכול"); setQuery(client.name); setView("projects"); }} openNew={() => openNew("client")} editClient={(client) => openEdit("client", client)} removeClient={(client) => void removeRecord("client", client.id, client.name)} />}
         {isManager && view === "employees" && <EmployeesView employees={employees} openNew={() => openNew("employee")} editEmployee={(employee) => openEdit("employee", employee)} removeEmployee={(employee) => void removeRecord("employee", employee.id, employee.name)} inviteEmployee={(employee) => void inviteEmployee(employee)} />}
         {isManager && view === "trash" && <RecycleBinView trash={trash} restoreClient={(id, restoreProjects) => void restoreRecord("client", id, restoreProjects)} restoreProject={(id) => void restoreRecord("project", id)} restoreEmployee={(id) => void restoreRecord("employee", id)} />}
@@ -825,10 +864,10 @@ export default function Home() {
         {modal === "project" && <ProjectForm accountMode={accountMode} clients={clients} employees={employees} billingType={billingType} setBillingType={setBillingType} initial={projects.find((project) => project.id === editingId)} submit={addProject} />}
         {modal === "client" && <ClientForm initial={clients.find((client) => client.id === editingId)} submit={addClient} />}
         {modal === "employee" && <EmployeeForm initial={employees.find((employee) => employee.id === editingId)} submit={addEmployee} />}
-        {modal === "time" && <ManualTimeForm projects={timeEntryProjects} initialProjectId={editingTimeEntry?.projectId ?? activeProject.id} initial={editingTimeEntry} submit={addManualTime} />}
-        {modal === "payment" && <PaymentForm projects={projects} initial={editingPayment} submit={savePayment} />}
-        {modal === "expense" && <ExpenseForm projects={projects} initial={editingExpense} submit={saveExpense} />}
-        {modal === "attachment" && <AttachmentForm projects={projects} expenses={expenses} initialExpenseId={editingId ? String(editingId) : null} submit={uploadAttachment} />}
+        {modal === "time" && <ManualTimeForm projects={timeEntryProjects} initialProjectId={editingTimeEntry?.projectId ?? contextProject?.id ?? activeProject.id} initial={editingTimeEntry} submit={addManualTime} />}
+        {modal === "payment" && <PaymentForm projects={projects} initialProjectId={contextProject?.id} initial={editingPayment} submit={savePayment} />}
+        {modal === "expense" && <ExpenseForm projects={projects} initialProjectId={contextProject?.id} initial={editingExpense} submit={saveExpense} />}
+        {modal === "attachment" && <AttachmentForm projects={projects} expenses={expenses} initialProjectId={contextProject?.id} initialExpenseId={editingId ? String(editingId) : null} submit={uploadAttachment} />}
         {modal === "attachmentPreview" && editingAttachment && <AttachmentPreview attachment={editingAttachment} />}
       </Modal>}
     </main>
@@ -840,8 +879,8 @@ const LONG_TIMER_SECONDS = 10 * 60 * 60;
 function navigationUrl(provider: "google" | "waze", address: string) {
   const destination = encodeURIComponent(address);
   return provider === "waze"
-    ? `https://www.waze.com/ul?q=${destination}&navigate=yes`
-    : `https://www.google.com/maps/dir/?api=1&destination=${destination}&travelmode=driving&dir_action=navigate`;
+    ? `https://www.waze.com/ul?q=${destination}`
+    : `https://www.google.com/maps/search/?api=1&query=${destination}`;
 }
 
 function PlayIcon() {
@@ -888,7 +927,7 @@ function ProjectToolbar({ filter, setFilter, query, setQuery }: { filter: string
   return <div className="projects-toolbar"><div className="filters" role="group" aria-label="סינון פרויקטים">{["הכול", "בביצוע", "ממתין", "הסתיים"].map((item) => <button key={item} className={filter === item ? "selected" : ""} onClick={() => setFilter(item)}>{item}</button>)}</div><label className="search-box"><span>⌕</span><input dir="auto" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="חיפוש בעברית, Deutsch or English" aria-label="חיפוש פרויקטים" /></label></div>;
 }
 
-function Dashboard({ canManage, accountMode, activeProject, selectedProjectId, running, seconds, projects, filter, setFilter, query, setQuery, toggleProjectTimer, updateProjectStatus, stopTimer, selectProject, closeProject, editProject, removeProject, showManual }: ProjectListProps & { accountMode: AccountMode; selectedProjectId: RecordId | null; seconds: number; filter: string; setFilter: (value: string) => void; query: string; setQuery: (value: string) => void; toggleProjectTimer: (project: Project) => void; updateProjectStatus: (project: Project, status: ProjectStatus) => void; stopTimer: () => void; closeProject: () => void; showManual: () => void }) {
+function Dashboard({ canManage, accountMode, activeProject, selectedProjectId, running, seconds, projects, filter, setFilter, query, setQuery, toggleProjectTimer, updateProjectStatus, stopTimer, selectProject, closeProject, editProject, removeProject, showManual, openProjectSection, openPayment, openExpense }: ProjectListProps & { accountMode: AccountMode; selectedProjectId: RecordId | null; seconds: number; filter: string; setFilter: (value: string) => void; query: string; setQuery: (value: string) => void; toggleProjectTimer: (project: Project) => void; updateProjectStatus: (project: Project, status: ProjectStatus) => void; stopTimer: () => void; closeProject: () => void; showManual: () => void; openProjectSection: (project: Project, view: "time" | "payments" | "expenses") => void; openPayment: (project: Project) => void; openExpense: (project: Project) => void }) {
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const listedProjects = projects.filter((project) => {
     const matchesStatus = filter === "הכול" || project.tag === filter;
@@ -926,16 +965,18 @@ function Dashboard({ canManage, accountMode, activeProject, selectedProjectId, r
       <div className="project-detail-address"><div className="project-address-copy"><PinIcon /><span dir="auto">{selectedProject.address || "לא הוגדרה כתובת"}</span></div>{selectedProject.address && <NavigationChooser address={selectedProject.address} label="ניווט" />}</div>
       <div className="project-detail-metrics">
         <article><span>שיטת תמחור</span><strong>{selectedProject.billing}</strong></article>
-        <article><span>שעות שנרשמו</span><strong>{selectedProject.hours}</strong></article>
-        <article><span>{!canManage || accountMode === "solo" ? "הכנסה צפויה" : "חיוב ללקוח"}</span><strong>€{selectedProject.expectedAmount.toLocaleString()}</strong></article>
-        {canManage && <article><span>התקבל בפועל</span><strong>€{selectedProject.paidAmount.toLocaleString()}</strong></article>}
-        {canManage && accountMode === "employer" && <article><span>עלויות</span><strong>€{Number(selectedProject.costAmount ?? 0).toLocaleString()}</strong></article>}
-        {canManage && accountMode === "employer" && <article className={Number(selectedProject.profitAmount ?? 0) < 0 ? "negative" : "positive"}><span>רווח צפוי</span><strong>€{Number(selectedProject.profitAmount ?? 0).toLocaleString()}</strong></article>}
-        {canManage && <article><span>יתרה פתוחה</span><strong>{selectedProject.balance}</strong></article>}
+        <button type="button" className="project-detail-metric-link" onClick={() => openProjectSection(selectedProject, "time")}><span>שעות שנרשמו</span><strong>{selectedProject.hours}</strong><small>לכל הדיווחים ←</small></button>
+        {canManage ? <button type="button" className="project-detail-metric-link" onClick={() => openProjectSection(selectedProject, "payments")}><span>{accountMode === "solo" ? "הכנסה צפויה" : "חיוב ללקוח"}</span><strong>€{selectedProject.expectedAmount.toLocaleString()}</strong><small>לפירוט הכספי ←</small></button> : <article><span>הכנסה צפויה</span><strong>€{selectedProject.expectedAmount.toLocaleString()}</strong></article>}
+        {canManage && <button type="button" className="project-detail-metric-link" onClick={() => openProjectSection(selectedProject, "payments")}><span>התקבל בפועל</span><strong>€{selectedProject.paidAmount.toLocaleString()}</strong><small>לכל התשלומים ←</small></button>}
+        {canManage && accountMode === "employer" && <button type="button" className="project-detail-metric-link" onClick={() => openProjectSection(selectedProject, "expenses")}><span>עלויות</span><strong>€{Number(selectedProject.costAmount ?? 0).toLocaleString()}</strong><small>לכל ההוצאות ←</small></button>}
+        {canManage && accountMode === "employer" && <button type="button" className={"project-detail-metric-link " + (Number(selectedProject.profitAmount ?? 0) < 0 ? "negative" : "positive")} onClick={() => openProjectSection(selectedProject, "expenses")}><span>רווח צפוי</span><strong>€{Number(selectedProject.profitAmount ?? 0).toLocaleString()}</strong><small>לפירוט העלויות ←</small></button>}
+        {canManage && <button type="button" className="project-detail-metric-link" onClick={() => openProjectSection(selectedProject, "payments")}><span>יתרה פתוחה</span><strong>{selectedProject.balance}</strong><small>לפירוט הכספי ←</small></button>}
       </div>
       <div className="project-primary-actions">
         <button type="button" className="primary-button visible-primary" onClick={() => toggleProjectTimer(selectedProject)} disabled={selectedProject.tag === "הסתיים"}><PlayIcon /> {selectedProject.tag === "הסתיים" ? "הפרויקט הסתיים" : "התחלת טיימר"}</button>
         <button type="button" className="secondary-compact" onClick={showManual}>＋ הוספת דיווח ידני</button>
+        {canManage && <button type="button" className="secondary-compact" onClick={() => openPayment(selectedProject)}>€ דיווח תשלום</button>}
+        {canManage && <button type="button" className="secondary-compact" onClick={() => openExpense(selectedProject)}>− דיווח הוצאה</button>}
       </div>
       <div className="project-management-actions">
         {canManage && <button type="button" onClick={() => editProject(selectedProject)}>עריכת פרויקט</button>}
@@ -983,30 +1024,32 @@ function TimeEntryList({ entries, editEntry, removeEntry }: { entries: TimeEntry
   return <div className="time-entry-list">{entries.map((entry) => <article key={entry.id}><div className="time-entry-icon">◷</div><div><strong dir="auto">{entry.projectName}</strong><span dir="auto">{entry.workerName} · {entry.description || (entry.source === "timer" ? "דיווח מהטיימר" : "דיווח ידני")}</span></div><time>{new Date(entry.startedAt.replace(" ", "T") + "Z").toLocaleDateString("he-IL")}</time><b>{(Number(entry.durationSeconds) / 3600).toFixed(2)} שעות</b><div className="time-entry-actions">{entry.endedAt ? <><button onClick={() => editEntry(entry)}>עריכה</button><button className="danger" onClick={() => removeEntry(entry)}>מחיקה</button></> : <span>פעיל עכשיו</span>}</div></article>)}</div>;
 }
 
-function TimeEntriesView({ entries, openNew, editEntry, removeEntry }: { entries: TimeEntry[]; openNew: () => void; editEntry: (entry: TimeEntry) => void; removeEntry: (entry: TimeEntry) => void }) {
+function TimeEntriesView({ entries, contextProject, showAll, openNew, editEntry, removeEntry }: { entries: TimeEntry[]; contextProject?: Project; showAll: () => void; openNew: () => void; editEntry: (entry: TimeEntry) => void; removeEntry: (entry: TimeEntry) => void }) {
   const totalHours = entries.reduce((sum, entry) => sum + Number(entry.durationSeconds) / 3600, 0);
-  return <section className="page-card time-management"><div className="section-head"><div><h2>כל דיווחי הזמן</h2><p>{entries.length} דיווחים · {totalHours.toFixed(2)} שעות</p></div><button className="mobile-primary" onClick={openNew}>＋ דיווח חדש</button></div>{entries.length ? <TimeEntryList entries={entries} editEntry={editEntry} removeEntry={removeEntry} /> : <div className="empty-state"><div><strong>אין עדיין דיווחי זמן</strong><span>אפשר להפעיל טיימר או להוסיף דיווח ידני.</span><button className="restore-primary" onClick={openNew}>הוספת דיווח</button></div></div>}</section>;
+  return <section className="page-card time-management"><div className="section-head"><div><h2>{contextProject ? "שעות — " + contextProject.name : "כל דיווחי הזמן"}</h2><p>{entries.length} דיווחים · {totalHours.toFixed(2)} שעות</p></div><div className="section-actions">{contextProject && <button className="secondary-compact" onClick={showAll}>הצגת כל הפרויקטים</button>}<button className="mobile-primary" onClick={openNew}>＋ דיווח חדש</button></div></div>{entries.length ? <TimeEntryList entries={entries} editEntry={editEntry} removeEntry={removeEntry} /> : <div className="empty-state"><div><strong>אין עדיין דיווחי זמן</strong><span>אפשר להפעיל טיימר או להוסיף דיווח ידני.</span><button className="restore-primary" onClick={openNew}>הוספת דיווח</button></div></div>}</section>;
 }
 
 const paymentMethodLabels: Record<Payment["method"], string> = { transfer: "העברה בנקאית", cash: "מזומן", card: "כרטיס", check: "צ׳ק", other: "אחר" };
 
-function PaymentsView({ projects, payments, openNew, editPayment, removePayment }: { projects: Project[]; payments: Payment[]; openNew: () => void; editPayment: (payment: Payment) => void; removePayment: (payment: Payment) => void }) {
-  const expected = projects.reduce((sum, project) => sum + project.expectedAmount, 0);
+function PaymentsView({ projects, payments, contextProject, showAll, openNew, editPayment, removePayment }: { projects: Project[]; payments: Payment[]; contextProject?: Project; showAll: () => void; openNew: () => void; editPayment: (payment: Payment) => void; removePayment: (payment: Payment) => void }) {
+  const relevantProjects = contextProject ? projects.filter((project) => String(project.id) === String(contextProject.id)) : projects;
+  const expected = relevantProjects.reduce((sum, project) => sum + project.expectedAmount, 0);
   const received = payments.reduce((sum, payment) => sum + payment.amount, 0);
-  return <><section className="finance-summary"><article><span>חיוב צפוי</span><strong>€{Math.round(expected).toLocaleString()}</strong></article><article><span>התקבל בפועל</span><strong>€{Math.round(received).toLocaleString()}</strong></article><article><span>יתרה פתוחה</span><strong>€{Math.round(expected - received).toLocaleString()}</strong></article></section><section className="page-card payments-card"><div className="section-head"><div><h2>תקבולים מלקוחות</h2><p>{payments.length} תשלומים שנשמרו</p></div><button className="mobile-primary" onClick={openNew}>＋ תשלום חדש</button></div>{payments.length ? <div className="payment-list">{payments.map((payment) => <article key={payment.id}><div className="payment-symbol">€</div><div><strong dir="auto">{payment.projectName}</strong><span dir="auto">{payment.clientName}{payment.note ? ` · ${payment.note}` : ""}</span></div><time>{new Date(`${payment.paidAt}T12:00:00`).toLocaleDateString("he-IL")}</time><small>{paymentMethodLabels[payment.method] ?? "אחר"}</small><b>€{payment.amount.toLocaleString()}</b><div className="payment-actions"><button onClick={() => editPayment(payment)}>עריכה</button><button className="danger" onClick={() => removePayment(payment)}>מחיקה</button></div></article>)}</div> : <div className="empty-state"><div><strong>עדיין לא נרשמו תשלומים</strong><span>הוסיפו תקבול ראשון כדי לעקוב אחר היתרה.</span><button className="restore-primary" onClick={openNew}>הוספת תשלום</button></div></div>}</section></>;
+  return <><section className="finance-summary"><article><span>חיוב צפוי</span><strong>€{Math.round(expected).toLocaleString()}</strong></article><article><span>התקבל בפועל</span><strong>€{Math.round(received).toLocaleString()}</strong></article><article><span>יתרה פתוחה</span><strong>€{Math.round(expected - received).toLocaleString()}</strong></article></section><section className="page-card payments-card"><div className="section-head"><div><h2>{contextProject ? "תשלומים — " + contextProject.name : "תקבולים מלקוחות"}</h2><p>{payments.length} תשלומים שנשמרו</p></div><div className="section-actions">{contextProject && <button className="secondary-compact" onClick={showAll}>הצגת כל הפרויקטים</button>}<button className="mobile-primary" onClick={openNew}>＋ תשלום חדש</button></div></div>{payments.length ? <div className="payment-list">{payments.map((payment) => <article key={payment.id}><div className="payment-symbol">€</div><div><strong dir="auto">{payment.projectName}</strong><span dir="auto">{payment.clientName}{payment.note ? ` · ${payment.note}` : ""}</span></div><time>{new Date(`${payment.paidAt}T12:00:00`).toLocaleDateString("he-IL")}</time><small>{paymentMethodLabels[payment.method] ?? "אחר"}</small><b>€{payment.amount.toLocaleString()}</b><div className="payment-actions"><button onClick={() => editPayment(payment)}>עריכה</button><button className="danger" onClick={() => removePayment(payment)}>מחיקה</button></div></article>)}</div> : <div className="empty-state"><div><strong>עדיין לא נרשמו תשלומים</strong><span>הוסיפו תקבול ראשון כדי לעקוב אחר היתרה.</span><button className="restore-primary" onClick={openNew}>הוספת תשלום</button></div></div>}</section></>;
 }
 
 const expenseCategoryLabels: Record<Expense["category"], string> = { materials: "חומרים", equipment: "ציוד וכלים", travel: "נסיעות", subcontractor: "קבלן משנה", other: "אחר" };
 
-function ExpensesView({ projects, expenses, attachments, openNew, openAttachment, previewAttachment, editExpense, removeExpense, removeAttachment }: { projects: Project[]; expenses: Expense[]; attachments: Attachment[]; openNew: () => void; openAttachment: (expense?: Expense) => void; previewAttachment: (attachment: Attachment) => void; editExpense: (expense: Expense) => void; removeExpense: (expense: Expense) => void; removeAttachment: (attachment: Attachment) => void }) {
-  const revenue = projects.reduce((sum, project) => sum + project.expectedAmount, 0);
+function ExpensesView({ projects, expenses, attachments, contextProject, showAll, openNew, openAttachment, previewAttachment, editExpense, removeExpense, removeAttachment }: { projects: Project[]; expenses: Expense[]; attachments: Attachment[]; contextProject?: Project; showAll: () => void; openNew: () => void; openAttachment: (expense?: Expense) => void; previewAttachment: (attachment: Attachment) => void; editExpense: (expense: Expense) => void; removeExpense: (expense: Expense) => void; removeAttachment: (attachment: Attachment) => void }) {
+  const relevantProjects = contextProject ? projects.filter((project) => String(project.id) === String(contextProject.id)) : projects;
+  const revenue = relevantProjects.reduce((sum, project) => sum + project.expectedAmount, 0);
   const directCosts = expenses.reduce((sum, expense) => sum + expense.amount, 0);
-  const laborCosts = projects.reduce((sum, project) => sum + Number(project.laborCost ?? 0), 0);
+  const laborCosts = relevantProjects.reduce((sum, project) => sum + Number(project.laborCost ?? 0), 0);
   const billable = expenses.filter((expense) => Boolean(expense.billableToClient)).reduce((sum, expense) => sum + expense.amount, 0);
   const profit = revenue - directCosts - laborCosts;
   return <>
     <section className="finance-summary profit-summary"><article><span>הכנסה צפויה</span><strong>€{Math.round(revenue).toLocaleString()}</strong></article><article><span>הוצאות ישירות</span><strong>€{Math.round(directCosts).toLocaleString()}</strong></article><article><span>עלות עובדים</span><strong>€{Math.round(laborCosts).toLocaleString()}</strong></article><article className={profit < 0 ? "negative" : "positive"}><span>רווח צפוי</span><strong>€{Math.round(profit).toLocaleString()}</strong></article></section>
-    <section className="page-card payments-card"><div className="section-head"><div><h2>הוצאות וחומרים</h2><p>{expenses.length} הוצאות · €{Math.round(billable).toLocaleString()} לחיוב הלקוחות</p></div><div className="section-actions"><button className="secondary-compact" onClick={() => openAttachment()}>▧ העלאת קבלה</button><button className="mobile-primary" onClick={openNew}>＋ הוצאה חדשה</button></div></div>{expenses.length ? <div className="payment-list expense-list">{expenses.map((expense) => {
+    <section className="page-card payments-card"><div className="section-head"><div><h2>{contextProject ? "הוצאות — " + contextProject.name : "הוצאות וחומרים"}</h2><p>{expenses.length} הוצאות · €{Math.round(billable).toLocaleString()} לחיוב הלקוחות</p></div><div className="section-actions">{contextProject && <button className="secondary-compact" onClick={showAll}>הצגת כל הפרויקטים</button>}<button className="secondary-compact" onClick={() => openAttachment()}>▧ העלאת קבלה</button><button className="mobile-primary" onClick={openNew}>＋ הוצאה חדשה</button></div></div>{expenses.length ? <div className="payment-list expense-list">{expenses.map((expense) => {
       const receiptCount = attachments.filter((attachment) => attachment.expenseId === expense.id).length;
       return <article key={expense.id}><div className="payment-symbol expense-symbol">−</div><div><strong dir="auto">{expense.projectName}</strong><span dir="auto">{expense.clientName}{expense.note ? ` · ${expense.note}` : ""}</span></div><time>{new Date(`${expense.incurredAt}T12:00:00`).toLocaleDateString("he-IL")}</time><small>{expenseCategoryLabels[expense.category] ?? "אחר"}</small><b>€{expense.amount.toLocaleString()}</b><div className="payment-actions"><button onClick={() => openAttachment(expense)}>קבלה{receiptCount ? ` (${receiptCount})` : ""}</button><button onClick={() => editExpense(expense)}>עריכה</button><button className="danger" onClick={() => removeExpense(expense)}>מחיקה</button></div>{Boolean(expense.billableToClient) && <span className="billable-badge">לחיוב הלקוח</span>}</article>;
     })}</div> : <div className="empty-state"><div><strong>עדיין לא נרשמו הוצאות</strong><span>הוסיפו חומרים, ציוד או עלות אחרת כדי לראות רווחיות אמיתית.</span><button className="restore-primary" onClick={openNew}>הוספת הוצאה</button></div></div>}</section>
@@ -1207,8 +1250,8 @@ function ManualTimeForm({ projects, initialProjectId, initial, submit }: { proje
   return <form className="entity-form" onSubmit={submit}><div className="form-grid"><Field label="פרויקט" wide><select name="projectId" required defaultValue={String(initialProjectId)}>{projects.map((project) => <option key={project.id} value={String(project.id)}>{project.name}</option>)}</select></Field><Field label="תאריך"><input name="date" dir="ltr" type="date" required defaultValue={initialDate} /></Field><Field label="מספר שעות"><input name="hours" dir="ltr" type="number" min="0.02" max="24" step="0.01" required defaultValue={initial ? (Number(initial.durationSeconds) / 3600).toFixed(2) : undefined} placeholder="לדוגמה: 2.5" /></Field><Field label="מה בוצע?" wide><textarea name="description" dir="auto" rows={3} defaultValue={initial?.description} placeholder="תיאור קצר בעברית, Deutsch or English" /></Field></div><p className="form-note">הזמן נשמר במדויק ומשמש כך גם לחישוב הכספי, ללא עיגול אוטומטי.</p><FormActions label={initial ? "שמירת השינויים" : "שמירת דיווח"} /></form>;
 }
 
-function PaymentForm({ projects, initial, submit }: { projects: Project[]; initial?: Payment; submit: (event: FormEvent<HTMLFormElement>) => void }) {
-  return <form className="entity-form" onSubmit={submit}><div className="form-grid"><Field label="פרויקט" wide><select name="projectId" required defaultValue={initial?.projectId ?? ""}><option value="" disabled>בחירת פרויקט</option>{projects.map((project) => <option key={project.id} value={String(project.id)}>{project.name} · {project.client}</option>)}</select></Field><Field label="סכום שהתקבל (EUR)"><input name="amount" dir="ltr" type="number" min="0.01" step="0.01" required defaultValue={initial?.amount} placeholder="0.00" /></Field><Field label="תאריך התשלום"><input name="paidAt" dir="ltr" type="date" required defaultValue={initial?.paidAt ?? new Date().toISOString().slice(0, 10)} /></Field><Field label="אמצעי תשלום"><select name="method" required defaultValue={initial?.method ?? "transfer"}>{Object.entries(paymentMethodLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field><Field label="הערה" wide><textarea name="note" dir="auto" rows={3} defaultValue={initial?.note} placeholder="מספר אסמכתא, פירוט או הערה בעברית, Deutsch or English" /></Field></div><p className="form-note">התשלום יקוזז מהיתרה הפתוחה של הפרויקט ויישמר ביומן השינויים.</p><FormActions label={initial ? "שמירת השינויים" : "שמירת תשלום"} /></form>;
+function PaymentForm({ projects, initialProjectId, initial, submit }: { projects: Project[]; initialProjectId?: RecordId; initial?: Payment; submit: (event: FormEvent<HTMLFormElement>) => void }) {
+  return <form className="entity-form" onSubmit={submit}><div className="form-grid"><Field label="פרויקט" wide><select name="projectId" required defaultValue={String(initial?.projectId ?? initialProjectId ?? "")}><option value="" disabled>בחירת פרויקט</option>{projects.map((project) => <option key={project.id} value={String(project.id)}>{project.name} · {project.client}</option>)}</select></Field><Field label="סכום שהתקבל (EUR)"><input name="amount" dir="ltr" type="number" min="0.01" step="0.01" required defaultValue={initial?.amount} placeholder="0.00" /></Field><Field label="תאריך התשלום"><input name="paidAt" dir="ltr" type="date" required defaultValue={initial?.paidAt ?? new Date().toISOString().slice(0, 10)} /></Field><Field label="אמצעי תשלום"><select name="method" required defaultValue={initial?.method ?? "transfer"}>{Object.entries(paymentMethodLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field><Field label="הערה" wide><textarea name="note" dir="auto" rows={3} defaultValue={initial?.note} placeholder="מספר אסמכתא, פירוט או הערה בעברית, Deutsch or English" /></Field></div><p className="form-note">התשלום יקוזז מהיתרה הפתוחה של הפרויקט ויישמר ביומן השינויים.</p><FormActions label={initial ? "שמירת השינויים" : "שמירת תשלום"} /></form>;
 }
 
 function AttachmentPreview({ attachment }: { attachment: Attachment }) {
@@ -1218,9 +1261,9 @@ function AttachmentPreview({ attachment }: { attachment: Attachment }) {
   return <div className="attachment-preview"><div className="attachment-preview-stage">{isPdf ? <iframe src={url} title={"תצוגה מקדימה של " + attachment.fileName} /> : isPreviewableImage ? <Image src={url} alt={attachment.fileName} width={960} height={720} unoptimized /> : <div className="attachment-preview-fallback"><span>▧</span><strong>לא ניתן להציג את סוג הקובץ הזה בדפדפן</strong><small>אפשר להוריד אותו ולפתוח באפליקציה מתאימה.</small></div>}</div><div className="attachment-preview-details"><div><strong dir="auto">{attachment.fileName}</strong><span dir="auto">{attachment.projectName}{attachment.expenseId ? " · משויך להוצאה" : " · קובץ פרויקט"}</span></div><a className="primary-button" href={url + "&download=1"}>הורדת הקובץ</a></div></div>;
 }
 
-function AttachmentForm({ projects, expenses, initialExpenseId, submit }: { projects: Project[]; expenses: Expense[]; initialExpenseId: string | null; submit: (event: FormEvent<HTMLFormElement>) => void }) {
+function AttachmentForm({ projects, expenses, initialProjectId, initialExpenseId, submit }: { projects: Project[]; expenses: Expense[]; initialProjectId?: RecordId; initialExpenseId: string | null; submit: (event: FormEvent<HTMLFormElement>) => void }) {
   const initialExpense = initialExpenseId ? expenses.find((expense) => expense.id === initialExpenseId) : undefined;
-  const [projectId, setProjectId] = useState(String(initialExpense?.projectId ?? projects[0]?.id ?? ""));
+  const [projectId, setProjectId] = useState(String(initialExpense?.projectId ?? initialProjectId ?? projects[0]?.id ?? ""));
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const previewUrl = useMemo(() => selectedFile ? URL.createObjectURL(selectedFile) : "", [selectedFile]);
   const matchingExpenses = expenses.filter((expense) => String(expense.projectId) === projectId);
@@ -1233,8 +1276,8 @@ function AttachmentForm({ projects, expenses, initialExpenseId, submit }: { proj
   return <form className="entity-form attachment-form" onSubmit={submit} encType="multipart/form-data"><div className="form-grid"><Field label="פרויקט" wide><select name="projectId" required value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="" disabled>בחירת פרויקט</option>{projects.map((project) => <option key={project.id} value={String(project.id)}>{project.name} · {project.client}</option>)}</select></Field><Field label="שיוך להוצאה" wide><select name="expenseId" defaultValue={initialExpense?.id ?? ""}><option value="">קובץ כללי של הפרויקט</option>{matchingExpenses.map((expense) => <option key={expense.id} value={expense.id}>{expenseCategoryLabels[expense.category]} · €{expense.amount.toLocaleString()} · {new Date(expense.incurredAt + "T12:00:00").toLocaleDateString("he-IL")}</option>)}</select></Field><label className={"upload-dropzone" + (selectedFile ? " has-file" : "")} htmlFor="attachmentFile"><input id="attachmentFile" name="file" type="file" accept=".jpg,.jpeg,.png,.webp,.heic,.heif,.pdf,image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf" required onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)} />{selectedFile ? <div className="selected-file"><div className="selected-file-preview">{previewUrl && isPdf ? <iframe src={previewUrl} title="תצוגה מקדימה של הקובץ שנבחר" /> : previewUrl && isPreviewableImage ? <Image src={previewUrl} alt="" width={420} height={260} unoptimized /> : <span>▧</span>}</div><div className="selected-file-info"><strong dir="auto">{selectedFile.name}</strong><small>{(selectedFile.size / 1024 / 1024).toFixed(2)} MB</small><b>בחירת קובץ אחר</b></div></div> : <><span>▧</span><strong>צילום קבלה או בחירת קובץ</strong><small>JPG, PNG, WEBP, HEIC או PDF · עד 10MB</small></>}</label></div><p className="form-note">הקובץ נשמר באחסון הפרטי של העסק ורק מנהל החשבון יכול לפתוח אותו.</p><footer className="form-actions"><span>{selectedFile ? "הקובץ מוכן להעלאה" : "בטלפון אפשר לבחור מצלמה מתוך בורר הקבצים"}</span><button type="submit" className="primary-button" disabled={!selectedFile}>העלאת הקובץ</button></footer></form>;
 }
 
-function ExpenseForm({ projects, initial, submit }: { projects: Project[]; initial?: Expense; submit: (event: FormEvent<HTMLFormElement>) => void }) {
-  return <form className="entity-form" onSubmit={submit}><div className="form-grid"><Field label="פרויקט" wide><select name="projectId" required defaultValue={initial?.projectId ?? ""}><option value="" disabled>בחירת פרויקט</option>{projects.map((project) => <option key={project.id} value={String(project.id)}>{project.name} · {project.client}</option>)}</select></Field><Field label="סכום ההוצאה (EUR)"><input name="amount" dir="ltr" type="number" min="0.01" step="0.01" required defaultValue={initial?.amount} placeholder="0.00" /></Field><Field label="תאריך ההוצאה"><input name="incurredAt" dir="ltr" type="date" required defaultValue={initial?.incurredAt ?? new Date().toISOString().slice(0, 10)} /></Field><Field label="קטגוריה"><select name="category" required defaultValue={initial?.category ?? "materials"}>{Object.entries(expenseCategoryLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field><Field label="פירוט" wide><textarea name="note" dir="auto" rows={3} defaultValue={initial?.note} placeholder="שם החומר, ספק או הערה בעברית, Deutsch or English" /></Field><label className="billable-option" htmlFor="billableToClient" aria-label="לחייב את הלקוח בהוצאה"><input id="billableToClient" name="billableToClient" type="checkbox" defaultChecked={Boolean(initial?.billableToClient)} /><span><strong>לחייב את הלקוח בהוצאה</strong><small>הסכום יתווסף לחיוב הצפוי של הפרויקט.</small></span></label></div><p className="form-note">ההוצאה תיכלל בעלות וברווחיות הפרויקט ותישמר ביומן השינויים.</p><FormActions label={initial ? "שמירת השינויים" : "שמירת הוצאה"} /></form>;
+function ExpenseForm({ projects, initialProjectId, initial, submit }: { projects: Project[]; initialProjectId?: RecordId; initial?: Expense; submit: (event: FormEvent<HTMLFormElement>) => void }) {
+  return <form className="entity-form" onSubmit={submit}><div className="form-grid"><Field label="פרויקט" wide><select name="projectId" required defaultValue={String(initial?.projectId ?? initialProjectId ?? "")}><option value="" disabled>בחירת פרויקט</option>{projects.map((project) => <option key={project.id} value={String(project.id)}>{project.name} · {project.client}</option>)}</select></Field><Field label="סכום ההוצאה (EUR)"><input name="amount" dir="ltr" type="number" min="0.01" step="0.01" required defaultValue={initial?.amount} placeholder="0.00" /></Field><Field label="תאריך ההוצאה"><input name="incurredAt" dir="ltr" type="date" required defaultValue={initial?.incurredAt ?? new Date().toISOString().slice(0, 10)} /></Field><Field label="קטגוריה"><select name="category" required defaultValue={initial?.category ?? "materials"}>{Object.entries(expenseCategoryLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field><Field label="פירוט" wide><textarea name="note" dir="auto" rows={3} defaultValue={initial?.note} placeholder="שם החומר, ספק או הערה בעברית, Deutsch or English" /></Field><label className="billable-option" htmlFor="billableToClient" aria-label="לחייב את הלקוח בהוצאה"><input id="billableToClient" name="billableToClient" type="checkbox" defaultChecked={initial ? Boolean(initial.billableToClient) : true} /><span><strong>לחייב את הלקוח בהוצאה</strong><small>הסכום יתווסף לחיוב הצפוי של הפרויקט.</small></span></label></div><p className="form-note">ההוצאה תיכלל בעלות וברווחיות הפרויקט ותישמר ביומן השינויים.</p><FormActions label={initial ? "שמירת השינויים" : "שמירת הוצאה"} /></form>;
 }
 
 function ProjectForm({ accountMode, clients, employees, billingType, setBillingType, initial, submit }: { accountMode: AccountMode; clients: Client[]; employees: Employee[]; billingType: BillingType; setBillingType: (type: BillingType) => void; initial?: Project; submit: (event: FormEvent<HTMLFormElement>) => void }) {
