@@ -50,7 +50,7 @@ input, textarea, select { font: inherit; unicode-bidi: plaintext; text-align: st
 ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
 
 /* App Layout Shell */
-.app-shell { min-height: 100vh; display: flex; direction: rtl; }
+.app-shell { min-height: 100vh; display: flex; direction: rtl; overflow-y: auto; overflow-x: hidden; }
 
 /* Sidebar (High-End Dark Forest Theme) */
 .sidebar {
@@ -76,7 +76,8 @@ input, textarea, select { font: inherit; unicode-bidi: plaintext; text-align: st
 .sidebar nav { display: grid; gap: 8px; }
 .nav-item {
   color: #94a3b8; text-decoration: none; padding: 12px 14px; display: flex; align-items: center; gap: 13px;
-  border-radius: var(--radius-md); font-size: 16px; font-weight: 500; border: 1px solid transparent;
+  border-radius: var(--radius-md); font-size: 16px; font-weight: 500; border: 0; background: transparent;
+  width: 100%; text-align: right; cursor: pointer; justify-content: flex-start;
 }
 .nav-item span { width: 20px; text-align: center; font-size: 19px; opacity: 0.8; }
 .nav-item:hover { color: #fff; background: rgba(255, 255, 255, 0.05); }
@@ -440,6 +441,9 @@ input, textarea, select { font: inherit; unicode-bidi: plaintext; text-align: st
   .section-head h2 { font-size: 22px; }
   .section-actions { width: 100%; justify-content: space-between; }
   
+  /* Core Page Card Mobile padding fixes (Breathing room, no squeezing!) */
+  .page-card { padding: 16px 12px; border-radius: var(--radius-md); margin-bottom: 16px; box-shadow: var(--shadow-sm); }
+  
   .project-overview-stats { grid-template-columns: repeat(3, 1fr); gap: 8px; }
   .project-overview-stats article { min-height: 94px; padding: 12px 8px; }
   .project-overview-stats strong { font-size: 22px; }
@@ -449,6 +453,10 @@ input, textarea, select { font: inherit; unicode-bidi: plaintext; text-align: st
   .project-row .status, .project-row .project-metric { display: none; }
   .project-row .start-button { grid-column: 2/4; width: 100%; margin-top: 4px; }
   .project-row .record-actions { grid-column: 1/4; margin-top: 8px; border-top: 1px solid var(--line); padding-top: 10px; width: 100%; justify-content: space-between; }
+  
+  /* Projects Toolbar Mobile Stack (Removes horizontal scroll!) */
+  .projects-toolbar { flex-direction: column; align-items: stretch; gap: 12px; width: 100%; }
+  .projects-toolbar .search-box input { width: 100%; }
   
   /* Dashboard Home Cards mobile fixes */
   .dashboard-project-card { padding: 16px 18px; }
@@ -470,7 +478,7 @@ input, textarea, select { font: inherit; unicode-bidi: plaintext; text-align: st
   .timer-actions { justify-content: flex-start; }
   
   /* Modal Margins & Fields Squeeze Fixes (No text cutoff!) */
-  .modal-overlay { padding: 10px; }
+  .modal-backdrop { padding: 10px; }
   .modal-panel { max-width: 100%; width: 100%; }
   .modal-body { padding: 18px 16px; }
   .form-row, .form-grid { grid-template-columns: 1fr !important; gap: 14px !important; }
@@ -479,6 +487,12 @@ input, textarea, select { font: inherit; unicode-bidi: plaintext; text-align: st
   .form-actions button { width: 100%; }
   .billing-options { grid-template-columns: 1fr; gap: 8px; }
   .worker-select-grid { grid-template-columns: 1fr; }
+  
+  /* Profile layout mobile improvements */
+  .profile-intro { flex-direction: column; text-align: center; gap: 12px; }
+  .sign-out-link { margin-right: 0; margin-top: 8px; width: 100%; text-align: center; }
+  .profile-quick-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .account-mode-options { grid-template-columns: 1fr; }
 }
 
 .project-management-actions { margin-top: 16px; padding-top: 16px; display: flex; gap: 8px; border-top: 1px solid #f1f5f9; }
