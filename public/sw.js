@@ -1,8 +1,21 @@
-const CACHE_NAME = "menahel-avoda-shell-v1";
-const APP_SHELL = ["/", "/app-icon.png", "/manifest.webmanifest"];
+const CACHE_NAME = "menahel-avoda-shell-v3";
+const APP_SHELL = ["/app-icon.png", "/manifest.webmanifest"];
+
+async function cacheApplicationShell() {
+  const cache = await caches.open(CACHE_NAME);
+  const shellResponse = await fetch("/");
+  if (!shellResponse.ok) throw new Error("Application shell request failed");
+  await cache.put("/", shellResponse.clone());
+  const html = await shellResponse.text();
+  const assets = [...html.matchAll(/(?:src|href)="(\/_next\/static\/[^"]+)"/g)].map((match) => match[1]);
+  await Promise.all([
+    ...APP_SHELL.map((url) => cache.add(url)),
+    ...[...new Set(assets)].map((url) => cache.add(url)),
+  ]);
+}
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)).then(() => self.skipWaiting()));
+  event.waitUntil(cacheApplicationShell().then(() => self.skipWaiting()));
 });
 
 self.addEventListener("activate", (event) => {

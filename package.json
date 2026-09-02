@@ -11,6 +11,9 @@
     "start": "vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "check": "npm run lint && npm test",
+    "deploy": "npm test && wrangler deploy --config dist/server/wrangler.json",
+    "backup": "powershell -ExecutionPolicy Bypass -File scripts/backup.ps1",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
