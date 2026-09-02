@@ -275,6 +275,40 @@ input, textarea, select { font: inherit; unicode-bidi: plaintext; text-align: st
 .payment-list small { font-size: 12px; color: var(--muted); }
 .payment-list b { font-size: 16px; font-weight: 800; color: var(--ink); direction: ltr; }
 
+/* Row & List Action Buttons Styling (Eradicates unstyled browser buttons) */
+.payment-actions, .time-entry-actions { display: flex; gap: 6px; margin-right: auto; align-items: center; }
+.payment-actions button, .time-entry-actions button { padding: 4px 12px; border-radius: var(--radius-sm); background: #f8fafc; border: 1px solid var(--line); font-size: 11px; font-weight: 700; color: #475569; cursor: pointer; transition: var(--transition); }
+.payment-actions button:hover, .time-entry-actions button:hover { border-color: rgba(5, 150, 105, 0.3); background: var(--green-light); color: var(--green); }
+.payment-actions button.danger, .time-entry-actions button.danger { color: var(--red); }
+.payment-actions button.danger:hover, .time-entry-actions button.danger:hover { background: var(--red-light); border-color: #fca5a5; color: var(--red); }
+
+.record-actions { display: flex; gap: 6px; margin-right: auto; align-items: center; }
+.record-actions button { padding: 4px 12px; border-radius: var(--radius-sm); background: #f8fafc; border: 1px solid var(--line); font-size: 11px; font-weight: 700; color: #475569; cursor: pointer; transition: var(--transition); }
+.record-actions button:hover { border-color: rgba(5, 150, 105, 0.3); background: var(--green-light); color: var(--green); }
+.record-actions button.danger { color: var(--red); }
+.record-actions button.danger:hover { background: var(--red-light); border-color: #fca5a5; color: var(--red); }
+
+.card-actions { display: flex; gap: 6px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); width: 100%; }
+.card-actions button { flex: 1; height: 32px; font-size: 11px; font-weight: 700; border-radius: var(--radius-sm); background: #f8fafc; border: 1px solid var(--line); color: #475569; cursor: pointer; transition: var(--transition); }
+.card-actions button:hover { border-color: #cbd5e1; background: #f1f5f9; color: var(--ink); }
+.card-actions button.danger { color: var(--red); }
+.card-actions button.danger:hover { border-color: #fca5a5; background: var(--red-light); color: var(--red); }
+
+.invite-button { width: 100%; height: 34px; border-radius: var(--radius-sm); background: var(--green); color: #fff; font-size: 11px; font-weight: 700; margin-top: 10px; display: grid; place-items: center; cursor: pointer; text-decoration: none; transition: var(--transition); }
+.invite-button:hover { background: var(--green-dark); }
+.invite-button:disabled { background: #cbd5e1; color: #94a3b8; cursor: not-allowed; transform: none; box-shadow: none; }
+
+.client-open-button { padding: 0; border: 0; background: transparent; cursor: pointer; display: block; border-radius: 50%; }
+
+.project-management-actions button { padding: 6px 14px; border-radius: var(--radius-sm); border: 1px solid var(--line); background: #fff; font-size: 12px; font-weight: 700; color: #475569; cursor: pointer; transition: var(--transition); }
+.project-management-actions button:hover { border-color: #cbd5e1; background: #f8fafc; color: var(--ink); }
+.project-management-actions button.danger { color: var(--red); }
+.project-management-actions button.danger:hover { background: var(--red-light); border-color: #fca5a5; color: var(--red); }
+
+/* Reports filter button sidebar fixes */
+.reports-filter-group button { width: 100%; border: 0; text-align: right; cursor: pointer; display: block; transition: var(--transition); }
+
+
 /* Modals & Dialogs */
 .modal-backdrop { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.4); backdrop-filter: blur(8px); z-index: 100; display: grid; place-items: center; padding: 20px; animation: modalFadeIn 0.25s ease-out; }
 @keyframes modalFadeIn { from { opacity: 0; } to { opacity: 1; } }
