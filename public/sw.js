@@ -7,7 +7,7 @@ async function cacheApplicationShell() {
   if (!shellResponse.ok) throw new Error("Application shell request failed");
   await cache.put("/", shellResponse.clone());
   const html = await shellResponse.text();
-  const assets = [...html.matchAll(/(?:src|href)="(\/_next\/[^"]+)"/g)].map((match) => match[1]);
+  const assets = [...html.matchAll(/(?:src|href)="(\/_next\/static\/[^"]+)"/g)].map((match) => match[1]);
   await Promise.all([
     ...APP_SHELL.map((url) => cache.add(url)),
     ...[...new Set(assets)].map((url) => cache.add(url)),
