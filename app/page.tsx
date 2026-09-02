@@ -351,6 +351,7 @@ export default function Home() {
     applyStoredState(optimistic);
 
     try {
+      await writeCachedState(optimistic);
       await enqueueOperation(operation);
     } catch (error) {
       applyStoredState(current);

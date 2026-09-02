@@ -56,6 +56,7 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.match(page, /eventStartedFromControl/);
   assert.match(page, /reflect the action immediately/);
   assert.ok(page.indexOf('applyStoredState(optimistic)') < page.indexOf('await enqueueOperation(operation)'), 'optimistic state must render before queue persistence');
+  assert.ok(page.indexOf('await writeCachedState(optimistic)') < page.indexOf('await enqueueOperation(operation)'), 'cached state must be durable before queue completion');
   assert.match(page, /openClientProjects/);
   assert.match(page, /לחיצה על לקוח מציגה את הפרויקטים שלו/);
   assert.match(page, /"sync-icon-button " \+/);
@@ -80,6 +81,8 @@ test("ships an offline shell and an idempotent operation migration", async () =>
   assert.match(serviceWorker, /CACHE_NAME/);
   assert.match(serviceWorker, /url\.pathname\.startsWith\("\/api\/"\)/);
   assert.match(serviceWorker, /caches\.match\(request\)/);
+  assert.match(serviceWorker, /matchAll/);
+  assert.match(serviceWorker, /\\\/_next\\\//);
 
   const manifest = JSON.parse(await readFile(new URL("../public/manifest.webmanifest", import.meta.url), "utf8"));
   assert.equal(manifest.name, "מנהל עבודה");
