@@ -79,8 +79,57 @@ function formatTime(seconds: number) {
   return `${hours}:${minutes}:${secs}`;
 }
 
+function formatDurationOnType(val: string): string {
+  const digits = val.replace(/\D/g, "").replace(/^0+/, "");
+  if (!digits) return "00:00:00";
+  
+  if (digits.length <= 6) {
+    const padded = digits.padStart(6, "0");
+    const hh = padded.slice(0, 2);
+    const mm = padded.slice(2, 4);
+    const ss = padded.slice(4, 6);
+    return `${hh}:${mm}:${ss}`;
+  } else {
+    const ss = digits.slice(-2);
+    const mm = digits.slice(-4, -2);
+    const hh = digits.slice(0, -4);
+    return `${hh}:${mm}:${ss}`;
+  }
+}
+
+function renderFormattedDurationWithOpacity(durationStr: string) {
+  const digitsOnly = durationStr.replace(/\D/g, "").replace(/^0+/, "");
+  const activeCount = digitsOnly.length;
+  
+  const chars = durationStr.split("");
+  let digitCounter = 0;
+  
+  const renderedSpans = [];
+  
+  for (let i = chars.length - 1; i >= 0; i--) {
+    const char = chars[i];
+    let isActive = false;
+    
+    if (/\d/.test(char)) {
+      digitCounter++;
+      isActive = digitCounter <= activeCount;
+    } else if (char === ":") {
+      isActive = digitCounter < activeCount;
+    }
+    
+    renderedSpans.unshift(
+      <span key={i} className={isActive ? "char-active" : "char-inactive"}>
+        {char}
+      </span>
+    );
+  }
+  
+  return renderedSpans;
+}
+
 function parseDurationInput(value: FormDataEntryValue | null) {
-  const match = String(value ?? "").trim().match(/^(\d{1,3}):([0-5]\d):([0-5]\d)$/);
+  const formatted = formatDurationOnType(String(value ?? ""));
+  const match = formatted.trim().match(/^(\d{1,10}):([0-5]\d):([0-5]\d)$/);
   if (!match) return null;
   const totalSeconds = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
   return totalSeconds > 0 ? totalSeconds : null;
@@ -852,7 +901,7 @@ export default function Home() {
         </header>
 
         {currentUser.isGuest && <div className="guest-notice" role="status"><span>◎</span><strong>מצב אורח — דני לוי</strong><p>זו סביבת הדגמה ציבורית ומשותפת. אפשר להתנסות בכל הפעולות, והנתונים עשויים להשתנות על ידי מבקרים אחרים.</p></div>}
-        {inviteNotice && <div className={`invite-notice ${inviteNotice.kind}`} role="status"><span>{inviteNotice.kind === "success" ? "✓" : "!"}</span><strong>{inviteNotice.text}</strong><button onClick={() => setInviteNotice(null)} aria-label="סגירת ההודעה">×</button></div>}
+        {!modal && inviteNotice && <div className={`invite-notice ${inviteNotice.kind}`} role="status"><span>{inviteNotice.kind === "success" ? "✓" : "!"}</span><strong>{inviteNotice.text}</strong><button onClick={() => setInviteNotice(null)} aria-label="סגירת ההודעה">×</button></div>}
 
         {view === "dashboard" && (projects.length ? <Dashboard canManage={isManager} accountMode={accountMode} activeProject={activeProject} selectedProjectId={selectedDashboardProjectId} running={running} seconds={seconds} projects={projects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} toggleProjectTimer={(project) => void toggleProjectTimer(project)} updateProjectStatus={(project, status) => void updateProjectStatus(project, status)} stopTimer={() => void stopTimer()} selectProject={selectProject} closeProject={() => setSelectedDashboardProjectId(null)} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} showManual={() => openTimeEntry(activeProject.id)} openNew={() => openNew("project")} openProjectSection={openProjectSection} openPayment={(project) => openPayment(undefined, project.id)} openExpense={(project) => openExpense(undefined, project.id)} /> : <NoProjectsView isManager={isManager} openNew={() => openNew("project")} />)}
         {view === "projects" && <ProjectsView canManage={isManager} projects={visibleProjects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} activeProject={activeProject} running={running} selectProject={selectProject} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} openNew={() => openNew("project")} />}
@@ -875,7 +924,7 @@ export default function Home() {
         <button className={view === "profile" || ["expenses", "clients", "employees", "history", "reports", "trash"].includes(view) ? "active" : ""} onClick={() => navigate("profile")}><span>•••</span>עוד</button>
       </nav>
 
-      {modal && <Modal title={modal === "time" ? editingId ? "עריכת דיווח זמן" : "דיווח שעות ידני" : modal === "payment" ? editingId ? "עריכת תשלום" : "תשלום חדש" : modal === "expense" ? editingId ? "עריכת הוצאה" : "הוצאה חדשה" : modal === "attachment" ? "העלאת קבלה או תמונה" : modal === "attachmentPreview" ? "צפייה בקובץ" : `${editingId ? "עריכת" : modal === "project" ? "פרויקט" : modal === "client" ? "לקוח" : "עובד"} ${editingId ? (modal === "project" ? "פרויקט" : modal === "client" ? "לקוח" : "עובד") : "חדש"}`} close={() => { setModal(null); setEditingId(null); }}>
+      {modal && <Modal title={modal === "time" ? editingId ? "עריכת דיווח זמן" : "דיווח שעות ידני" : modal === "payment" ? editingId ? "עריכת תשלום" : "תשלום חדש" : modal === "expense" ? editingId ? "עריכת הוצאה" : "הוצאה חדשה" : modal === "attachment" ? "העלאת קבלה או תמונה" : modal === "attachmentPreview" ? "צפייה בקובץ" : `${editingId ? "עריכת" : modal === "project" ? "פרויקט" : modal === "client" ? "לקוח" : "עובד"} ${editingId ? (modal === "project" ? "פרויקט" : modal === "client" ? "לקוח" : "עובד") : "חדש"}`} close={() => { setModal(null); setEditingId(null); setInviteNotice(null); }} inviteNotice={inviteNotice} setInviteNotice={setInviteNotice}>
         {modal === "project" && <ProjectForm accountMode={accountMode} clients={clients} employees={employees} billingType={billingType} setBillingType={setBillingType} initial={projects.find((project) => project.id === editingId)} submit={addProject} />}
         {modal === "client" && <ClientForm initial={clients.find((client) => client.id === editingId)} submit={addClient} />}
         {modal === "employee" && <EmployeeForm initial={employees.find((employee) => employee.id === editingId)} submit={addEmployee} />}
@@ -1223,7 +1272,7 @@ function ProfileView({ user, accountMode, setAccountMode, openReports, openHisto
   </section>;
 }
 
-function Modal({ title, close, children }: { title: string; close: () => void; children: React.ReactNode }) {
+function Modal({ title, close, children, inviteNotice, setInviteNotice }: { title: string; close: () => void; children: React.ReactNode; inviteNotice?: { kind: "success" | "error"; text: string } | null; setInviteNotice?: (notice: { kind: "success" | "error"; text: string } | null) => void }) {
   const panelRef = useRef<HTMLElement>(null);
   useEffect(() => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -1253,7 +1302,7 @@ function Modal({ title, close, children }: { title: string; close: () => void; c
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   }
 
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }} onKeyDown={handleKeyDown}><section ref={panelRef} className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabIndex={-1}><header><div><p>מנהל עבודה</p><h2 id="modal-title">{title}</h2></div><button type="button" onClick={close} aria-label="סגירה">×</button></header><div className="modal-body">{children}</div></section></div>;
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }} onKeyDown={handleKeyDown}><section ref={panelRef} className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabIndex={-1}><header><div><p>מנהל עבודה</p><h2 id="modal-title">{title}</h2></div><button type="button" onClick={close} aria-label="סגירה">×</button></header>{inviteNotice && <div className={`invite-notice ${inviteNotice.kind}`} style={{ margin: "10px 18px", maxWidth: "none" }} role="status"><span>{inviteNotice.kind === "success" ? "✓" : "!"}</span><strong>{inviteNotice.text}</strong><button onClick={() => setInviteNotice?.(null)} aria-label="סגירת ההודעה">×</button></div>}<div className="modal-body">{children}</div></section></div>;
 }
 
 function Field({ label, children, wide = false }: { label: string; children: React.ReactNode; wide?: boolean }) {
@@ -1270,7 +1319,9 @@ function EmployeeForm({ initial, submit }: { initial?: Employee; submit: (event:
 
 function ManualTimeForm({ projects, initialProjectId, initial, submit }: { projects: Project[]; initialProjectId: RecordId; initial?: TimeEntry; submit: (event: FormEvent<HTMLFormElement>) => void }) {
   const initialDate = initial?.startedAt.slice(0, 10) ?? new Date().toISOString().slice(0, 10);
-  return <form className="entity-form" onSubmit={submit}><div className="form-grid"><Field label="פרויקט" wide><select name="projectId" required defaultValue={String(initialProjectId)}>{projects.map((project) => <option key={project.id} value={String(project.id)}>{project.name}</option>)}</select></Field><Field label="תאריך"><input name="date" dir="ltr" type="date" required defaultValue={initialDate} /></Field><Field label="משך זמן (שעות:דקות:שניות)"><input className="duration-input" name="duration" dir="ltr" type="text" inputMode="numeric" pattern="\d{1,3}:[0-5]\d:[0-5]\d" required defaultValue={initial ? formatTime(Number(initial.durationSeconds)) : "00:00:00"} placeholder="00:00:00" aria-describedby="duration-help" /></Field><Field label="מה בוצע?" wide><textarea name="description" dir="auto" rows={3} defaultValue={initial?.description} placeholder="תיאור קצר בעברית, Deutsch or English" /></Field></div><p className="form-note" id="duration-help">הזינו שעות, דקות ושניות בפורמט 00:00:00. הזמן נשמר במדויק ללא עיגול.</p><FormActions label={initial ? "שמירת השינויים" : "שמירת דיווח"} /></form>;
+  const [duration, setDuration] = useState(initial ? formatTime(Number(initial.durationSeconds)) : "00:00:00");
+
+  return <form className="entity-form" onSubmit={submit}><div className="form-grid half-half-mobile"><Field label="פרויקט" wide><select name="projectId" required defaultValue={String(initialProjectId)}>{projects.map((project) => <option key={project.id} value={String(project.id)}>{project.name}</option>)}</select></Field><Field label="תאריך"><input name="date" dir="ltr" type="date" required defaultValue={initialDate} /></Field><Field label="משך זמן (שעות:דקות:שניות)"><div className="duration-input-wrapper"><input className="duration-input-hidden" name="duration" type="text" inputMode="numeric" required value={duration} onChange={(event) => setDuration(formatDurationOnType(event.target.value))} placeholder="00:00:00" aria-describedby="duration-help" /><div className="duration-input-display" aria-hidden="true">{renderFormattedDurationWithOpacity(duration)}</div></div></Field><Field label="מה בוצע?" wide><textarea name="description" dir="auto" rows={3} defaultValue={initial?.description} placeholder="תיאור קצר בעברית, Deutsch or English" /></Field></div><p className="form-note" id="duration-help">הזינו שעות, דקות ושניות בפורמט 00:00:00. הזמן נשמר במדויק ללא עיגול.</p><FormActions label={initial ? "שמירת השינויים" : "שמירת דיווח"} /></form>;
 }
 
 function PaymentForm({ projects, initialProjectId, initial, submit }: { projects: Project[]; initialProjectId?: RecordId; initial?: Payment; submit: (event: FormEvent<HTMLFormElement>) => void }) {
