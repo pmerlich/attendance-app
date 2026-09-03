@@ -71,7 +71,7 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.match(page, /event\.key === "Escape"/);
   assert.match(page, /className="skip-link"/);
   assert.match(page, /project-detail-metric-link/);
-  assert.match(page, /<span>הוצאות<\/span><strong>€\{Number\(selectedProject\.expenseAmount/);
+  assert.match(page, /<span>הוצאות<\/span><strong>\{formatMoney\(Number\(selectedProject\.expenseAmount/);
   assert.match(page, /formatTime\(Number\(entry\.durationSeconds\)\)/);
   assert.match(page, /formatTime\(totalSeconds\)/);
   assert.match(page, /backToProject=\{\(\) => contextProject && selectProject\(contextProject\)\}/);
@@ -176,6 +176,15 @@ test("isolates offline data and validates critical mutations", async () => {
   assert.match(page, /discardRejectedOperations/);
   assert.match(api, /expectedUpdatedAt/);
   assert.match(api, /conflict: \{ entity: "project"/);
+  assert.match(api, /function versionConflict/);
+  assert.match(page, /expectedUpdatedAt: editingPayment\?\.updatedAt/);
+  assert.match(page, /expectedUpdatedAt: editingExpense\?\.updatedAt/);
+  assert.match(page, /expectedUpdatedAt: editingClient\?\.updatedAt/);
+  assert.match(page, /expectedUpdatedAt: editingEmployee\?\.updatedAt/);
+  assert.match(page, /expectedUpdatedAt: editingEntry\?\.updatedAt/);
+  assert.match(api, /rawWorkerIds\.length > 100/);
+  assert.match(api, /fixedPriceInRange/);
+  assert.match(page, /function formatMoney/);
   assert.match(page, /window\.addEventListener\("popstate"/);
   assert.match(page, /BroadcastChannel\("menahel-avoda-state"\)/);
   assert.match(api, /UPDATE attachments SET expense_id = NULL/);

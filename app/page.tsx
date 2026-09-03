@@ -13,8 +13,8 @@ type EntityType = "project" | "client" | "employee";
 type ModalType = EntityType | "time" | "payment" | "expense" | "attachment" | "attachmentPreview";
 
 type RecordId = string | number;
-type Client = { id: RecordId; name: string; address: string; phone: string; email?: string; projects: number };
-type Employee = { id: RecordId; name: string; email: string; hourlyCost: number; status: "פעיל" | "מושהה"; connectionStatus?: "connected" | "pending" | "not_invited"; invitationToken?: string | null };
+type Client = { id: RecordId; name: string; address: string; phone: string; email?: string; projects: number; updatedAt?: string };
+type Employee = { id: RecordId; name: string; email: string; hourlyCost: number; status: "פעיל" | "מושהה"; updatedAt?: string; connectionStatus?: "connected" | "pending" | "not_invited"; invitationToken?: string | null };
 type Project = {
   id: RecordId;
   name: string;
@@ -81,7 +81,8 @@ function formatTime(seconds: number) {
   return `${hours}:${minutes}:${secs}`;
 }
 
-function formatMoney(amount: number, currency = "EUR") {
+let activeCurrency = "EUR";
+function formatMoney(amount: number, currency = activeCurrency) {
   return new Intl.NumberFormat("he-IL", { style: "currency", currency, minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(amount) || 0);
 }
 
@@ -145,9 +146,9 @@ function eventStartedFromControl(target: EventTarget | null) {
   return target instanceof Element && Boolean(target.closest("button,a,input,select,textarea,summary,details,label"));
 }
 function billingLabel(type: BillingType, fixedPrice: number, hourlyRate: number) {
-  if (type === "fixed") return `מחיר גלובלי · €${fixedPrice.toLocaleString()}`;
-  if (type === "hourly") return `€${hourlyRate.toLocaleString()} לשעה`;
-  return `€${fixedPrice.toLocaleString()} + €${hourlyRate.toLocaleString()} לשעה`;
+  if (type === "fixed") return `מחיר גלובלי · ${formatMoney(fixedPrice)}`;
+  if (type === "hourly") return `${formatMoney(hourlyRate)} לשעה`;
+  return `${formatMoney(fixedPrice)} + ${formatMoney(hourlyRate)} לשעה`;
 }
 
 const projectStatuses: { value: ProjectStatus; label: Project["tag"] }[] = [
@@ -166,9 +167,9 @@ function projectTagFromStatus(status: unknown): Project["tag"] {
 type StoredProject = Pick<Project, "id" | "name" | "clientId" | "client" | "address" | "tag" | "billingType" | "fixedPrice" | "hourlyRate"> & { updatedAt: string; workerIds: string | string[]; totalSeconds: number; paidAmount: number; expenseAmount: number; billableExpenseAmount: number; laborCost: number };
 type AccountUser = { id: string; displayName: string; email: string; role: "manager" | "employee"; isLocal: boolean; isGuest?: boolean };
 type ActiveTimer = { id: string; projectId: string; startedAt: string; elapsedSeconds: number };
-type TimeEntry = { id: string; projectId: string; projectName: string; userId: string; workerName: string; startedAt: string; endedAt: string | null; durationSeconds: number; description: string; source: "timer" | "manual" };
-type Payment = { id: string; projectId: string; projectName: string; clientName: string; amount: number; paidAt: string; method: "transfer" | "cash" | "card" | "check" | "other"; note: string };
-type Expense = { id: string; projectId: string; projectName: string; clientName: string; amount: number; incurredAt: string; category: "materials" | "equipment" | "travel" | "subcontractor" | "other"; billableToClient: boolean | number; note: string };
+type TimeEntry = { id: string; projectId: string; projectName: string; userId: string; workerName: string; startedAt: string; endedAt: string | null; durationSeconds: number; description: string; source: "timer" | "manual"; updatedAt?: string };
+type Payment = { id: string; projectId: string; projectName: string; clientName: string; amount: number; paidAt: string; method: "transfer" | "cash" | "card" | "check" | "other"; note: string; updatedAt?: string };
+type Expense = { id: string; projectId: string; projectName: string; clientName: string; amount: number; incurredAt: string; category: "materials" | "equipment" | "travel" | "subcontractor" | "other"; billableToClient: boolean | number; note: string; updatedAt?: string };
 type Attachment = { id: string; projectId: string; projectName: string; expenseId: string | null; expenseNote: string; fileName: string; contentType: string; createdAt: string };
 type DeletedClient = { id: RecordId; name: string; address: string; deletedAt: string; projectCount: number; snapshot?: Client };
 type DeletedProject = { id: RecordId; name: string; clientId: RecordId; clientName: string; address: string; deletedAt: string; snapshot?: StoredProject };
@@ -334,7 +335,7 @@ export default function Home() {
   const [contextProjectId, setContextProjectId] = useState<RecordId | null>(null);
   const [running, setRunning] = useState(false);
   const [seconds, setSeconds] = useState(0);
-  const [filter, setFilter] = useState("הכול");
+  const [filter, setFilter] = useState("בביצוע");
   const [query, setQuery] = useState("");
   const [modal, setModal] = useState<ModalType | null>(null);
   const [editingId, setEditingId] = useState<RecordId | null>(null);
@@ -363,6 +364,7 @@ export default function Home() {
   const stateChannelRef = useRef<BroadcastChannel | null>(null);
 
   function applyStoredState(data: StoredState, broadcast = true) {
+    activeCurrency = data.currency || "EUR";
     setOfflineScope(data.storageScope);
     stateRef.current = data;
     setOfflineWithoutCache(false);
@@ -754,7 +756,8 @@ export default function Home() {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     try {
-      await saveAction(editingId ? "updatePayment" : "addPayment", { id: editingId, projectId: data.get("projectId"), amount: Number(data.get("amount")), paidAt: data.get("paidAt"), method: data.get("method"), note: data.get("note") });
+      const editingPayment = editingId ? payments.find((payment) => payment.id === editingId) : undefined;
+      await saveAction(editingId ? "updatePayment" : "addPayment", { id: editingId, expectedUpdatedAt: editingPayment?.updatedAt, projectId: data.get("projectId"), amount: Number(data.get("amount")), paidAt: data.get("paidAt"), method: data.get("method"), note: data.get("note") });
       setModal(null);
       setEditingId(null);
     } catch { setSyncState("error"); }
@@ -776,7 +779,8 @@ export default function Home() {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     try {
-      await saveAction(editingId ? "updateExpense" : "addExpense", { id: editingId, projectId: data.get("projectId"), amount: Number(data.get("amount")), incurredAt: data.get("incurredAt"), category: data.get("category"), billableToClient: data.get("billableToClient") === "on", note: data.get("note") });
+      const editingExpense = editingId ? expenses.find((expense) => expense.id === editingId) : undefined;
+      await saveAction(editingId ? "updateExpense" : "addExpense", { id: editingId, expectedUpdatedAt: editingExpense?.updatedAt, projectId: data.get("projectId"), amount: Number(data.get("amount")), incurredAt: data.get("incurredAt"), category: data.get("category"), billableToClient: data.get("billableToClient") === "on", note: data.get("note") });
       setModal(null);
       setEditingId(null);
     } catch { setSyncState("error"); }
@@ -858,7 +862,8 @@ export default function Home() {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     try {
-      await saveAction(editingId ? "updateClient" : "addClient", { id: editingId, name: data.get("name"), address: data.get("address"), phone: data.get("phone"), email: data.get("email") });
+      const editingClient = editingId ? clients.find((client) => client.id === editingId) : undefined;
+      await saveAction(editingId ? "updateClient" : "addClient", { id: editingId, expectedUpdatedAt: editingClient?.updatedAt, name: data.get("name"), address: data.get("address"), phone: data.get("phone"), email: data.get("email") });
       setModal(null);
       setEditingId(null);
     } catch { setSyncState("error"); }
@@ -868,7 +873,8 @@ export default function Home() {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     try {
-      await saveAction(editingId ? "updateEmployee" : "addEmployee", { id: editingId, name: data.get("name"), email: data.get("email"), hourlyCost: Number(data.get("hourlyCost")) });
+      const editingEmployee = editingId ? employees.find((employee) => employee.id === editingId) : undefined;
+      await saveAction(editingId ? "updateEmployee" : "addEmployee", { id: editingId, expectedUpdatedAt: editingEmployee?.updatedAt, name: data.get("name"), email: data.get("email"), hourlyCost: Number(data.get("hourlyCost")) });
       setModal(null);
       setEditingId(null);
     } catch { setSyncState("error"); }
@@ -917,7 +923,8 @@ export default function Home() {
       return;
     }
     try {
-      await saveAction(editingId ? "updateTimeEntry" : "addManualTime", { id: editingId, projectId: data.get("projectId"), date: data.get("date"), hours: durationSeconds / 3600, description: data.get("description") });
+      const editingEntry = editingId ? recentTimeEntries.find((entry) => entry.id === editingId) : undefined;
+      await saveAction(editingId ? "updateTimeEntry" : "addManualTime", { id: editingId, expectedUpdatedAt: editingEntry?.updatedAt, projectId: data.get("projectId"), date: data.get("date"), hours: durationSeconds / 3600, description: data.get("description") });
       setModal(null);
       setEditingId(null);
     } catch { setSyncState("error"); }
@@ -1105,7 +1112,7 @@ function Dashboard({ canManage, accountMode, activeProject, selectedProjectId, r
     <section className="project-overview-stats" aria-label="סיכום פרויקטים">
       <article><span>סה״כ</span><strong>{projects.length}</strong><small>פרויקטים</small></article>
       <article><span>בביצוע</span><strong className="positive-text">{activeCount}</strong><small>פרויקטים פעילים</small></article>
-      <article className={financialTotal < 0 ? "negative" : "positive"}><span>{financialLabel}</span><strong>€{financialTotal.toLocaleString(undefined, { maximumFractionDigits: 2 })}</strong><small>{canManage && accountMode === "employer" ? "הכנסות פחות עלויות" : "לפי התמחור שנשמר"}</small></article>
+      <article className={financialTotal < 0 ? "negative" : "positive"}><span>{financialLabel}</span><strong>{formatMoney(financialTotal)}</strong><small>{canManage && accountMode === "employer" ? "הכנסות פחות עלויות" : "לפי התמחור שנשמר"}</small></article>
     </section>
 
     {selectedProject ? <section className="project-detail-card">
@@ -1118,10 +1125,10 @@ function Dashboard({ canManage, accountMode, activeProject, selectedProjectId, r
       <div className="project-detail-metrics">
         <article><span>שיטת תמחור</span><strong>{selectedProject.billing}</strong></article>
         <button type="button" className="project-detail-metric-link" onClick={() => openProjectSection(selectedProject, "time")}><span>שעות שנרשמו</span><strong>{selectedProject.hours}</strong><small>לכל הדיווחים ←</small></button>
-        {canManage ? <button type="button" className="project-detail-metric-link" onClick={() => openProjectSection(selectedProject, "payments")}><span>{accountMode === "solo" ? "הכנסה צפויה" : "חיוב ללקוח"}</span><strong>€{selectedProject.expectedAmount.toLocaleString()}</strong><small>לפירוט הכספי ←</small></button> : <article><span>הכנסה צפויה</span><strong>€{selectedProject.expectedAmount.toLocaleString()}</strong></article>}
-        {canManage && <button type="button" className="project-detail-metric-link" onClick={() => openProjectSection(selectedProject, "payments")}><span>התקבל בפועל</span><strong>€{selectedProject.paidAmount.toLocaleString()}</strong><small>לכל התשלומים ←</small></button>}
-        {canManage && <button type="button" className="project-detail-metric-link" onClick={() => openProjectSection(selectedProject, "expenses")}><span>הוצאות</span><strong>€{Number(selectedProject.expenseAmount ?? 0).toLocaleString()}</strong><small>לרשימת ההוצאות ←</small></button>}
-        {canManage && <button type="button" className={"project-detail-metric-link " + (Number(selectedProject.profitAmount ?? 0) < 0 ? "negative" : "positive")} onClick={() => openProjectSection(selectedProject, "expenses")}><span>רווח צפוי</span><strong>€{Number(selectedProject.profitAmount ?? 0).toLocaleString()}</strong><small>בניכוי הוצאות ועלויות שלא חויבו ←</small></button>}
+        {canManage ? <button type="button" className="project-detail-metric-link" onClick={() => openProjectSection(selectedProject, "payments")}><span>{accountMode === "solo" ? "הכנסה צפויה" : "חיוב ללקוח"}</span><strong>{formatMoney(selectedProject.expectedAmount)}</strong><small>לפירוט הכספי ←</small></button> : <article><span>הכנסה צפויה</span><strong>{formatMoney(selectedProject.expectedAmount)}</strong></article>}
+        {canManage && <button type="button" className="project-detail-metric-link" onClick={() => openProjectSection(selectedProject, "payments")}><span>התקבל בפועל</span><strong>{formatMoney(selectedProject.paidAmount)}</strong><small>לכל התשלומים ←</small></button>}
+        {canManage && <button type="button" className="project-detail-metric-link" onClick={() => openProjectSection(selectedProject, "expenses")}><span>הוצאות</span><strong>{formatMoney(Number(selectedProject.expenseAmount ?? 0))}</strong><small>לרשימת ההוצאות ←</small></button>}
+        {canManage && <button type="button" className={"project-detail-metric-link " + (Number(selectedProject.profitAmount ?? 0) < 0 ? "negative" : "positive")} onClick={() => openProjectSection(selectedProject, "expenses")}><span>רווח צפוי</span><strong>{formatMoney(Number(selectedProject.profitAmount ?? 0))}</strong><small>בניכוי הוצאות ועלויות שלא חויבו ←</small></button>}
         {canManage && <button type="button" className="project-detail-metric-link" onClick={() => openProjectSection(selectedProject, "payments")}><span>יתרה פתוחה</span><strong>{selectedProject.balance}</strong><small>לפירוט הכספי ←</small></button>}
       </div>
       <div className="project-primary-actions">
@@ -1154,8 +1161,8 @@ function Dashboard({ canManage, accountMode, activeProject, selectedProjectId, r
           {project.address && <div className="project-card-address"><div className="project-address-copy"><PinIcon /><span dir="auto">{project.address}</span></div><NavigationChooser address={project.address} label="" /></div>}
           <div className="project-card-metrics">
             <div><small>שעות</small><b>{project.hours}</b></div>
-            <div><small>{!canManage || accountMode === "solo" ? "הכנסה" : "הכנסות"}</small><b>€{project.expectedAmount.toLocaleString()}</b></div>
-            {canManage && <div className={profit < 0 ? "negative-text" : "positive-text"}><small>רווח צפוי</small><b>€{profit.toLocaleString()}</b></div>}
+            <div><small>{!canManage || accountMode === "solo" ? "הכנסה" : "הכנסות"}</small><b>{formatMoney(project.expectedAmount)}</b></div>
+            {canManage && <div className={profit < 0 ? "negative-text" : "positive-text"}><small>רווח צפוי</small><b>{formatMoney(profit)}</b></div>}
             <div><small>תעריף</small><b>{rate}</b></div>
           </div>
         </div>;
