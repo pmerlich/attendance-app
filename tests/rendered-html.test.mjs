@@ -24,6 +24,7 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.match(html, /<html[^>]*lang="he"[^>]*dir="rtl"/i);
   assert.match(html, /<title>מנהל עבודה \| פרויקטים, שעות וכספים<\/title>/);
   assert.match(html, /כל הפרויקטים/);
+  assert.match(html, /יצירת פרויקט/);
   assert.match(html, /הפעילו טיימר ישירות או פתחו פרויקט לפרטים ודיווח ידני/);
   assert.match(html, /aria-label="הפעלת טיימר עבור/);
   assert.match(html, /עדכון מצב הפרויקט/);
