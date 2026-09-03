@@ -3,6 +3,7 @@ export type QueuedOperation = {
   action: string;
   values: Record<string, unknown>;
   createdAt: string;
+  lastError?: string;
 };
 
 const DATABASE_PREFIX = "menahel-avoda-offline";

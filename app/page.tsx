@@ -18,6 +18,7 @@ type Employee = { id: RecordId; name: string; email: string; hourlyCost: number;
 type Project = {
   id: RecordId;
   name: string;
+  updatedAt?: string;
   clientId: RecordId;
   client: string;
   address: string;
@@ -78,6 +79,10 @@ function formatTime(seconds: number) {
   const minutes = Math.floor((safeSeconds % 3600) / 60).toString().padStart(2, "0");
   const secs = (safeSeconds % 60).toString().padStart(2, "0");
   return `${hours}:${minutes}:${secs}`;
+}
+
+function formatMoney(amount: number, currency = "EUR") {
+  return new Intl.NumberFormat("he-IL", { style: "currency", currency, minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(amount) || 0);
 }
 
 function formatDurationOnType(val: string): string {
@@ -158,7 +163,7 @@ function projectStatusFromTag(tag: Project["tag"]): ProjectStatus {
 function projectTagFromStatus(status: unknown): Project["tag"] {
   return status === "waiting" ? "ממתין" : status === "completed" ? "הסתיים" : "בביצוע";
 }
-type StoredProject = Pick<Project, "id" | "name" | "clientId" | "client" | "address" | "tag" | "billingType" | "fixedPrice" | "hourlyRate"> & { workerIds: string | string[]; totalSeconds: number; paidAmount: number; expenseAmount: number; billableExpenseAmount: number; laborCost: number };
+type StoredProject = Pick<Project, "id" | "name" | "clientId" | "client" | "address" | "tag" | "billingType" | "fixedPrice" | "hourlyRate"> & { updatedAt: string; workerIds: string | string[]; totalSeconds: number; paidAmount: number; expenseAmount: number; billableExpenseAmount: number; laborCost: number };
 type AccountUser = { id: string; displayName: string; email: string; role: "manager" | "employee"; isLocal: boolean; isGuest?: boolean };
 type ActiveTimer = { id: string; projectId: string; startedAt: string; elapsedSeconds: number };
 type TimeEntry = { id: string; projectId: string; projectName: string; userId: string; workerName: string; startedAt: string; endedAt: string | null; durationSeconds: number; description: string; source: "timer" | "manual" };
@@ -171,7 +176,7 @@ type DeletedEmployee = { id: RecordId; name: string; email: string; deletedAt: s
 type TrashState = { clients: DeletedClient[]; projects: DeletedProject[]; employees: DeletedEmployee[] };
 type AuditEntry = { id: string; actorName: string; entityType: string; entityId: string; action: string; detailsJson: string; createdAt: string };
 type ReportDataRow = { projectId: string; projectName: string; billingType: BillingType; fixedPrice: number; hourlyRate: number; totalSeconds: number; paidAmount: number; expenseAmount: number; billableExpenseAmount: number; laborCost: number };
-type StoredState = { storageScope: string; accountMode: AccountMode; user: AccountUser; clients: Client[]; employees: Employee[]; projects: StoredProject[]; activeTimer: ActiveTimer | null; recentTimeEntries: TimeEntry[]; payments: Payment[]; expenses: Expense[]; attachments: Attachment[]; trash: TrashState; auditLog: AuditEntry[] };
+type StoredState = { storageScope: string; currency: string; accountMode: AccountMode; user: AccountUser; clients: Client[]; employees: Employee[]; projects: StoredProject[]; activeTimer: ActiveTimer | null; recentTimeEntries: TimeEntry[]; payments: Payment[]; expenses: Expense[]; attachments: Attachment[]; trash: TrashState; auditLog: AuditEntry[] };
 type ProjectActivity = { timeEntries: TimeEntry[]; payments: Payment[]; expenses: Expense[]; attachments: Attachment[] };
 
 
@@ -272,7 +277,7 @@ function applyOptimisticOperation(state: StoredState, operation: QueuedOperation
   if ((operation.action === "addProject" || operation.action === "addClientProject") && !next.projects.some((item) => String(item.id) === id)) {
     const clientId = String(values.clientId ?? values.newClientId ?? "");
     const clientName = String(values.clientName ?? values.newClientName ?? "");
-    if (operation.action === "addClientProject" && !next.clients.some((client) => String(client.id) === clientId)) next.clients.unshift({ id: clientId, name: clientName, address: String(values.newClientAddress ?? ""), phone: String(values.newClientPhone ?? ""), email: String(values.newClientEmail ?? ""), projects: 0 });
+    if (values.newClientName && !next.clients.some((client) => String(client.id) === clientId)) next.clients.unshift({ id: clientId, name: clientName, address: String(values.newClientAddress ?? ""), phone: String(values.newClientPhone ?? ""), email: String(values.newClientEmail ?? ""), projects: 0 });
     next.projects.unshift({ id, name: String(values.name ?? ""), clientId, client: clientName, address: String(values.address ?? ""), tag: projectTagFromStatus(values.status), billingType: String(values.billingType ?? "fixed") as BillingType, fixedPrice: Number(values.fixedPrice ?? 0), hourlyRate: Number(values.hourlyRate ?? 0), workerIds: Array.isArray(values.workers) ? values.workers.map(String) : [], totalSeconds: 0, paidAmount: 0, expenseAmount: 0, billableExpenseAmount: 0, laborCost: 0 });
     next.clients = next.clients.map((client) => String(client.id) === clientId ? { ...client, projects: client.projects + 1 } : client);
   }
@@ -315,7 +320,7 @@ function presentProjects(items: StoredProject[]): Project[] {
     const amount = baseAmount + billableExpenseAmount;
     const costAmount = expenseAmount + laborCost;
     const paidAmount = Number(project.paidAmount ?? 0);
-    return { ...project, billing: billingLabel(project.billingType, fixedPrice, hourlyRate), fixedPrice, hourlyRate, totalSeconds, expectedAmount: amount, paidAmount, expenseAmount, billableExpenseAmount, laborCost, costAmount, profitAmount: amount - costAmount, workerIds: Array.isArray(project.workerIds) ? project.workerIds : project.workerIds ? project.workerIds.split(",") : [], hours: formatTime(totalSeconds), balance: `€${Math.round(amount - paidAmount).toLocaleString()}`, color: colors[index % colors.length] };
+    return { ...project, billing: billingLabel(project.billingType, fixedPrice, hourlyRate), fixedPrice, hourlyRate, totalSeconds, expectedAmount: amount, paidAmount, expenseAmount, billableExpenseAmount, laborCost, costAmount, profitAmount: amount - costAmount, workerIds: Array.isArray(project.workerIds) ? project.workerIds : project.workerIds ? project.workerIds.split(",") : [], hours: formatTime(totalSeconds), balance: formatMoney(amount - paidAmount), color: colors[index % colors.length] };
   });
 }
 
@@ -338,6 +343,7 @@ export default function Home() {
   const [syncState, setSyncState] = useState<"loading" | "saved" | "error" | "offline">("loading");
   const [pendingCount, setPendingCount] = useState(0);
   const [showSyncDetails, setShowSyncDetails] = useState(false);
+  const [syncError, setSyncError] = useState("");
   const [offlineWithoutCache, setOfflineWithoutCache] = useState(false);
   const [currentUser, setCurrentUser] = useState<AccountUser>({ id: "demo-owner", displayName: "מנחם", email: "menachem@example.com", role: "manager", isLocal: true, isGuest: false });
   const [authRequired, setAuthRequired] = useState(false);
@@ -452,6 +458,7 @@ export default function Home() {
         applyStoredState(queuedAfterFetch.reduce((current, operation) => applyOptimisticOperation(current, operation), serverState));
       } else {
         for (const operation of operations) {
+          if (operation.lastError) { rejected += 1; setSyncError(operation.lastError); continue; }
           let response: Response;
           try {
             response = await fetch("/api/state", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: operation.action, ...operation.values, operationId: operation.id }) });
@@ -468,12 +475,15 @@ export default function Home() {
             applyStoredState(queuedAfterSave.reduce((current, queued) => applyOptimisticOperation(current, queued), serverState));
             continue;
           }
-          if (response.status >= 500 || response.status === 409) {
+          if (response.status >= 500) {
             interrupted = true;
             setSyncState("error");
             break;
           }
-          await removeQueuedOperation(operation.id);
+          const errorPayload = await response.json().catch(() => ({})) as { error?: string };
+          const reason = errorPayload.error ?? `הפעולה ${operation.action} נדחתה (${response.status})`;
+          await enqueueOperation({ ...operation, lastError: reason });
+          setSyncError(reason);
           rejected += 1;
         }
       }
@@ -485,6 +495,7 @@ export default function Home() {
           const queuedAfterRejection = await readQueuedOperations();
           applyStoredState(queuedAfterRejection.reduce((current, queued) => applyOptimisticOperation(current, queued), authoritative));
         }
+        interrupted = true;
       }
       const remaining = await readQueuedOperations();
       setPendingCount(remaining.length);
@@ -505,6 +516,23 @@ export default function Home() {
       syncingRef.current = false;
       if (continueSync && !interrupted) queueMicrotask(() => void syncQueuedOperations());
     }
+  }
+
+  async function retryQueuedOperations() {
+    const queued = await readQueuedOperations();
+    await Promise.all(queued.filter((operation) => operation.lastError).map((operation) => enqueueOperation({ ...operation, lastError: undefined })));
+    setSyncError("");
+    await syncQueuedOperations();
+  }
+
+  async function discardRejectedOperations() {
+    const queued = await readQueuedOperations();
+    await Promise.all(queued.filter((operation) => operation.lastError).map((operation) => removeQueuedOperation(operation.id)));
+    const remaining = await readQueuedOperations();
+    setPendingCount(remaining.length);
+    setSyncError("");
+    setSyncState(remaining.length ? "loading" : "saved");
+    if (remaining.length) await syncQueuedOperations();
   }
   useEffect(() => {
     let active = true;
@@ -571,6 +599,20 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    const restoreLocation = () => {
+      const params = new URLSearchParams(window.location.search);
+      const requestedView = params.get("view") as View | null;
+      const allowedViews: View[] = ["dashboard", "projects", "time", "payments", "expenses", "clients", "employees", "trash", "history", "reports", "profile"];
+      if (requestedView && allowedViews.includes(requestedView)) setView(requestedView);
+      const projectId = params.get("project");
+      if (projectId) { setContextProjectId(projectId); setSelectedDashboardProjectId(projectId); }
+    };
+    restoreLocation();
+    window.addEventListener("popstate", restoreLocation);
+    return () => window.removeEventListener("popstate", restoreLocation);
+  }, []);
+
+  useEffect(() => {
     if (!running) return;
     const interval = window.setInterval(() => setSeconds((value) => value + 1), 1000);
     return () => window.clearInterval(interval);
@@ -603,6 +645,7 @@ export default function Home() {
     setQuery("");
     setContextProjectId(null);
     if (nextView === "dashboard") setSelectedDashboardProjectId(null);
+    window.history.pushState({}, "", nextView === "dashboard" ? window.location.pathname : `?view=${nextView}`);
   }
 
   function selectProject(project: Project) {
@@ -610,6 +653,7 @@ export default function Home() {
     setSelectedDashboardProjectId(project.id);
     setContextProjectId(project.id);
     setView("dashboard");
+    window.history.pushState({}, "", `?view=dashboard&project=${encodeURIComponent(String(project.id))}`);
   }
 
   async function openProjectSection(project: Project, nextView: "time" | "payments" | "expenses") {
@@ -617,6 +661,7 @@ export default function Home() {
     setSelectedDashboardProjectId(null);
     setContextProjectId(project.id);
     setView(nextView);
+    window.history.pushState({}, "", `?view=${nextView}&project=${encodeURIComponent(String(project.id))}`);
     if (!navigator.onLine || !stateRef.current) return;
     try {
       const response = await fetch("/api/state?projectActivity=" + encodeURIComponent(String(project.id)));
@@ -658,7 +703,7 @@ export default function Home() {
       setInviteNotice({ kind: "error", text: "יש לעצור את הטיימר לפני סימון הפרויקט כהסתיים." });
       return;
     }
-    try { await saveAction("updateProjectStatus", { id: project.id, status }); } catch (error) { setSyncState("error"); setInviteNotice({ kind: "error", text: error instanceof Error ? error.message : "עדכון מצב הפרויקט נכשל." }); }
+    try { await saveAction("updateProjectStatus", { id: project.id, status, expectedUpdatedAt: project.updatedAt }); } catch (error) { setSyncState("error"); setInviteNotice({ kind: "error", text: error instanceof Error ? error.message : "עדכון מצב הפרויקט נכשל." }); }
   }
 
   async function stopTimer() {
@@ -834,16 +879,17 @@ export default function Home() {
     const fixedPrice = Number(data.get("fixedPrice") || 0);
     const hourlyRate = Number(data.get("hourlyRate") || 0);
     const newClientName = String(data.get("newClientName") ?? "").trim();
-    const clientChoiceValue = String(data.get("client") ?? "");
-    const selectedClient = clients.find((client) => String(client.id) === clientChoiceValue) ?? clients.find((client) => client.name === clientChoiceValue);
+    const clientSelect = event.currentTarget.elements.namedItem("client") as HTMLSelectElement | null;
+    const editingProject = editingId ? projects.find((project) => String(project.id) === String(editingId)) : undefined;
+    const orderedClients = editingProject ? [...clients].sort((left, right) => Number(String(right.id) === String(editingProject.clientId)) - Number(String(left.id) === String(editingProject.clientId))) : clients;
+    const selectedClient = clientSelect && clientSelect.selectedIndex > 0 ? orderedClients[clientSelect.selectedIndex - 1] : undefined;
     const clientId = String(selectedClient?.id ?? "");
     try {
-      let resolvedClientId = clientId;
       if (!editingId && newClientName) {
-        resolvedClientId = crypto.randomUUID();
-        await saveAction("addClient", { id: resolvedClientId, name: newClientName, address: data.get("newClientAddress"), phone: data.get("newClientPhone"), email: data.get("newClientEmail") });
+        await saveAction("addProject", { id: crypto.randomUUID(), newClientId: crypto.randomUUID(), newClientName, newClientAddress: data.get("newClientAddress"), newClientPhone: data.get("newClientPhone"), newClientEmail: data.get("newClientEmail"), name: data.get("name"), address: data.get("address"), billingType, status: data.get("status"), fixedPrice, hourlyRate, workers: data.getAll("workers") });
+      } else {
+        await saveAction(editingId ? "updateProject" : "addProject", { id: editingId, expectedUpdatedAt: editingProject?.updatedAt, name: data.get("name"), clientId, clientName: selectedClient?.name || "", address: data.get("address"), billingType, status: data.get("status"), fixedPrice, hourlyRate, workers: data.getAll("workers") });
       }
-      await saveAction(editingId ? "updateProject" : "addProject", { id: editingId, name: data.get("name"), clientId: resolvedClientId, clientName: newClientName || selectedClient?.name || "", address: data.get("address"), billingType, status: data.get("status"), fixedPrice, hourlyRate, workers: data.getAll("workers") });
       setModal(null);
       setEditingId(null);
       setView("dashboard");
@@ -867,11 +913,13 @@ export default function Home() {
 
   if (offlineWithoutCache) return <OfflineUnavailableView />;
   if (authRequired) return <SignInView />;
-  const isManager = currentUser.role === "manager";
+  const isManager = currentUser.role === "manager" && !currentUser.isGuest;
   const editingTimeEntry = modal === "time" && editingId ? recentTimeEntries.find((entry) => entry.id === editingId) : undefined;
   const editingPayment = modal === "payment" && editingId ? payments.find((payment) => payment.id === editingId) : undefined;
   const editingExpense = modal === "expense" && editingId ? expenses.find((expense) => expense.id === editingId) : undefined;
   const editingAttachment = modal === "attachmentPreview" && editingId ? attachments.find((attachment) => attachment.id === editingId) : undefined;
+  const editingProject = modal === "project" && editingId ? projects.find((project) => project.id === editingId) : undefined;
+  const projectFormClients = editingProject ? [...clients].sort((left, right) => Number(String(right.id) === String(editingProject.clientId)) - Number(String(left.id) === String(editingProject.clientId))) : clients;
   const timeEntryProjects = editingTimeEntry && editingTimeEntry.userId !== currentUser.id ? projects.filter((project) => project.workerIds.includes(editingTimeEntry.userId)) : projects;
   const contextProject = contextProjectId === null ? undefined : projects.find((project) => String(project.id) === String(contextProjectId));
   const visibleTimeEntries = contextProject ? recentTimeEntries.filter((entry) => String(entry.projectId) === String(contextProject.id)) : recentTimeEntries;
@@ -911,15 +959,16 @@ export default function Home() {
               </button>
               {showSyncDetails && <div className="sync-popover">
                 <strong>{syncState === "loading" ? "מסנכרן ברקע" : syncState === "error" ? "יש פעולות שלא סונכרנו" : syncState === "offline" ? "עובדים כרגע ללא חיבור" : pendingCount ? "הפעולות נשמרו במכשיר" : "הכול מסונכרן"}</strong>
-                <p>{pendingCount ? pendingCount + " פעולות ממתינות ויישלחו אוטומטית כשהחיבור יהיה זמין." : syncState === "offline" ? "אפשר להמשיך לעבוד כרגיל. הנתונים יסתנכרנו אוטומטית בחזרת החיבור." : syncState === "error" ? "העבודה נשמרה. אפשר לנסות שוב בלי לצאת מהמסך." : "אין פעולות שממתינות לסנכרון."}</p>
-                {(pendingCount > 0 || syncState === "offline" || syncState === "error") && <button type="button" onClick={() => void syncQueuedOperations()}>ניסיון סנכרון</button>}
+                <p>{syncError || (pendingCount ? pendingCount + " פעולות ממתינות ויישלחו אוטומטית כשהחיבור יהיה זמין." : syncState === "offline" ? "אפשר להמשיך לעבוד כרגיל. הנתונים יסתנכרנו אוטומטית בחזרת החיבור." : syncState === "error" ? "העבודה נשמרה. אפשר לנסות שוב בלי לצאת מהמסך." : "אין פעולות שממתינות לסנכרון.")}</p>
+                {(pendingCount > 0 || syncState === "offline" || syncState === "error") && <button type="button" onClick={() => void retryQueuedOperations()}>ניסיון סנכרון</button>}
+                {syncError && <button type="button" onClick={() => void discardRejectedOperations()}>הסרת פעולות שנדחו</button>}
               </div>}
             </div>
             <button className="icon-button profile-button" onClick={() => navigate("profile")} aria-label="פתיחת הפרופיל">{currentUser.displayName.charAt(0)}</button>
           </div>
         </header>
 
-        {currentUser.isGuest && <div className="guest-notice" role="status"><span>◎</span><strong>מצב אורח — דני לוי</strong><p>זו סביבת הדגמה ציבורית ומשותפת. אפשר להתנסות בכל הפעולות, והנתונים עשויים להשתנות על ידי מבקרים אחרים.</p></div>}
+        {currentUser.isGuest && <div className="guest-notice" role="status"><span>◎</span><strong>מצב אורח — דני לוי</strong><p>זו סביבת הדגמה ציבורית לקריאה בלבד. הנתונים לדוגמה אינם ניתנים לשינוי.</p></div>}
         {!modal && inviteNotice && <div className={`invite-notice ${inviteNotice.kind}`} role="status"><span>{inviteNotice.kind === "success" ? "✓" : "!"}</span><strong>{inviteNotice.text}</strong><button onClick={() => setInviteNotice(null)} aria-label="סגירת ההודעה">×</button></div>}
 
         {view === "dashboard" && (projects.length ? <Dashboard canManage={isManager} accountMode={accountMode} activeProject={activeProject} selectedProjectId={selectedDashboardProjectId} running={running} seconds={seconds} projects={projects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} toggleProjectTimer={(project) => void toggleProjectTimer(project)} updateProjectStatus={(project, status) => void updateProjectStatus(project, status)} stopTimer={() => void stopTimer()} selectProject={selectProject} closeProject={() => setSelectedDashboardProjectId(null)} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} showManual={() => openTimeEntry(activeProject.id)} openNew={() => openNew("project")} openProjectSection={openProjectSection} openPayment={(project) => openPayment(undefined, project.id)} openExpense={(project) => openExpense(undefined, project.id)} /> : <NoProjectsView isManager={isManager} openNew={() => openNew("project")} />)}
@@ -944,7 +993,7 @@ export default function Home() {
       </nav>
 
       {modal && <Modal title={modal === "time" ? editingId ? "עריכת דיווח זמן" : "דיווח שעות ידני" : modal === "payment" ? editingId ? "עריכת תשלום" : "תשלום חדש" : modal === "expense" ? editingId ? "עריכת הוצאה" : "הוצאה חדשה" : modal === "attachment" ? "העלאת קבלה או תמונה" : modal === "attachmentPreview" ? "צפייה בקובץ" : `${editingId ? "עריכת" : modal === "project" ? "פרויקט" : modal === "client" ? "לקוח" : "עובד"} ${editingId ? (modal === "project" ? "פרויקט" : modal === "client" ? "לקוח" : "עובד") : "חדש"}`} close={() => { setModal(null); setEditingId(null); setInviteNotice(null); }} inviteNotice={inviteNotice} setInviteNotice={setInviteNotice}>
-        {modal === "project" && <ProjectForm accountMode={accountMode} clients={clients} employees={employees} billingType={billingType} setBillingType={setBillingType} initial={projects.find((project) => project.id === editingId)} submit={addProject} />}
+        {modal === "project" && <ProjectForm accountMode={accountMode} clients={projectFormClients} employees={employees} billingType={billingType} setBillingType={setBillingType} initial={editingProject} submit={addProject} />}
         {modal === "client" && <ClientForm initial={clients.find((client) => client.id === editingId)} submit={addClient} />}
         {modal === "employee" && <EmployeeForm initial={employees.find((employee) => employee.id === editingId)} submit={addEmployee} />}
         {modal === "time" && <ManualTimeForm projects={timeEntryProjects} initialProjectId={editingTimeEntry?.projectId ?? contextProject?.id ?? activeProject.id} initial={editingTimeEntry} submit={addManualTime} />}

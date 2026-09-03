@@ -111,8 +111,18 @@ async function ensureCoreSchema(db: D1Database) {
     db.prepare("CREATE INDEX IF NOT EXISTS idx_attachments_business_project ON attachments (business_id, project_id)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_users_auth_user_id ON users (auth_user_id)"),
     db.prepare("CREATE INDEX IF NOT EXISTS idx_employee_invitations_business_status ON employee_invitations (business_id, status)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_projects_business_deleted ON projects (business_id, deleted_at)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_clients_business_deleted ON clients (business_id, deleted_at)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_audit_business_created ON audit_log (business_id, created_at DESC)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS idx_time_project_deleted_ended ON time_entries (project_id, deleted_at, ended_at)"),
   ]);
   await db.prepare("PRAGMA optimize").run();
+}
+
+let schemaReady: Promise<void> | null = null;
+function prepareSchema(db: D1Database) {
+  if (!schemaReady) schemaReady = ensureCoreSchema(db).catch((error) => { schemaReady = null; throw error; });
+  return schemaReady;
 }
 
 async function ensureAccount(db: D1Database, identity: Identity) {
@@ -167,7 +177,7 @@ async function loadState(db: D1Database, identity: Identity) {
   const businessId = identity.businessId;
   const managerOnly = <T = Record<string, unknown>>() => Promise.resolve({ results: [] as T[] });
   const projectsQuery = identity.role === "manager"
-    ? db.prepare(`SELECT p.id, p.name, c.id AS clientId, c.name AS client, p.address,
+    ? db.prepare(`SELECT p.id, p.name, p.updated_at AS updatedAt, c.id AS clientId, c.name AS client, p.address,
       CASE p.status WHEN 'waiting' THEN 'ממתין' WHEN 'completed' THEN 'הסתיים' ELSE 'בביצוע' END AS tag,
       p.billing_method AS billingType, p.fixed_price AS fixedPrice, p.client_hourly_rate AS hourlyRate,
       COALESCE((SELECT GROUP_CONCAT(pw.user_id) FROM project_workers pw WHERE pw.project_id = p.id), '') AS workerIds,
@@ -181,7 +191,7 @@ async function loadState(db: D1Database, identity: Identity) {
         FROM time_entries te WHERE te.project_id = p.id AND te.deleted_at IS NULL), 0) AS totalSeconds
       FROM projects p JOIN clients c ON c.id = p.client_id
       WHERE p.business_id = ? AND p.deleted_at IS NULL ORDER BY p.created_at DESC`).bind(businessId).all()
-    : db.prepare(`SELECT p.id, p.name, c.id AS clientId, c.name AS client, p.address,
+    : db.prepare(`SELECT p.id, p.name, p.updated_at AS updatedAt, c.id AS clientId, c.name AS client, p.address,
       CASE p.status WHEN 'waiting' THEN 'ממתין' WHEN 'completed' THEN 'הסתיים' ELSE 'בביצוע' END AS tag,
       'hourly' AS billingType, 0 AS fixedPrice, COALESCE(pw.hourly_cost_override, u.hourly_cost, 0) AS hourlyRate,
       '' AS workerIds, 0 AS paidAmount, 0 AS expenseAmount, 0 AS billableExpenseAmount, 0 AS laborCost,
@@ -198,7 +208,7 @@ async function loadState(db: D1Database, identity: Identity) {
       te.description, te.source
       FROM time_entries te JOIN projects p ON p.id = te.project_id JOIN users u ON u.id = te.user_id
       WHERE te.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
-      ORDER BY te.started_at DESC LIMIT 50`).bind(businessId).all()
+      ORDER BY te.started_at DESC`).bind(businessId).all()
     : db.prepare(`SELECT te.id, te.project_id AS projectId, p.name AS projectName, te.user_id AS userId,
       u.display_name AS workerName, te.started_at AS startedAt, te.ended_at AS endedAt,
       COALESCE(te.duration_seconds, CAST((julianday('now') - julianday(te.started_at)) * 86400 AS INTEGER)) AS durationSeconds,
@@ -206,13 +216,13 @@ async function loadState(db: D1Database, identity: Identity) {
       FROM time_entries te JOIN projects p ON p.id = te.project_id JOIN users u ON u.id = te.user_id
       WHERE te.user_id = ? AND te.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
         AND EXISTS (SELECT 1 FROM project_workers pw WHERE pw.project_id = p.id AND pw.user_id = ?)
-      ORDER BY te.started_at DESC LIMIT 50`).bind(identity.ownerId, businessId, identity.ownerId).all();
+      ORDER BY te.started_at DESC`).bind(identity.ownerId, businessId, identity.ownerId).all();
   const paymentsQuery = identity.role === "manager"
     ? db.prepare(`SELECT pay.id, pay.project_id AS projectId, p.name AS projectName, c.name AS clientName,
       pay.amount, pay.paid_at AS paidAt, COALESCE(pay.method, '') AS method, COALESCE(pay.note, '') AS note
       FROM payments pay JOIN projects p ON p.id = pay.project_id JOIN clients c ON c.id = p.client_id
       WHERE pay.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
-      ORDER BY pay.paid_at DESC, pay.created_at DESC LIMIT 100`).bind(businessId).all()
+      ORDER BY pay.paid_at DESC, pay.created_at DESC`).bind(businessId).all()
     : managerOnly();
   const expensesQuery = identity.role === "manager"
     ? db.prepare(`SELECT ex.id, ex.project_id AS projectId, p.name AS projectName, c.name AS clientName,
@@ -220,7 +230,7 @@ async function loadState(db: D1Database, identity: Identity) {
       COALESCE(ex.note, '') AS note
       FROM expenses ex JOIN projects p ON p.id = ex.project_id JOIN clients c ON c.id = p.client_id
       WHERE ex.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
-      ORDER BY ex.incurred_at DESC, ex.created_at DESC LIMIT 100`).bind(businessId).all()
+      ORDER BY ex.incurred_at DESC, ex.created_at DESC`).bind(businessId).all()
     : managerOnly();
   const attachmentsQuery = identity.role === "manager"
     ? db.prepare(`SELECT a.id, a.project_id AS projectId, COALESCE(p.name, '') AS projectName,
@@ -228,7 +238,7 @@ async function loadState(db: D1Database, identity: Identity) {
       a.content_type AS contentType, a.created_at AS createdAt
       FROM attachments a LEFT JOIN projects p ON p.id = a.project_id LEFT JOIN expenses ex ON ex.id = a.expense_id
       WHERE a.business_id = ? AND a.deleted_at IS NULL AND (p.id IS NULL OR p.deleted_at IS NULL)
-      ORDER BY a.created_at DESC LIMIT 100`).bind(businessId).all()
+      ORDER BY a.created_at DESC`).bind(businessId).all()
     : managerOnly();
   const auditLogQuery = identity.role === "manager"
     ? db.prepare(`SELECT al.id, COALESCE(u.display_name, 'משתמש לא ידוע') AS actorName,
@@ -236,10 +246,10 @@ async function loadState(db: D1Database, identity: Identity) {
         al.details_json AS detailsJson, al.created_at AS createdAt
         FROM audit_log al LEFT JOIN users u ON u.id = al.actor_id AND u.business_id = al.business_id
         WHERE al.business_id = ?
-        ORDER BY al.created_at DESC LIMIT 100`).bind(businessId).all()
+        ORDER BY al.created_at DESC`).bind(businessId).all()
     : managerOnly();
   const [business, clients, employees, projects, activeTimer, recentTimeEntries, payments, expenses, attachments, auditLog, deletedClients, deletedProjects, deletedEmployees] = await Promise.all([
-    db.prepare("SELECT work_mode AS workMode FROM businesses WHERE id = ? AND deleted_at IS NULL").bind(businessId).first<{ workMode: "solo" | "employer" }>(),
+    db.prepare("SELECT work_mode AS workMode, currency FROM businesses WHERE id = ? AND deleted_at IS NULL").bind(businessId).first<{ workMode: "solo" | "employer"; currency: string }>(),
     identity.role === "manager" ? db.prepare(`SELECT c.id, c.name, c.address, COALESCE(c.phone, '') AS phone, COALESCE(c.email, '') AS email, COUNT(p.id) AS projects
       FROM clients c LEFT JOIN projects p ON p.client_id = c.id AND p.deleted_at IS NULL
       WHERE c.business_id = ? AND c.deleted_at IS NULL GROUP BY c.id ORDER BY c.created_at DESC`).bind(businessId).all() : managerOnly(),
@@ -277,6 +287,7 @@ async function loadState(db: D1Database, identity: Identity) {
   ]);
   return {
     accountMode: business?.workMode ?? "solo",
+    currency: business?.currency ?? "EUR",
     storageScope: `${businessId}:${identity.ownerId}`,
     user: { id: identity.ownerId, displayName: identity.displayName, email: identity.email, role: identity.role, isLocal: identity.isLocal, isGuest: identity.isGuest },
     clients: clients.results,
@@ -347,7 +358,7 @@ async function prepareRequest(request: Request) {
   const rawIdentity = await resolveIdentity(request);
   if (!rawIdentity) return null;
   const db = env.DB;
-  await ensureCoreSchema(db);
+  await prepareSchema(db);
   const membership = await db.prepare(`SELECT id, business_id AS businessId, role
     FROM users WHERE auth_user_id = ? AND deleted_at IS NULL AND is_active = 1
     ORDER BY CASE role WHEN 'employee' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1`)
@@ -365,7 +376,7 @@ async function acceptInvitation(request: Request, token: string) {
   const rawIdentity = await resolveIdentity(request);
   if (!rawIdentity) return Response.json({ error: "יש להתחבר לפני קבלת ההזמנה" }, { status: 401 });
   const db = env.DB;
-  await ensureCoreSchema(db);
+  await prepareSchema(db);
   const invitation = await db.prepare(`SELECT ei.id, ei.business_id AS businessId, ei.employee_id AS employeeId, ei.email
     FROM employee_invitations ei JOIN users u ON u.id = ei.employee_id
     WHERE ei.token = ? AND ei.status = 'pending' AND ei.expires_at > CURRENT_TIMESTAMP
@@ -401,26 +412,26 @@ async function loadProjectActivity(db: D1Database, identity: Identity, projectId
       FROM time_entries te JOIN projects p ON p.id = te.project_id JOIN users u ON u.id = te.user_id
       WHERE te.project_id = ? AND te.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
         AND (? = 'manager' OR te.user_id = ?)
-      ORDER BY te.started_at DESC LIMIT 1000`).bind(projectId, identity.businessId, identity.role, identity.ownerId).all();
+      ORDER BY te.started_at DESC`).bind(projectId, identity.businessId, identity.role, identity.ownerId).all();
   if (identity.role !== "manager") return { timeEntries: timeEntries.results, payments: [], expenses: [], attachments: [] };
   const [payments, expenses, attachments] = await Promise.all([
     db.prepare(`SELECT pay.id, pay.project_id AS projectId, p.name AS projectName, c.name AS clientName,
       pay.amount, pay.paid_at AS paidAt, COALESCE(pay.method, '') AS method, COALESCE(pay.note, '') AS note
       FROM payments pay JOIN projects p ON p.id = pay.project_id JOIN clients c ON c.id = p.client_id
       WHERE pay.project_id = ? AND pay.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
-      ORDER BY pay.paid_at DESC, pay.created_at DESC LIMIT 1000`).bind(projectId, identity.businessId).all(),
+      ORDER BY pay.paid_at DESC, pay.created_at DESC`).bind(projectId, identity.businessId).all(),
     db.prepare(`SELECT ex.id, ex.project_id AS projectId, p.name AS projectName, c.name AS clientName,
       ex.amount, ex.incurred_at AS incurredAt, ex.category, ex.billable_to_client AS billableToClient,
       COALESCE(ex.note, '') AS note
       FROM expenses ex JOIN projects p ON p.id = ex.project_id JOIN clients c ON c.id = p.client_id
       WHERE ex.project_id = ? AND ex.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
-      ORDER BY ex.incurred_at DESC, ex.created_at DESC LIMIT 1000`).bind(projectId, identity.businessId).all(),
+      ORDER BY ex.incurred_at DESC, ex.created_at DESC`).bind(projectId, identity.businessId).all(),
     db.prepare(`SELECT a.id, a.project_id AS projectId, p.name AS projectName,
       a.expense_id AS expenseId, COALESCE(ex.note, '') AS expenseNote, a.file_name AS fileName,
       a.content_type AS contentType, a.created_at AS createdAt
       FROM attachments a JOIN projects p ON p.id = a.project_id LEFT JOIN expenses ex ON ex.id = a.expense_id
       WHERE a.project_id = ? AND a.business_id = ? AND a.deleted_at IS NULL AND p.deleted_at IS NULL
-      ORDER BY a.created_at DESC LIMIT 1000`).bind(projectId, identity.businessId).all(),
+      ORDER BY a.created_at DESC`).bind(projectId, identity.businessId).all(),
   ]);
   return { timeEntries: timeEntries.results, payments: payments.results, expenses: expenses.results, attachments: attachments.results };
 }
@@ -554,9 +565,14 @@ function validCalendarDate(value: unknown, allowFuture = false) {
   return text;
 }
 
-async function appendAudit(db: D1Database, identity: Identity, entityType: string, entityId: string, action: string, details: Record<string, unknown> = {}) {
-  await db.prepare("INSERT INTO audit_log (id, business_id, actor_id, entity_type, entity_id, action, details_json) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .bind(crypto.randomUUID(), identity.businessId, identity.ownerId, entityType, entityId, action, JSON.stringify(details)).run();
+function normalizedMoney(value: unknown) {
+  const amount = Number(value);
+  return Number.isFinite(amount) ? Math.round((amount + Number.EPSILON) * 100) / 100 : Number.NaN;
+}
+
+function auditStatement(db: D1Database, identity: Identity, entityType: string, entityId: string, action: string, details: Record<string, unknown> = {}) {
+  return db.prepare("INSERT INTO audit_log (id, business_id, actor_id, entity_type, entity_id, action, details_json) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .bind(crypto.randomUUID(), identity.businessId, identity.ownerId, entityType, entityId, action, JSON.stringify(details));
 }
 
 export async function POST(request: Request) {
@@ -596,14 +612,16 @@ export async function POST(request: Request) {
         WHERE p.id = ? AND p.business_id = ? AND p.status != 'completed' AND p.deleted_at IS NULL AND pw.user_id = ?`).bind(projectId, businessId, identity.ownerId).first();
     if (!project) return Response.json({ error: "הפרויקט לא נמצא" }, { status: 400 });
     const startedAt = normalizeClientTimestamp(body.startedAt);
-    await db.prepare(`UPDATE time_entries SET ended_at = ?,
-      duration_seconds = MAX(1, CAST((julianday(?) - julianday(started_at)) * 86400 AS INTEGER)), updated_at = CURRENT_TIMESTAMP
-      WHERE user_id = ? AND ended_at IS NULL AND deleted_at IS NULL
-      AND project_id IN (SELECT id FROM projects WHERE business_id = ?)`)
-      .bind(startedAt, startedAt, identity.ownerId, businessId).run();
-    await db.prepare("INSERT INTO time_entries (id, project_id, user_id, started_at, source) VALUES (?, ?, ?, ?, 'timer')")
-      .bind(timerId, projectId, identity.ownerId, startedAt).run();
-    await appendAudit(db, identity, "time_entry", timerId, "timer_start", { projectId, startedAt });
+    await db.batch([
+      db.prepare(`UPDATE time_entries SET ended_at = ?,
+        duration_seconds = MAX(1, CAST((julianday(?) - julianday(started_at)) * 86400 AS INTEGER)), updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = ? AND ended_at IS NULL AND deleted_at IS NULL
+        AND project_id IN (SELECT id FROM projects WHERE business_id = ?)`)
+        .bind(startedAt, startedAt, identity.ownerId, businessId),
+      db.prepare("INSERT INTO time_entries (id, project_id, user_id, started_at, source) VALUES (?, ?, ?, ?, 'timer')")
+        .bind(timerId, projectId, identity.ownerId, startedAt),
+      auditStatement(db, identity, "time_entry", timerId, "timer_start", { projectId, startedAt }),
+    ]);
   } else if (action === "stopTimer") {
     const timerId = String(body.id ?? "");
     if (!validRecordId(timerId)) return Response.json({ error: "מזהה הטיימר אינו תקין" }, { status: 400 });
@@ -685,7 +703,7 @@ export async function POST(request: Request) {
     const projectId = String(body.projectId ?? "");
     const project = await db.prepare("SELECT id FROM projects WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(projectId, businessId).first();
     if (!project) return Response.json({ error: "הפרויקט לא נמצא" }, { status: 400 });
-    const amount = Number(body.amount ?? 0);
+    const amount = normalizedMoney(body.amount);
     if (!Number.isFinite(amount) || amount <= 0 || amount > 100000000) return Response.json({ error: "סכום התשלום אינו תקין" }, { status: 400 });
     const paidAt = validCalendarDate(body.paidAt);
     if (!paidAt) return Response.json({ error: "תאריך התשלום אינו תקין או נמצא בעתיד" }, { status: 400 });
@@ -722,7 +740,7 @@ export async function POST(request: Request) {
     const projectId = String(body.projectId ?? "");
     const project = await db.prepare("SELECT id FROM projects WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(projectId, businessId).first();
     if (!project) return Response.json({ error: "הפרויקט לא נמצא" }, { status: 400 });
-    const amount = Number(body.amount ?? 0);
+    const amount = normalizedMoney(body.amount);
     if (!Number.isFinite(amount) || amount <= 0 || amount > 100000000) return Response.json({ error: "סכום ההוצאה אינו תקין" }, { status: 400 });
     const incurredAt = validCalendarDate(body.incurredAt);
     if (!incurredAt) return Response.json({ error: "תאריך ההוצאה אינו תקין או נמצא בעתיד" }, { status: 400 });
@@ -769,8 +787,10 @@ export async function POST(request: Request) {
     await env.FILES.delete(String(attachment.objectKey));
   } else if (action === "setAccountMode") {
     const accountMode = body.accountMode === "employer" ? "employer" : "solo";
-    await db.prepare("UPDATE businesses SET work_mode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(accountMode, businessId).run();
-    await appendAudit(db, identity, "business", businessId, "account_mode_update", { accountMode });
+    await db.batch([
+      db.prepare("UPDATE businesses SET work_mode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(accountMode, businessId),
+      auditStatement(db, identity, "business", businessId, "account_mode_update", { accountMode }),
+    ]);
   } else if (action === "addClient") {
     const clientId = String(body.id ?? crypto.randomUUID());
     const name = boundedText(body.name, 120, true);
@@ -778,8 +798,10 @@ export async function POST(request: Request) {
     const phone = boundedText(body.phone, 40) ?? "";
     const email = boundedText(body.email, 254) ?? "";
     if (!validRecordId(clientId) || !name || !address || !validEmail(email)) return Response.json({ error: "פרטי הלקוח אינם תקינים" }, { status: 400 });
-    await db.prepare("INSERT INTO clients (id, business_id, name, address, phone, email) VALUES (?, ?, ?, ?, ?, ?)").bind(clientId, businessId, name, address, phone, email).run();
-    await appendAudit(db, identity, "client", clientId, "create", { name, address });
+    await db.batch([
+      db.prepare("INSERT INTO clients (id, business_id, name, address, phone, email) VALUES (?, ?, ?, ?, ?, ?)").bind(clientId, businessId, name, address, phone, email),
+      auditStatement(db, identity, "client", clientId, "create", { name, address }),
+    ]);
   } else if (action === "updateClient") {
     const clientId = String(body.id ?? "");
     const name = boundedText(body.name, 120, true);
@@ -789,8 +811,10 @@ export async function POST(request: Request) {
     if (!validRecordId(clientId) || !name || !address || !validEmail(email)) return Response.json({ error: "פרטי הלקוח אינם תקינים" }, { status: 400 });
     const existing = await db.prepare("SELECT name, address, phone, email FROM clients WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(clientId, businessId).first<Record<string, unknown>>();
     if (!existing) return Response.json({ error: "הלקוח לא נמצא" }, { status: 400 });
-    await db.prepare("UPDATE clients SET name = ?, address = ?, phone = ?, email = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(name, address, phone, email, clientId, businessId).run();
-    await appendAudit(db, identity, "client", clientId, "update", { before: existing, after: { name, address, phone, email } });
+    await db.batch([
+      db.prepare("UPDATE clients SET name = ?, address = ?, phone = ?, email = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(name, address, phone, email, clientId, businessId),
+      auditStatement(db, identity, "client", clientId, "update", { before: existing, after: { name, address, phone, email } }),
+    ]);
   } else if (action === "deleteClient") {
     const clientId = String(body.id ?? "");
     if (!validRecordId(clientId)) return Response.json({ error: "מזהה הלקוח אינו תקין" }, { status: 400 });
@@ -802,29 +826,31 @@ export async function POST(request: Request) {
     await db.batch([
       db.prepare("UPDATE projects SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE client_id = ? AND business_id = ? AND deleted_at IS NULL").bind(clientId, businessId),
       db.prepare("UPDATE clients SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(clientId, businessId),
+      auditStatement(db, identity, "client", clientId, "delete", { name: client.name, includesProjects: true }),
     ]);
-    await appendAudit(db, identity, "client", clientId, "delete", { name: client.name, includesProjects: true });
   } else if (action === "addEmployee") {
     const employeeId = String(body.id ?? crypto.randomUUID());
     const name = boundedText(body.name, 120, true);
     const email = boundedText(body.email, 254, true);
-    const hourlyCost = Number(body.hourlyCost ?? 0);
+    const hourlyCost = normalizedMoney(body.hourlyCost);
     if (!validRecordId(employeeId) || !name || !email || !validEmail(email) || !Number.isFinite(hourlyCost) || hourlyCost < 0 || hourlyCost > 1000000) return Response.json({ error: "פרטי העובד אינם תקינים" }, { status: 400 });
-    await db.prepare("INSERT INTO users (id, business_id, email, display_name, role, hourly_cost) VALUES (?, ?, ?, ?, 'employee', ?)").bind(employeeId, businessId, email, name, hourlyCost).run();
-    await appendAudit(db, identity, "employee", employeeId, "create", { name, email, hourlyCost });
+    await db.batch([
+      db.prepare("INSERT INTO users (id, business_id, email, display_name, role, hourly_cost) VALUES (?, ?, ?, ?, 'employee', ?)").bind(employeeId, businessId, email, name, hourlyCost),
+      auditStatement(db, identity, "employee", employeeId, "create", { name, email, hourlyCost }),
+    ]);
   } else if (action === "updateEmployee") {
     const employeeId = String(body.id ?? "");
     const name = boundedText(body.name, 120, true);
     const email = boundedText(body.email, 254, true);
-    const hourlyCost = Number(body.hourlyCost ?? 0);
+    const hourlyCost = normalizedMoney(body.hourlyCost);
     if (!validRecordId(employeeId) || !name || !email || !validEmail(email) || !Number.isFinite(hourlyCost) || hourlyCost < 0 || hourlyCost > 1000000) return Response.json({ error: "פרטי העובד אינם תקינים" }, { status: 400 });
     const existing = await db.prepare("SELECT display_name AS name, email, hourly_cost AS hourlyCost FROM users WHERE id = ? AND business_id = ? AND role = 'employee' AND deleted_at IS NULL").bind(employeeId, businessId).first<Record<string, unknown>>();
     if (!existing) return Response.json({ error: "העובד לא נמצא" }, { status: 400 });
     await db.batch([
       db.prepare("UPDATE users SET display_name = ?, email = ?, hourly_cost = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND role = 'employee' AND deleted_at IS NULL").bind(name, email, hourlyCost, employeeId, businessId),
       db.prepare("UPDATE employee_invitations SET status = 'revoked', updated_at = CURRENT_TIMESTAMP WHERE employee_id = ? AND business_id = ? AND status = 'pending'").bind(employeeId, businessId),
+      auditStatement(db, identity, "employee", employeeId, "update", { before: existing, after: { name, email, hourlyCost } }),
     ]);
-    await appendAudit(db, identity, "employee", employeeId, "update", { before: existing, after: { name, email, hourlyCost } });
   } else if (action === "deleteEmployee") {
     const employeeId = String(body.id ?? "");
     if (!validRecordId(employeeId)) return Response.json({ error: "מזהה העובד אינו תקין" }, { status: 400 });
@@ -836,8 +862,8 @@ export async function POST(request: Request) {
     await db.batch([
       db.prepare("UPDATE users SET deleted_at = CURRENT_TIMESTAMP, is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND role = 'employee' AND deleted_at IS NULL").bind(employeeId, businessId),
       db.prepare("UPDATE employee_invitations SET status = 'revoked', updated_at = CURRENT_TIMESTAMP WHERE employee_id = ? AND business_id = ? AND status = 'pending'").bind(employeeId, businessId),
+      auditStatement(db, identity, "employee", employeeId, "delete", employee),
     ]);
-    await appendAudit(db, identity, "employee", employeeId, "delete", employee);
   } else if (action === "createEmployeeInvitation") {
     const employeeId = String(body.id ?? "");
     const employee = await db.prepare(`SELECT u.email FROM users u JOIN businesses b ON b.id = u.business_id
@@ -848,16 +874,18 @@ export async function POST(request: Request) {
       db.prepare("UPDATE employee_invitations SET status = 'revoked', updated_at = CURRENT_TIMESTAMP WHERE employee_id = ? AND business_id = ? AND status = 'pending'").bind(employeeId, businessId),
       db.prepare(`INSERT INTO employee_invitations (id, business_id, employee_id, email, token, expires_at)
         VALUES (?, ?, ?, ?, ?, datetime('now', '+14 days'))`).bind(crypto.randomUUID(), businessId, employeeId, employee.email, crypto.randomUUID()),
+      auditStatement(db, identity, "employee", employeeId, "invitation_create", { email: employee.email }),
     ]);
-    await appendAudit(db, identity, "employee", employeeId, "invitation_create", { email: employee.email });
   } else if (action === "addProject" || action === "updateProject") {
-    const clientId = String(body.clientId ?? "");
-    const clientName = boundedText(body.clientName, 120, true);
+    const newClientName = boundedText(body.newClientName, 120);
+    const newClientId = String(body.newClientId ?? "");
+    const clientId = newClientName ? newClientId : String(body.clientId ?? "");
+    const clientName = newClientName ?? boundedText(body.clientName, 120, true);
     const name = boundedText(body.name, 160, true);
     const address = boundedText(body.address, 300, true);
     const billingType = String(body.billingType ?? "fixed");
-    const fixedPrice = Number(body.fixedPrice ?? 0);
-    const hourlyRate = Number(body.hourlyRate ?? 0);
+    const fixedPrice = normalizedMoney(body.fixedPrice ?? 0);
+    const hourlyRate = normalizedMoney(body.hourlyRate ?? 0);
     const workerIds = Array.isArray(body.workers) ? [...new Set(body.workers.map(String))].slice(0, 100) : [];
     if (!validRecordId(clientId) || !clientName || !name || !address || !["fixed", "hourly", "combined"].includes(billingType)
       || !Number.isFinite(fixedPrice) || fixedPrice < 0 || fixedPrice > 100000000
@@ -866,33 +894,52 @@ export async function POST(request: Request) {
       || (billingType === "combined" && fixedPrice <= 0 && hourlyRate <= 0)) {
       return Response.json({ error: "פרטי הפרויקט או התמחור אינם תקינים" }, { status: 400 });
     }
-    const client = await db.prepare("SELECT id, name FROM clients WHERE id = ? AND business_id = ? AND deleted_at IS NULL LIMIT 1").bind(clientId, businessId).first<{ id: string; name: string }>();
+    const createsClient = action === "addProject" && Boolean(newClientName);
+    const newClientAddress = boundedText(body.newClientAddress, 300, createsClient);
+    const newClientPhone = boundedText(body.newClientPhone, 40) ?? "";
+    const newClientEmail = boundedText(body.newClientEmail, 254) ?? "";
+    if (createsClient && (!validRecordId(newClientId) || !newClientAddress || !validEmail(newClientEmail))) return Response.json({ error: "פרטי הלקוח החדש אינם תקינים" }, { status: 400 });
+    const client = createsClient
+      ? { id: newClientId, name: newClientName! }
+      : await db.prepare("SELECT id, name FROM clients WHERE id = ? AND business_id = ? AND deleted_at IS NULL LIMIT 1").bind(clientId, businessId).first<{ id: string; name: string }>();
     if (!client) return Response.json({ error: "הלקוח לא נמצא" }, { status: 400 });
     if (client.name !== clientName) return Response.json({ error: "פרטי הלקוח אינם תואמים" }, { status: 409 });
     const projectStatus = ["active", "waiting", "completed"].includes(String(body.status ?? "")) ? String(body.status) : "active";
     const projectId = action === "updateProject" ? String(body.id ?? "") : String(body.id ?? crypto.randomUUID());
     if (!validRecordId(projectId)) return Response.json({ error: "מזהה הפרויקט אינו תקין" }, { status: 400 });
     let existing: Record<string, unknown> | null = null;
+    const validWorkerIds: string[] = [];
+    for (const workerId of workerIds) {
+      if (!validRecordId(workerId)) return Response.json({ error: "מזהה עובד בפרויקט אינו תקין" }, { status: 400 });
+      const worker = await db.prepare("SELECT id FROM users WHERE id = ? AND business_id = ? AND role = 'employee' AND deleted_at IS NULL").bind(workerId, businessId).first();
+      if (!worker) return Response.json({ error: "אחד העובדים שנבחרו אינו זמין" }, { status: 400 });
+      validWorkerIds.push(workerId);
+    }
+    const projectStatements: D1PreparedStatement[] = [];
     if (action === "updateProject") {
-      existing = await db.prepare("SELECT name, address, status, billing_method AS billingType, fixed_price AS fixedPrice, client_hourly_rate AS hourlyRate FROM projects WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(projectId, businessId).first<Record<string, unknown>>() ?? null;
+      existing = await db.prepare("SELECT name, address, status, billing_method AS billingType, fixed_price AS fixedPrice, client_hourly_rate AS hourlyRate, updated_at AS updatedAt FROM projects WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(projectId, businessId).first<Record<string, unknown>>() ?? null;
       if (!existing) return Response.json({ error: "הפרויקט לא נמצא" }, { status: 400 });
+      if (String(body.expectedUpdatedAt ?? "") !== String(existing.updatedAt ?? "")) return Response.json({ error: "הפרויקט השתנה במכשיר אחר. הנתונים החדשים נטענו; בדוק ונסה שוב.", conflict: { entity: "project", id: projectId, server: existing } }, { status: 409 });
       const activeTimer = await db.prepare("SELECT id FROM time_entries WHERE project_id = ? AND ended_at IS NULL AND deleted_at IS NULL LIMIT 1").bind(projectId).first();
       if (activeTimer) return Response.json({ error: "יש לעצור את הטיימר הפעיל לפני עריכת הפרויקט" }, { status: 409 });
-      await db.prepare("UPDATE projects SET client_id = ?, name = ?, address = ?, status = ?, billing_method = ?, fixed_price = ?, client_hourly_rate = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(client.id, name, address, projectStatus, billingType, fixedPrice, hourlyRate, projectId, businessId).run();
-      await db.prepare("DELETE FROM project_workers WHERE project_id IN (SELECT id FROM projects WHERE id = ? AND business_id = ?)").bind(projectId, businessId).run();
+      projectStatements.push(
+        db.prepare("UPDATE projects SET client_id = ?, name = ?, address = ?, status = ?, billing_method = ?, fixed_price = ?, client_hourly_rate = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(client.id, name, address, projectStatus, billingType, fixedPrice, hourlyRate, projectId, businessId),
+        db.prepare("DELETE FROM project_workers WHERE project_id IN (SELECT id FROM projects WHERE id = ? AND business_id = ?)").bind(projectId, businessId),
+      );
     } else {
-      await db.prepare("INSERT INTO projects (id, business_id, client_id, name, address, status, billing_method, fixed_price, client_hourly_rate, currency) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'EUR')").bind(projectId, businessId, client.id, name, address, projectStatus, billingType, fixedPrice, hourlyRate).run();
+      if (createsClient) projectStatements.push(db.prepare("INSERT INTO clients (id, business_id, name, address, phone, email) VALUES (?, ?, ?, ?, ?, ?)").bind(newClientId, businessId, newClientName, newClientAddress, newClientPhone, newClientEmail));
+      projectStatements.push(db.prepare("INSERT INTO projects (id, business_id, client_id, name, address, status, billing_method, fixed_price, client_hourly_rate, currency) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT currency FROM businesses WHERE id = ?))").bind(projectId, businessId, client.id, name, address, projectStatus, billingType, fixedPrice, hourlyRate, businessId));
     }
-    for (const workerId of workerIds) {
-      if (!validRecordId(workerId)) continue;
-      const worker = await db.prepare("SELECT id FROM users WHERE id = ? AND business_id = ? AND role = 'employee' AND deleted_at IS NULL").bind(workerId, businessId).first();
-      if (worker) await db.prepare("INSERT INTO project_workers (id, project_id, user_id) VALUES (?, ?, ?)").bind(crypto.randomUUID(), projectId, workerId).run();
-    }
-    await appendAudit(db, identity, "project", projectId, action === "updateProject" ? "update" : "create", { before: existing, after: { clientName, name, address, projectStatus, billingType, fixedPrice, hourlyRate, workerIds } });
+    for (const workerId of validWorkerIds) projectStatements.push(db.prepare("INSERT INTO project_workers (id, project_id, user_id) VALUES (?, ?, ?)").bind(crypto.randomUUID(), projectId, workerId));
+    projectStatements.push(auditStatement(db, identity, "project", projectId, action === "updateProject" ? "update" : "create", { before: existing, after: { clientId, clientName, name, address, projectStatus, billingType, fixedPrice, hourlyRate, workerIds: validWorkerIds } }));
+    await db.batch(projectStatements);
   } else if (action === "updateProjectStatus") {
     const projectId = String(body.id ?? "");
     const status = String(body.status ?? "");
     if (!["active", "waiting", "completed"].includes(status)) return Response.json({ error: "מצב הפרויקט אינו תקין" }, { status: 400 });
+    const currentProject = await db.prepare("SELECT updated_at AS updatedAt FROM projects WHERE id = ? AND business_id = ? AND deleted_at IS NULL LIMIT 1").bind(projectId, businessId).first<{ updatedAt: string }>();
+    if (!currentProject) return Response.json({ error: "הפרויקט לא נמצא" }, { status: 400 });
+    if (String(body.expectedUpdatedAt ?? "") !== currentProject.updatedAt) return Response.json({ error: "הפרויקט השתנה במכשיר אחר. הנתונים החדשים נטענו; בדוק ונסה שוב.", conflict: { entity: "project", id: projectId, server: currentProject } }, { status: 409 });
     if (status === "completed") {
       const activeTimer = await db.prepare(`SELECT te.id FROM time_entries te JOIN projects p ON p.id = te.project_id
         WHERE p.id = ? AND p.business_id = ? AND te.ended_at IS NULL AND te.deleted_at IS NULL LIMIT 1`).bind(projectId, businessId).first();
@@ -909,8 +956,10 @@ export async function POST(request: Request) {
     if (!project) return Response.json({ error: "הפרויקט לא נמצא" }, { status: 400 });
     const activeTimer = await db.prepare("SELECT id FROM time_entries WHERE project_id = ? AND ended_at IS NULL AND deleted_at IS NULL LIMIT 1").bind(projectId).first();
     if (activeTimer) return Response.json({ error: "יש לעצור את הטיימר הפעיל לפני מחיקת הפרויקט" }, { status: 409 });
-    await db.prepare("UPDATE projects SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(projectId, businessId).run();
-    await appendAudit(db, identity, "project", projectId, "delete", { name: project.name });
+    await db.batch([
+      db.prepare("UPDATE projects SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(projectId, businessId),
+      auditStatement(db, identity, "project", projectId, "delete", { name: project.name }),
+    ]);
   } else if (action === "restoreClient") {
     const clientId = String(body.id ?? "");
     const statements = [
@@ -919,8 +968,8 @@ export async function POST(request: Request) {
     if (body.restoreProjects === true) {
       statements.push(db.prepare("UPDATE projects SET deleted_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE client_id = ? AND business_id = ? AND deleted_at IS NOT NULL").bind(clientId, businessId));
     }
+    statements.push(auditStatement(db, identity, "client", clientId, "restore", { restoreProjects: body.restoreProjects === true }));
     await db.batch(statements);
-    await appendAudit(db, identity, "client", clientId, "restore", { restoreProjects: body.restoreProjects === true });
   } else if (action === "restoreProject") {
     const projectId = String(body.id ?? "");
     const project = await db.prepare("SELECT client_id AS clientId FROM projects WHERE id = ? AND business_id = ? AND deleted_at IS NOT NULL").bind(projectId, businessId).first<{ clientId: string }>();
@@ -928,13 +977,15 @@ export async function POST(request: Request) {
     await db.batch([
       db.prepare("UPDATE clients SET deleted_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ?").bind(project.clientId, businessId),
       db.prepare("UPDATE projects SET deleted_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ?").bind(projectId, businessId),
+      auditStatement(db, identity, "project", projectId, "restore", { clientId: project.clientId }),
     ]);
-    await appendAudit(db, identity, "project", projectId, "restore", { clientId: project.clientId });
   } else if (action === "restoreEmployee") {
     const employeeId = String(body.id ?? "");
     if (!validRecordId(employeeId)) return Response.json({ error: "מזהה העובד אינו תקין" }, { status: 400 });
-    await db.prepare("UPDATE users SET deleted_at = NULL, is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND role = 'employee' AND deleted_at IS NOT NULL").bind(employeeId, businessId).run();
-    await appendAudit(db, identity, "employee", employeeId, "restore");
+    await db.batch([
+      db.prepare("UPDATE users SET deleted_at = NULL, is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND role = 'employee' AND deleted_at IS NOT NULL").bind(employeeId, businessId),
+      auditStatement(db, identity, "employee", employeeId, "restore"),
+    ]);
   } else {
     return Response.json({ error: "פעולה לא מוכרת" }, { status: 400 });
   }

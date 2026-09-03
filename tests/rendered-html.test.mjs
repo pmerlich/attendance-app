@@ -130,9 +130,9 @@ test("hardens data mutations and production delivery", async () => {
   assert.match(route, /הבקשה גדולה מדי/);
   assert.match(route, /יש לעצור את הטיימר הפעיל לפני מחיקת הפרויקט/);
   assert.match(route, /searchParams\.get\("health"\) === "1"/);
-  assert.match(route, /appendAudit/);
+  assert.match(route, /auditStatement/);
   assert.match(route, /loadProjectActivity/);
-  assert.match(route, /ORDER BY te\.started_at DESC LIMIT 1000/);
+  assert.match(route, /ORDER BY te\.started_at DESC/);
   assert.match(worker, /content-security-policy/);
   assert.match(worker, /no-store, max-age=0/);
   assert.match(operations, /npm run backup/);
@@ -151,7 +151,7 @@ test("enables the isolated guest demo only on the preview host", async () => {
   assert.ok(api.indexOf('hostname === "menahel-avoda.er2829288.workers.dev"') < api.indexOf("if (userId && email)"), "the public demo host must ignore client-supplied identity headers");
   assert.match(api, /מצב האורח מיועד לצפייה בלבד/);
   assert.match(page, /מצב אורח — דני לוי/);
-  assert.match(page, /סביבת הדגמה ציבורית ומשותפת/);
+  assert.match(page, /סביבת הדגמה ציבורית לקריאה בלבד/);
 });
 
 test("isolates offline data and validates critical mutations", async () => {
@@ -167,4 +167,23 @@ test("isolates offline data and validates critical mutations", async () => {
   assert.match(api, /WHERE te\.id = \? AND te\.user_id = \?/);
   assert.match(api, /p\.client_id AS clientId/);
   assert.doesNotMatch(worker, /script-src 'self' 'unsafe-inline'/);
+  assert.match(api, /projectStatements\.push\(auditStatement/);
+  assert.match(api, /if \(createsClient\) projectStatements\.push/);
+  assert.doesNotMatch(api, /async function appendAudit/);
+  assert.match(page, /newClientId: crypto\.randomUUID\(\)/);
+  assert.match(page, /operation\.lastError/);
+  assert.match(page, /discardRejectedOperations/);
+  assert.match(api, /expectedUpdatedAt/);
+  assert.match(api, /conflict: \{ entity: "project"/);
+  assert.match(page, /window\.addEventListener\("popstate"/);
+});
+
+test("ships complete queries and performance indexes", async () => {
+  const api = await readFile(new URL("../app/api/state/route.ts", import.meta.url), "utf8");
+  const migration = await readFile(new URL("../drizzle/0009_performance_indexes.sql", import.meta.url), "utf8");
+  assert.doesNotMatch(api, /ORDER BY te\.started_at DESC LIMIT (50|1000)/);
+  assert.doesNotMatch(api, /ORDER BY (pay\.paid_at|ex\.incurred_at|a\.created_at|al\.created_at) DESC(?:, [^`]+)? LIMIT (100|1000)/);
+  assert.match(api, /let schemaReady: Promise<void> \| null/);
+  assert.match(migration, /idx_projects_business_deleted/);
+  assert.match(migration, /idx_audit_business_created/);
 });
