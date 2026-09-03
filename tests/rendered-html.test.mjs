@@ -148,8 +148,23 @@ test("enables the isolated guest demo only on the preview host", async () => {
   assert.match(api, /guest-project-1/);
   assert.match(api, /guest-payment-1/);
   assert.match(api, /guest-expense-1/);
-  assert.ok(api.indexOf("if (userId && email)") < api.indexOf('hostname === "menahel-avoda.er2829288.workers.dev"'));
-  assert.doesNotMatch(api, /מצב האורח מיועד לצפייה בלבד/);
+  assert.ok(api.indexOf('hostname === "menahel-avoda.er2829288.workers.dev"') < api.indexOf("if (userId && email)"), "the public demo host must ignore client-supplied identity headers");
+  assert.match(api, /מצב האורח מיועד לצפייה בלבד/);
   assert.match(page, /מצב אורח — דני לוי/);
   assert.match(page, /סביבת הדגמה ציבורית ומשותפת/);
+});
+
+test("isolates offline data and validates critical mutations", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const offline = await readFile(new URL("../app/offline-store.ts", import.meta.url), "utf8");
+  const api = await readFile(new URL("../app/api/state/route.ts", import.meta.url), "utf8");
+  const worker = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
+  assert.match(offline, /setOfflineScope/);
+  assert.match(offline, /DATABASE_PREFIX.*currentScope/s);
+  assert.match(page, /storageScope/);
+  assert.match(page, /saveAction\("stopTimer", \{ id:/);
+  assert.match(api, /function validCalendarDate/);
+  assert.match(api, /WHERE te\.id = \? AND te\.user_id = \?/);
+  assert.match(api, /p\.client_id AS clientId/);
+  assert.doesNotMatch(worker, /script-src 'self' 'unsafe-inline'/);
 });

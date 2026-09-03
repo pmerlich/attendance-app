@@ -5,15 +5,28 @@ export type QueuedOperation = {
   createdAt: string;
 };
 
-const DATABASE_NAME = "menahel-avoda-offline";
+const DATABASE_PREFIX = "menahel-avoda-offline";
+const SCOPE_KEY = "menahel-avoda-offline-scope";
 const DATABASE_VERSION = 1;
 const STATE_STORE = "state";
 const QUEUE_STORE = "operations";
 const STATE_KEY = "latest";
 
+function currentScope() {
+  if (typeof window === "undefined") return "unscoped";
+  return window.localStorage.getItem(SCOPE_KEY) ?? "unscoped";
+}
+
+export function setOfflineScope(scope: string) {
+  if (typeof window === "undefined") return;
+  const normalized = scope.replace(/[^a-zA-Z0-9._:-]/g, "-").slice(0, 250);
+  if (!normalized) throw new Error("זהות האחסון המקומי אינה תקינה");
+  window.localStorage.setItem(SCOPE_KEY, normalized);
+}
+
 function openDatabase() {
   return new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
+    const request = indexedDB.open(`${DATABASE_PREFIX}:${currentScope()}`, DATABASE_VERSION);
     request.onupgradeneeded = () => {
       const database = request.result;
       if (!database.objectStoreNames.contains(STATE_STORE)) database.createObjectStore(STATE_STORE);

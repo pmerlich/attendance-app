@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
-import { enqueueOperation, readCachedState, readQueuedOperations, removeQueuedOperation, writeCachedState, type QueuedOperation } from "./offline-store";
+import { enqueueOperation, readCachedState, readQueuedOperations, removeQueuedOperation, setOfflineScope, writeCachedState, type QueuedOperation } from "./offline-store";
 import { createXlsx, type WorkbookCell } from "./xlsx-export";
 
 type View = "dashboard" | "projects" | "time" | "payments" | "expenses" | "clients" | "employees" | "trash" | "history" | "reports" | "profile";
@@ -18,6 +18,7 @@ type Employee = { id: RecordId; name: string; email: string; hourlyCost: number;
 type Project = {
   id: RecordId;
   name: string;
+  clientId: RecordId;
   client: string;
   address: string;
   tag: "בביצוע" | "ממתין" | "הסתיים";
@@ -52,9 +53,9 @@ const initialEmployees: Employee[] = [
 ];
 
 const initialProjects: Project[] = [
-  { id: 1, name: "שיפוץ דירת משפחת כהן", client: "דניאל כהן", address: "Rue de la Paix 14, Paris", tag: "בביצוע", billingType: "fixed", billing: "מחיר גלובלי", fixedPrice: 4200, hourlyRate: 0, workerIds: ["employee-1"], totalSeconds: 102600, expectedAmount: 4200, paidAmount: 0, hours: "28:30:00", balance: "€4,200", color: "mint" },
-  { id: 2, name: "Küchenmontage Berlin", client: "Bauhaus Projekt GmbH", address: "Kantstraße 81, Berlin", tag: "ממתין", billingType: "hourly", billing: "€45 לשעה", fixedPrice: 0, hourlyRate: 45, workerIds: ["employee-2"], totalSeconds: 43200, expectedAmount: 540, paidAmount: 0, hours: "12:00:00", balance: "€540", color: "amber" },
-  { id: 3, name: "Office renovation — Atelier 27", client: "Atelier 27", address: "Boulevard Voltaire 27, Paris", tag: "בביצוע", billingType: "combined", billing: "€1,500 + €38 לשעה", fixedPrice: 1500, hourlyRate: 38, workerIds: ["employee-1", "employee-3"], totalSeconds: 149400, expectedAmount: 3077, paidAmount: 0, hours: "41:30:00", balance: "€3,077", color: "blue" },
+  { id: 1, name: "שיפוץ דירת משפחת כהן", clientId: 1, client: "דניאל כהן", address: "Rue de la Paix 14, Paris", tag: "בביצוע", billingType: "fixed", billing: "מחיר גלובלי", fixedPrice: 4200, hourlyRate: 0, workerIds: ["employee-1"], totalSeconds: 102600, expectedAmount: 4200, paidAmount: 0, hours: "28:30:00", balance: "€4,200", color: "mint" },
+  { id: 2, name: "Küchenmontage Berlin", clientId: 2, client: "Bauhaus Projekt GmbH", address: "Kantstraße 81, Berlin", tag: "ממתין", billingType: "hourly", billing: "€45 לשעה", fixedPrice: 0, hourlyRate: 45, workerIds: ["employee-2"], totalSeconds: 43200, expectedAmount: 540, paidAmount: 0, hours: "12:00:00", balance: "€540", color: "amber" },
+  { id: 3, name: "Office renovation — Atelier 27", clientId: 3, client: "Atelier 27", address: "Boulevard Voltaire 27, Paris", tag: "בביצוע", billingType: "combined", billing: "€1,500 + €38 לשעה", fixedPrice: 1500, hourlyRate: 38, workerIds: ["employee-1", "employee-3"], totalSeconds: 149400, expectedAmount: 3077, paidAmount: 0, hours: "41:30:00", balance: "€3,077", color: "blue" },
 ];
 
 const viewTitles: Record<View, { eyebrow: string; title: string }> = {
@@ -157,7 +158,7 @@ function projectStatusFromTag(tag: Project["tag"]): ProjectStatus {
 function projectTagFromStatus(status: unknown): Project["tag"] {
   return status === "waiting" ? "ממתין" : status === "completed" ? "הסתיים" : "בביצוע";
 }
-type StoredProject = Pick<Project, "id" | "name" | "client" | "address" | "tag" | "billingType" | "fixedPrice" | "hourlyRate"> & { workerIds: string | string[]; totalSeconds: number; paidAmount: number; expenseAmount: number; billableExpenseAmount: number; laborCost: number };
+type StoredProject = Pick<Project, "id" | "name" | "clientId" | "client" | "address" | "tag" | "billingType" | "fixedPrice" | "hourlyRate"> & { workerIds: string | string[]; totalSeconds: number; paidAmount: number; expenseAmount: number; billableExpenseAmount: number; laborCost: number };
 type AccountUser = { id: string; displayName: string; email: string; role: "manager" | "employee"; isLocal: boolean; isGuest?: boolean };
 type ActiveTimer = { id: string; projectId: string; startedAt: string; elapsedSeconds: number };
 type TimeEntry = { id: string; projectId: string; projectName: string; userId: string; workerName: string; startedAt: string; endedAt: string | null; durationSeconds: number; description: string; source: "timer" | "manual" };
@@ -165,16 +166,16 @@ type Payment = { id: string; projectId: string; projectName: string; clientName:
 type Expense = { id: string; projectId: string; projectName: string; clientName: string; amount: number; incurredAt: string; category: "materials" | "equipment" | "travel" | "subcontractor" | "other"; billableToClient: boolean | number; note: string };
 type Attachment = { id: string; projectId: string; projectName: string; expenseId: string | null; expenseNote: string; fileName: string; contentType: string; createdAt: string };
 type DeletedClient = { id: RecordId; name: string; address: string; deletedAt: string; projectCount: number; snapshot?: Client };
-type DeletedProject = { id: RecordId; name: string; clientName: string; address: string; deletedAt: string; snapshot?: StoredProject };
+type DeletedProject = { id: RecordId; name: string; clientId: RecordId; clientName: string; address: string; deletedAt: string; snapshot?: StoredProject };
 type DeletedEmployee = { id: RecordId; name: string; email: string; deletedAt: string; snapshot?: Employee };
 type TrashState = { clients: DeletedClient[]; projects: DeletedProject[]; employees: DeletedEmployee[] };
 type AuditEntry = { id: string; actorName: string; entityType: string; entityId: string; action: string; detailsJson: string; createdAt: string };
 type ReportDataRow = { projectId: string; projectName: string; billingType: BillingType; fixedPrice: number; hourlyRate: number; totalSeconds: number; paidAmount: number; expenseAmount: number; billableExpenseAmount: number; laborCost: number };
-type StoredState = { accountMode: AccountMode; user: AccountUser; clients: Client[]; employees: Employee[]; projects: StoredProject[]; activeTimer: ActiveTimer | null; recentTimeEntries: TimeEntry[]; payments: Payment[]; expenses: Expense[]; attachments: Attachment[]; trash: TrashState; auditLog: AuditEntry[] };
+type StoredState = { storageScope: string; accountMode: AccountMode; user: AccountUser; clients: Client[]; employees: Employee[]; projects: StoredProject[]; activeTimer: ActiveTimer | null; recentTimeEntries: TimeEntry[]; payments: Payment[]; expenses: Expense[]; attachments: Attachment[]; trash: TrashState; auditLog: AuditEntry[] };
 type ProjectActivity = { timeEntries: TimeEntry[]; payments: Payment[]; expenses: Expense[]; attachments: Attachment[] };
 
 
-const offlineCreationActions = new Set(["addClient", "addEmployee", "addProject", "addManualTime", "addPayment", "addExpense"]);
+const offlineCreationActions = new Set(["addClient", "addEmployee", "addProject", "addClientProject", "addManualTime", "addPayment", "addExpense"]);
 const onlineOnlyActions = new Set(["createEmployeeInvitation", "deleteAttachment"]);
 
 function prepareQueuedOperation(action: string, values: Record<string, unknown>): QueuedOperation {
@@ -239,18 +240,18 @@ function applyOptimisticOperation(state: StoredState, operation: QueuedOperation
     const client = next.clients.find((item) => String(item.id) === id);
     const deletedAt = new Date().toISOString();
     if (client) next.trash.clients.unshift({ id: client.id, name: client.name, address: client.address, deletedAt, projectCount: client.projects, snapshot: client });
-    const relatedProjects = next.projects.filter((item) => item.client === client?.name);
-    next.trash.projects.unshift(...relatedProjects.map((item) => ({ id: item.id, name: item.name, clientName: item.client, address: item.address, deletedAt, snapshot: item })));
+    const relatedProjects = next.projects.filter((item) => String(item.clientId) === String(id));
+    next.trash.projects.unshift(...relatedProjects.map((item) => ({ id: item.id, name: item.name, clientId: item.clientId, clientName: item.client, address: item.address, deletedAt, snapshot: item })));
     next.clients = next.clients.filter((item) => String(item.id) !== id);
-    next.projects = next.projects.filter((item) => item.client !== client?.name);
+    next.projects = next.projects.filter((item) => String(item.clientId) !== String(id));
   }
   if (operation.action === "restoreClient") {
     const deleted = next.trash.clients.find((item) => String(item.id) === id);
     if (deleted?.snapshot && !next.clients.some((item) => String(item.id) === id)) next.clients.unshift(deleted.snapshot);
     if (values.restoreProjects === true && deleted) {
-      const projectsToRestore = next.trash.projects.filter((item) => item.clientName === deleted.name && item.snapshot);
+      const projectsToRestore = next.trash.projects.filter((item) => String(item.clientId) === String(id) && item.snapshot);
       for (const item of projectsToRestore) if (item.snapshot && !next.projects.some((project) => String(project.id) === String(item.id))) next.projects.unshift(item.snapshot);
-      next.trash.projects = next.trash.projects.filter((item) => item.clientName !== deleted.name);
+      next.trash.projects = next.trash.projects.filter((item) => String(item.clientId) !== String(id));
     }
     next.trash.clients = next.trash.clients.filter((item) => String(item.id) !== id);
   }
@@ -268,22 +269,25 @@ function applyOptimisticOperation(state: StoredState, operation: QueuedOperation
     next.trash.employees = next.trash.employees.filter((item) => String(item.id) !== id);
   }
 
-  if (operation.action === "addProject" && !next.projects.some((item) => String(item.id) === id)) {
-    next.projects.unshift({ id, name: String(values.name ?? ""), client: String(values.client ?? ""), address: String(values.address ?? ""), tag: projectTagFromStatus(values.status), billingType: String(values.billingType ?? "fixed") as BillingType, fixedPrice: Number(values.fixedPrice ?? 0), hourlyRate: Number(values.hourlyRate ?? 0), workerIds: Array.isArray(values.workers) ? values.workers.map(String) : [], totalSeconds: 0, paidAmount: 0, expenseAmount: 0, billableExpenseAmount: 0, laborCost: 0 });
-    next.clients = next.clients.map((client) => client.name === String(values.client ?? "") ? { ...client, projects: client.projects + 1 } : client);
+  if ((operation.action === "addProject" || operation.action === "addClientProject") && !next.projects.some((item) => String(item.id) === id)) {
+    const clientId = String(values.clientId ?? values.newClientId ?? "");
+    const clientName = String(values.clientName ?? values.newClientName ?? "");
+    if (operation.action === "addClientProject" && !next.clients.some((client) => String(client.id) === clientId)) next.clients.unshift({ id: clientId, name: clientName, address: String(values.newClientAddress ?? ""), phone: String(values.newClientPhone ?? ""), email: String(values.newClientEmail ?? ""), projects: 0 });
+    next.projects.unshift({ id, name: String(values.name ?? ""), clientId, client: clientName, address: String(values.address ?? ""), tag: projectTagFromStatus(values.status), billingType: String(values.billingType ?? "fixed") as BillingType, fixedPrice: Number(values.fixedPrice ?? 0), hourlyRate: Number(values.hourlyRate ?? 0), workerIds: Array.isArray(values.workers) ? values.workers.map(String) : [], totalSeconds: 0, paidAmount: 0, expenseAmount: 0, billableExpenseAmount: 0, laborCost: 0 });
+    next.clients = next.clients.map((client) => String(client.id) === clientId ? { ...client, projects: client.projects + 1 } : client);
   }
-  if (operation.action === "updateProject") next.projects = next.projects.map((item) => String(item.id) === id ? { ...item, name: String(values.name ?? ""), client: String(values.client ?? ""), address: String(values.address ?? ""), tag: projectTagFromStatus(values.status), billingType: String(values.billingType ?? "fixed") as BillingType, fixedPrice: Number(values.fixedPrice ?? 0), hourlyRate: Number(values.hourlyRate ?? 0), workerIds: Array.isArray(values.workers) ? values.workers.map(String) : [] } : item);
+  if (operation.action === "updateProject") next.projects = next.projects.map((item) => String(item.id) === id ? { ...item, name: String(values.name ?? ""), clientId: String(values.clientId ?? ""), client: String(values.clientName ?? ""), address: String(values.address ?? ""), tag: projectTagFromStatus(values.status), billingType: String(values.billingType ?? "fixed") as BillingType, fixedPrice: Number(values.fixedPrice ?? 0), hourlyRate: Number(values.hourlyRate ?? 0), workerIds: Array.isArray(values.workers) ? values.workers.map(String) : [] } : item);
   if (operation.action === "updateProjectStatus") next.projects = next.projects.map((item) => String(item.id) === id ? { ...item, tag: projectTagFromStatus(values.status) } : item);
   if (operation.action === "deleteProject") {
     const projectToDelete = next.projects.find((item) => String(item.id) === id);
-    if (projectToDelete) next.trash.projects.unshift({ id: projectToDelete.id, name: projectToDelete.name, clientName: projectToDelete.client, address: projectToDelete.address, deletedAt: new Date().toISOString(), snapshot: projectToDelete });
+    if (projectToDelete) next.trash.projects.unshift({ id: projectToDelete.id, name: projectToDelete.name, clientId: projectToDelete.clientId, clientName: projectToDelete.client, address: projectToDelete.address, deletedAt: new Date().toISOString(), snapshot: projectToDelete });
     next.projects = next.projects.filter((item) => String(item.id) !== id);
-    next.clients = next.clients.map((client) => client.name === projectToDelete?.client ? { ...client, projects: Math.max(0, client.projects - 1) } : client);
+    next.clients = next.clients.map((client) => String(client.id) === String(projectToDelete?.clientId) ? { ...client, projects: Math.max(0, client.projects - 1) } : client);
   }
   if (operation.action === "restoreProject") {
     const deleted = next.trash.projects.find((item) => String(item.id) === id);
     if (deleted?.snapshot && !next.projects.some((item) => String(item.id) === id)) next.projects.unshift(deleted.snapshot);
-    next.clients = next.clients.map((client) => client.name === deleted?.clientName ? { ...client, projects: client.projects + 1 } : client);
+    next.clients = next.clients.map((client) => String(client.id) === String(deleted?.clientId) ? { ...client, projects: client.projects + 1 } : client);
     next.trash.projects = next.trash.projects.filter((item) => String(item.id) !== id);
   }
 
@@ -352,6 +356,7 @@ export default function Home() {
   const syncingRef = useRef(false);
 
   function applyStoredState(data: StoredState) {
+    setOfflineScope(data.storageScope);
     stateRef.current = data;
     setOfflineWithoutCache(false);
     void writeCachedState(data).catch(() => undefined);
@@ -536,7 +541,15 @@ export default function Home() {
           if (cached) applyStoredState(cached);
           setInviteNotice({ kind: "error", text: error instanceof Error ? error.message : "אישור ההזמנה נכשל" });
         }
+      } else {
+        const identityResponse = await fetch("/api/state");
+        if (identityResponse.status === 401) { setAuthRequired(true); return; }
+        if (!identityResponse.ok) throw new Error("אימות החשבון נכשל");
+        const identityState = await identityResponse.json() as StoredState;
+        applyStoredState(identityState);
       }
+      const scopedQueue = await readQueuedOperations().catch(() => []);
+      setPendingCount(scopedQueue.length);
       await syncQueuedOperations();
     })().catch(() => {
       if (!active) return;
@@ -629,7 +642,7 @@ export default function Home() {
     if (running && !isCurrentProject) return;
     try {
       if (isCurrentProject) {
-        await saveAction("stopTimer", {});
+        await saveAction("stopTimer", { id: stateRef.current?.activeTimer?.id });
         setSelectedDashboardProjectId(null);
       } else {
         setActiveProject(project);
@@ -650,7 +663,7 @@ export default function Home() {
 
   async function stopTimer() {
     try {
-      await saveAction("stopTimer", {});
+      await saveAction("stopTimer", { id: stateRef.current?.activeTimer?.id });
       setSelectedDashboardProjectId(null);
     } catch { setSyncState("error"); }
   }
@@ -821,10 +834,16 @@ export default function Home() {
     const fixedPrice = Number(data.get("fixedPrice") || 0);
     const hourlyRate = Number(data.get("hourlyRate") || 0);
     const newClientName = String(data.get("newClientName") ?? "").trim();
-    const clientName = newClientName || String(data.get("client") ?? "");
+    const clientChoiceValue = String(data.get("client") ?? "");
+    const selectedClient = clients.find((client) => String(client.id) === clientChoiceValue) ?? clients.find((client) => client.name === clientChoiceValue);
+    const clientId = String(selectedClient?.id ?? "");
     try {
-      if (!editingId && newClientName) await saveAction("addClient", { name: newClientName, address: data.get("newClientAddress"), phone: data.get("newClientPhone"), email: data.get("newClientEmail") });
-      await saveAction(editingId ? "updateProject" : "addProject", { id: editingId, name: data.get("name"), client: clientName, address: data.get("address"), billingType, status: data.get("status"), fixedPrice, hourlyRate, workers: data.getAll("workers") });
+      let resolvedClientId = clientId;
+      if (!editingId && newClientName) {
+        resolvedClientId = crypto.randomUUID();
+        await saveAction("addClient", { id: resolvedClientId, name: newClientName, address: data.get("newClientAddress"), phone: data.get("newClientPhone"), email: data.get("newClientEmail") });
+      }
+      await saveAction(editingId ? "updateProject" : "addProject", { id: editingId, name: data.get("name"), clientId: resolvedClientId, clientName: newClientName || selectedClient?.name || "", address: data.get("address"), billingType, status: data.get("status"), fixedPrice, hourlyRate, workers: data.getAll("workers") });
       setModal(null);
       setEditingId(null);
       setView("dashboard");
