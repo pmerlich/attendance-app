@@ -1320,6 +1320,14 @@ input[type="number"]::-webkit-outer-spin-button { margin: 0; -webkit-appearance:
 }
 .page-actions-bar .primary-button, .page-actions-bar .secondary-compact { min-height: 42px; }
 
+@media (max-width: 720px) {
+  button, a.primary-button, a.secondary-button, select { min-height: 44px; }
+  .project-primary-actions button, .mobile-primary, .navigation-choice summary,
+  .payment-actions button, .time-entry-actions button, .attachment-actions button,
+  .project-status-control select, .section-actions button, .timer-warning button,
+  .record-card .record-actions button, .restore-actions button, .trash-row > button { min-height: 44px; }
+}
+
 .project-row { grid-template-columns: 52px minmax(180px, 1.5fr) minmax(80px, .6fr) repeat(2, minmax(90px, 1fr)) auto; cursor: pointer; }
 .project-row:focus-visible { outline: 3px solid rgba(5,150,105,.25); outline-offset: 2px; border-color: var(--green); }
 

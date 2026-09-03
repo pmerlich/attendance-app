@@ -772,6 +772,7 @@ export async function POST(request: Request) {
     if (!expense) return Response.json({ error: "ההוצאה לא נמצאה" }, { status: 400 });
     await db.batch([
       db.prepare("UPDATE expenses SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(expenseId),
+      db.prepare("UPDATE attachments SET expense_id = NULL WHERE expense_id = ? AND business_id = ? AND deleted_at IS NULL").bind(expenseId, businessId),
       db.prepare("INSERT INTO audit_log (id, business_id, actor_id, entity_type, entity_id, action, details_json) VALUES (?, ?, ?, 'expense', ?, 'delete', ?)").bind(crypto.randomUUID(), businessId, identity.ownerId, expenseId, JSON.stringify(expense)),
     ]);
   } else if (action === "deleteAttachment") {
@@ -779,12 +780,12 @@ export async function POST(request: Request) {
     const attachment = await db.prepare("SELECT id, project_id AS projectId, expense_id AS expenseId, object_key AS objectKey, file_name AS fileName, content_type AS contentType FROM attachments WHERE id = ? AND business_id = ? AND deleted_at IS NULL LIMIT 1")
       .bind(attachmentId, businessId).first<Record<string, unknown>>();
     if (!attachment) return Response.json({ error: "הקובץ לא נמצא" }, { status: 400 });
+    await env.FILES.delete(String(attachment.objectKey));
     await db.batch([
-      db.prepare("UPDATE attachments SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ?").bind(attachmentId, businessId),
+      db.prepare("DELETE FROM attachments WHERE id = ? AND business_id = ?").bind(attachmentId, businessId),
       db.prepare("INSERT INTO audit_log (id, business_id, actor_id, entity_type, entity_id, action, details_json) VALUES (?, ?, ?, 'attachment', ?, 'delete', ?)")
         .bind(crypto.randomUUID(), businessId, identity.ownerId, attachmentId, JSON.stringify(attachment)),
     ]);
-    await env.FILES.delete(String(attachment.objectKey));
   } else if (action === "setAccountMode") {
     const accountMode = body.accountMode === "employer" ? "employer" : "solo";
     await db.batch([
@@ -860,7 +861,7 @@ export async function POST(request: Request) {
       WHERE te.user_id = ? AND p.business_id = ? AND te.ended_at IS NULL AND te.deleted_at IS NULL LIMIT 1`).bind(employeeId, businessId).first();
     if (activeTimer) return Response.json({ error: "יש לעצור את הטיימר הפעיל של העובד לפני מחיקתו" }, { status: 409 });
     await db.batch([
-      db.prepare("UPDATE users SET deleted_at = CURRENT_TIMESTAMP, is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND role = 'employee' AND deleted_at IS NULL").bind(employeeId, businessId),
+      db.prepare("UPDATE users SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND role = 'employee' AND deleted_at IS NULL").bind(employeeId, businessId),
       db.prepare("UPDATE employee_invitations SET status = 'revoked', updated_at = CURRENT_TIMESTAMP WHERE employee_id = ? AND business_id = ? AND status = 'pending'").bind(employeeId, businessId),
       auditStatement(db, identity, "employee", employeeId, "delete", employee),
     ]);
@@ -983,7 +984,7 @@ export async function POST(request: Request) {
     const employeeId = String(body.id ?? "");
     if (!validRecordId(employeeId)) return Response.json({ error: "מזהה העובד אינו תקין" }, { status: 400 });
     await db.batch([
-      db.prepare("UPDATE users SET deleted_at = NULL, is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND role = 'employee' AND deleted_at IS NOT NULL").bind(employeeId, businessId),
+      db.prepare("UPDATE users SET deleted_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND role = 'employee' AND deleted_at IS NOT NULL").bind(employeeId, businessId),
       auditStatement(db, identity, "employee", employeeId, "restore"),
     ]);
   } else {

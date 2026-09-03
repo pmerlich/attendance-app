@@ -360,8 +360,9 @@ export default function Home() {
   const [inviteNotice, setInviteNotice] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const stateRef = useRef<StoredState | null>(null);
   const syncingRef = useRef(false);
+  const stateChannelRef = useRef<BroadcastChannel | null>(null);
 
-  function applyStoredState(data: StoredState) {
+  function applyStoredState(data: StoredState, broadcast = true) {
     setOfflineScope(data.storageScope);
     stateRef.current = data;
     setOfflineWithoutCache(false);
@@ -387,6 +388,7 @@ export default function Home() {
     const serverElapsed = Number(data.activeTimer?.elapsedSeconds ?? 0);
     const localElapsed = data.activeTimer ? elapsedBetween(data.activeTimer.startedAt, sqlTimestamp(new Date().toISOString())) : 0;
     setSeconds(data.activeTimer ? Math.max(serverElapsed, localElapsed) : 0);
+    if (broadcast) stateChannelRef.current?.postMessage(data);
   }
 
   async function saveAction(action: string, values: Record<string, unknown>) {
@@ -540,7 +542,7 @@ export default function Home() {
     const handleOffline = () => { if (active) setSyncState("offline"); };
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
-    if ("serviceWorker" in navigator) void navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+    if ("serviceWorker" in navigator) void navigator.serviceWorker.register("/sw.js?v=2026-09-03-audit-1").catch(() => undefined);
 
     void (async () => {
       const cached = await readCachedState<StoredState>().catch(() => undefined);
@@ -596,6 +598,16 @@ export default function Home() {
     };
   // The startup listener intentionally captures the initial synchronizer, which reads current browser and IndexedDB state on every call.
   // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!("BroadcastChannel" in window)) return;
+    const channel = new BroadcastChannel("menahel-avoda-state");
+    stateChannelRef.current = channel;
+    channel.onmessage = (event: MessageEvent<StoredState>) => {
+      if (event.data?.storageScope === stateRef.current?.storageScope) applyStoredState(event.data, false);
+    };
+    return () => { stateChannelRef.current = null; channel.close(); };
   }, []);
 
   useEffect(() => {

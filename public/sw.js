@@ -1,4 +1,5 @@
-const CACHE_NAME = "menahel-avoda-shell-v3";
+const RELEASE = new URL(self.location.href).searchParams.get("v") || "development";
+const CACHE_NAME = `menahel-avoda-shell-${RELEASE}`;
 const APP_SHELL = ["/app-icon.png", "/manifest.webmanifest"];
 
 async function cacheApplicationShell() {

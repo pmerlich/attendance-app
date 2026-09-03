@@ -93,6 +93,7 @@ test("server-renders the Hebrew operations dashboard", async () => {
 test("ships an offline shell and an idempotent operation migration", async () => {
   const serviceWorker = await readFile(new URL("../public/sw.js", import.meta.url), "utf8");
   assert.match(serviceWorker, /CACHE_NAME/);
+  assert.match(serviceWorker, /searchParams\.get\("v"\)/);
   assert.match(serviceWorker, /url\.pathname\.startsWith\("\/api\/"\)/);
   assert.match(serviceWorker, /caches\.match\(request\)/);
   assert.match(serviceWorker, /matchAll/);
@@ -176,6 +177,9 @@ test("isolates offline data and validates critical mutations", async () => {
   assert.match(api, /expectedUpdatedAt/);
   assert.match(api, /conflict: \{ entity: "project"/);
   assert.match(page, /window\.addEventListener\("popstate"/);
+  assert.match(page, /BroadcastChannel\("menahel-avoda-state"\)/);
+  assert.match(api, /UPDATE attachments SET expense_id = NULL/);
+  assert.match(api, /DELETE FROM attachments WHERE id = \?/);
 });
 
 test("ships complete queries and performance indexes", async () => {
