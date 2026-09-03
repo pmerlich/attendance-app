@@ -24,6 +24,7 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.match(html, /<html[^>]*lang="he"[^>]*dir="rtl"/i);
   assert.match(html, /<title>מנהל עבודה \| פרויקטים, שעות וכספים<\/title>/);
   assert.match(html, /כל הפרויקטים/);
+  assert.match(html, /יצירת פרויקט/);
   assert.match(html, /הפעילו טיימר ישירות או פתחו פרויקט לפרטים ודיווח ידני/);
   assert.match(html, /aria-label="הפעלת טיימר עבור/);
   assert.match(html, /עדכון מצב הפרויקט/);
@@ -32,7 +33,7 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.match(html, /הכנסה צפויה/);
   assert.doesNotMatch(html, /מוכן להתחלה/);
   assert.doesNotMatch(html, /טיימר פעיל/);
-  assert.match(html, /מצב עובד/);
+  assert.doesNotMatch(html, /class="account-badge"/);
   assert.match(html, /עובד עצמאי/);
   assert.match(html, /סל המחזור/);
   assert.match(html, /דיווחי זמן/);
@@ -52,6 +53,9 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.doesNotMatch(page, /navigate=yes|dir_action=navigate/);
   assert.ok(page.includes('https://www.waze.com/ul?q='));
   assert.match(page, /function NavigationIcon/);
+  assert.match(page, /function WazeIcon/);
+  assert.match(page, /function GoogleMapsIcon/);
+  assert.doesNotMatch(page, /navigation-chevron/);
   assert.match(page, /updateProjectStatus/);
   assert.match(page, /eventStartedFromControl/);
   assert.match(page, /reflect the action immediately/);
@@ -75,6 +79,11 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.match(page, /€ תשלום/);
   assert.match(page, /− הוצאה/);
   assert.match(page, /defaultChecked={initial \? Boolean\(initial\.billableToClient\) : true}/);
+  assert.match(page, /＋ יצירת לקוח חדש/);
+  assert.match(page, /name="duration"/);
+  assert.match(page, /className="expense-receipts"/);
+  assert.match(page, /className="time-overview"/);
+  assert.match(page, /onWheelCapture/);
   assert.match(page, /if \(nextView === "dashboard"\) setSelectedDashboardProjectId\(null\)/);
   assert.match(page, /projectActivity=/);
   assert.match(css, /dashboard-project-card \.project-card-title-row strong \{ font-size:19px/);

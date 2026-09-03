@@ -1304,3 +1304,114 @@ img, svg, iframe { max-width: 100%; }
   .mobile-timer { width: 52px; height: 52px; flex: 0 0 52px; }
 }
 
+/* Usability polish: focused actions, durations, receipts and timer */
+input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button { margin: 0; -webkit-appearance: none; appearance: none; }
+
+.top-actions { justify-content: flex-end; }
+.page-actions-bar {
+  max-width: 1280px; margin: 0 auto 16px; display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap;
+}
+.page-actions-bar .primary-button, .page-actions-bar .secondary-compact { min-height: 42px; }
+
+.project-row { grid-template-columns: 52px minmax(180px, 1.5fr) minmax(80px, .6fr) repeat(2, minmax(90px, 1fr)) auto; cursor: pointer; }
+.project-row:focus-visible { outline: 3px solid rgba(5,150,105,.25); outline-offset: 2px; border-color: var(--green); }
+
+.time-overview {
+  max-width: 1280px; margin: 0 auto 18px; display: grid; grid-template-columns: minmax(0, 2fr) minmax(180px, 1fr); gap: 12px;
+}
+.time-overview > div {
+  min-height: 118px; padding: 20px 24px; display: flex; flex-direction: column; justify-content: center;
+  border: 1px solid rgba(5,150,105,.14); border-radius: var(--radius-lg); background: linear-gradient(145deg, #fff, #ecfdf5); box-shadow: var(--shadow-md);
+}
+.time-overview span { color: #475569; font-size: 14px; font-weight: 750; }
+.time-overview strong { margin-top: 5px; color: #064e3b; font: 850 clamp(28px, 4vw, 42px) 'Rubik', sans-serif; font-variant-numeric: tabular-nums; letter-spacing: .02em; }
+.time-overview small { margin-top: 3px; color: var(--muted); font-size: 12px; }
+.duration-input { font: 750 18px 'Rubik', sans-serif; letter-spacing: .08em; text-align: center; font-variant-numeric: tabular-nums; }
+
+.inline-client-fields {
+  grid-column: 1 / -1; padding: 18px; border: 1px solid #a7f3d0; border-radius: var(--radius-md); background: linear-gradient(145deg, #f0fdf4, #ecfdf5);
+}
+.inline-client-fields > div:first-child { margin-bottom: 14px; }
+.inline-client-fields > div:first-child strong, .inline-client-fields > div:first-child span { display: block; }
+.inline-client-fields > div:first-child strong { color: #065f46; font-size: 16px; }
+.inline-client-fields > div:first-child span { margin-top: 3px; color: #475569; font-size: 13px; }
+.inline-client-fields .form-grid { margin: 0; }
+
+.project-timer-button {
+  min-height: 64px !important; padding: 9px 14px !important; display: inline-flex; align-items: center; gap: 12px; text-align: right;
+  border: 0; border-radius: 16px; color: #fff; background: linear-gradient(135deg, #059669, #047857); box-shadow: 0 10px 24px rgba(5,150,105,.25);
+}
+.project-timer-button:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 14px 28px rgba(5,150,105,.32); }
+.project-timer-button:disabled { background: #94a3b8; box-shadow: none; cursor: not-allowed; }
+.project-timer-button-icon { width: 42px; height: 42px; flex: 0 0 42px; display: grid; place-items: center; border-radius: 13px; background: rgba(255,255,255,.18); }
+.project-timer-button-icon svg { width: 22px; height: 22px; }
+.project-timer-button > span:last-child { min-width: 0; }
+.project-timer-button strong, .project-timer-button small { display: block; }
+.project-timer-button strong { font-size: 16px; }
+.project-timer-button small { margin-top: 2px; color: #d1fae5; font-size: 11px; font-weight: 550; }
+
+.active-only-timer {
+  min-height: 0; padding: 26px 28px; grid-template-columns: minmax(240px, 1fr) minmax(220px, auto) auto; gap: 22px;
+  border: 1px solid rgba(167,243,208,.22); border-radius: 22px; background: radial-gradient(circle at 18% 15%, rgba(16,185,129,.23), transparent 34%), linear-gradient(135deg, #063f31, #071f19); box-shadow: 0 22px 48px rgba(6,78,59,.24);
+}
+.active-only-timer .live-pill { display: inline-flex; align-items: center; gap: 7px; width: fit-content; padding: 5px 10px; border: 1px solid rgba(167,243,208,.24); border-radius: 999px; background: rgba(16,185,129,.14); color: #a7f3d0; font-size: 12px; font-weight: 800; }
+.active-only-timer .live-pill i { width: 7px; height: 7px; border-radius: 50%; background: #34d399; box-shadow: 0 0 0 5px rgba(52,211,153,.12); animation: blinkFast 1.5s infinite; }
+.active-only-timer .timer-project h2 { margin-top: 10px; font-size: clamp(22px, 3vw, 30px); }
+.active-only-timer .timer-location { margin-top: 8px; color: #d1fae5; }
+.active-only-timer .timer-clock { padding: 16px 20px; border: 1px solid rgba(255,255,255,.12); border-radius: 16px; background: rgba(0,0,0,.18); backdrop-filter: blur(5px); }
+.active-only-timer .timer-clock > span { font-size: clamp(32px, 4.5vw, 50px); }
+.active-only-timer .stop-button { min-width: 170px; height: 52px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid rgba(255,255,255,.18); }
+.active-only-timer .stop-button svg { width: 20px; height: 20px; }
+
+.navigation-choice summary::after { content: none !important; }
+.navigation-provider-icon { width: 24px !important; height: 24px !important; flex: 0 0 24px; }
+.navigation-menu { min-width: 180px; padding: 7px; }
+.navigation-menu a { min-height: 44px; padding-inline: 10px; font-size: 14px; }
+
+.expense-list .expense-row {
+  display: grid; grid-template-columns: 42px minmax(180px, 1.4fr) auto auto minmax(110px, auto) auto; align-items: center; gap: 12px;
+}
+.expense-copy { min-width: 0; }
+.expense-copy strong, .expense-copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.expense-amount { display: grid; justify-items: start; gap: 5px; }
+.expense-amount > b { direction: ltr; font-size: 17px; }
+.expense-amount .billable-badge { position: static; width: fit-content; margin: 0; padding: 3px 8px; border-radius: 999px; background: #d1fae5; color: #047857; font-size: 11px; font-weight: 800; }
+.expense-receipts { grid-column: 2 / -1; padding-top: 12px; display: flex; gap: 9px; flex-wrap: wrap; border-top: 1px solid #e2e8f0; }
+.expense-receipt { min-width: 190px; max-width: 280px; padding: 7px; display: flex; align-items: center; gap: 9px; text-align: right; border: 1px solid #dbe4ea; border-radius: 11px; background: #f8fafc; }
+.expense-receipt:hover { border-color: #6ee7b7; background: #ecfdf5; }
+.expense-receipt-preview { width: 58px; height: 44px; flex: 0 0 58px; display: grid; place-items: center; overflow: hidden; border-radius: 8px; background: #e2e8f0; color: #475569; }
+.expense-receipt-preview img { width: 100%; height: 100%; object-fit: cover; }
+.expense-receipt > span:last-child { min-width: 0; }
+.expense-receipt strong, .expense-receipt small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.expense-receipt strong { color: var(--ink); font-size: 12px; }
+.expense-receipt small { margin-top: 3px; color: var(--green-dark); font-size: 11px; }
+
+@media (max-width: 760px) {
+  .top-actions { display: flex; justify-content: flex-end; }
+  .page-actions-bar { display: grid; grid-template-columns: repeat(auto-fit, minmax(105px, 1fr)); gap: 7px; }
+  .page-actions-bar button { width: 100%; min-width: 0; height: auto; padding: 8px 10px; white-space: normal; }
+  .time-overview { grid-template-columns: 1fr 1fr; }
+  .time-overview > div { min-height: 104px; padding: 15px; }
+  .time-overview strong { font-size: clamp(24px, 8vw, 34px); }
+  .project-row { grid-template-columns: 42px minmax(0, 1fr); }
+  .project-row .record-actions { grid-column: 1 / -1; }
+  .project-timer-button { width: 100%; }
+  .active-only-timer { padding: 20px 16px; display: grid; grid-template-columns: 1fr; gap: 15px; }
+  .active-only-timer .timer-clock { text-align: center; }
+  .active-only-timer .timer-actions, .active-only-timer .stop-button { width: 100%; }
+  .expense-list .expense-row { grid-template-columns: 42px minmax(0, 1fr); gap: 10px; }
+  .expense-row > time { grid-column: 1; grid-row: 2; }
+  .expense-row > small, .expense-row .expense-amount { grid-column: 2; }
+  .expense-row .payment-actions, .expense-receipts { grid-column: 1 / -1; }
+  .expense-amount { display: flex; align-items: center; justify-content: space-between; }
+  .expense-receipt { min-width: 0; width: 100%; max-width: none; }
+}
+
+@media (max-width: 420px) {
+  .time-overview { grid-template-columns: 1fr; }
+  .page-actions-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .page-actions-bar > :only-child { grid-column: 1 / -1; }
+}
+
