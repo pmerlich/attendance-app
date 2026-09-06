@@ -12,7 +12,7 @@ export const businesses = sqliteTable("businesses", {
 });
 
 export const users = sqliteTable("users", {
-  id: text("id").primaryKey(), businessId: text("business_id").notNull().references(() => businesses.id), authUserId: text("auth_user_id"), email: text("email").notNull(), displayName: text("display_name").notNull(), role: text("role", { enum: ["manager", "employee"] }).notNull(), hourlyCost: real("hourly_cost"), isActive: integer("is_active", { mode: "boolean" }).notNull().default(true), ...timestamps,
+  id: text("id").primaryKey(), businessId: text("business_id").notNull().references(() => businesses.id), authUserId: text("auth_user_id"), email: text("email").notNull(), displayName: text("display_name").notNull(), role: text("role", { enum: ["manager", "employee"] }).notNull(), hourlyCost: real("hourly_cost"), hourlyCostCents: integer("hourly_cost_cents"), isActive: integer("is_active", { mode: "boolean" }).notNull().default(true), ...timestamps,
 }, (table) => [uniqueIndex("users_business_email_unique").on(table.businessId, table.email), index("idx_users_auth_user_id").on(table.authUserId)]);
 
 export const employeeInvitations = sqliteTable("employee_invitations", {
@@ -33,7 +33,7 @@ export const clients = sqliteTable("clients", {
 }, (table) => [index("idx_clients_business_deleted").on(table.businessId, table.deletedAt)]);
 
 export const projects = sqliteTable("projects", {
-  id: text("id").primaryKey(), businessId: text("business_id").notNull().references(() => businesses.id), clientId: text("client_id").notNull().references(() => clients.id), name: text("name").notNull(), address: text("address").notNull().default(""), description: text("description").notNull().default(""), contactName: text("contact_name").notNull().default(""), contactPhone: text("contact_phone").notNull().default(""), startDate: text("start_date"), targetDate: text("target_date"), completedDate: text("completed_date"), status: text("status", { enum: ["active", "waiting", "completed", "archived"] }).notNull().default("active"), billingMethod: text("billing_method", { enum: ["fixed", "hourly", "combined", "manual"] }).notNull(), fixedPrice: real("fixed_price").notNull().default(0), clientHourlyRate: real("client_hourly_rate").notNull().default(0), manualCharge: real("manual_charge").notNull().default(0), currency: text("currency").notNull().default("EUR"), ...timestamps,
+  id: text("id").primaryKey(), businessId: text("business_id").notNull().references(() => businesses.id), clientId: text("client_id").notNull().references(() => clients.id), name: text("name").notNull(), address: text("address").notNull().default(""), description: text("description").notNull().default(""), contactName: text("contact_name").notNull().default(""), contactPhone: text("contact_phone").notNull().default(""), startDate: text("start_date"), targetDate: text("target_date"), completedDate: text("completed_date"), status: text("status", { enum: ["active", "waiting", "completed", "archived"] }).notNull().default("active"), billingMethod: text("billing_method", { enum: ["fixed", "hourly", "combined", "manual"] }).notNull(), fixedPrice: real("fixed_price").notNull().default(0), fixedPriceCents: integer("fixed_price_cents"), clientHourlyRate: real("client_hourly_rate").notNull().default(0), clientHourlyRateCents: integer("client_hourly_rate_cents"), manualCharge: real("manual_charge").notNull().default(0), currency: text("currency").notNull().default("EUR"), ...timestamps,
 }, (table) => [index("idx_projects_business_deleted").on(table.businessId, table.deletedAt)]);
 
 export const projectWorkers = sqliteTable("project_workers", {
@@ -48,11 +48,11 @@ export const timeEntries = sqliteTable("time_entries", {
 ]);
 
 export const payments = sqliteTable("payments", {
-  id: text("id").primaryKey(), projectId: text("project_id").notNull().references(() => projects.id), amount: real("amount").notNull(), paidAt: text("paid_at").notNull(), method: text("method"), note: text("note"), ...timestamps,
+  id: text("id").primaryKey(), projectId: text("project_id").notNull().references(() => projects.id), amount: real("amount").notNull(), amountCents: integer("amount_cents"), paidAt: text("paid_at").notNull(), method: text("method"), note: text("note"), ...timestamps,
 }, (table) => [index("idx_payments_project_id").on(table.projectId)]);
 
 export const expenses = sqliteTable("expenses", {
-  id: text("id").primaryKey(), projectId: text("project_id").notNull().references(() => projects.id), amount: real("amount").notNull(), incurredAt: text("incurred_at").notNull(), category: text("category").notNull().default("materials"), billableToClient: integer("billable_to_client", { mode: "boolean" }).notNull().default(false), note: text("note"), ...timestamps,
+  id: text("id").primaryKey(), projectId: text("project_id").notNull().references(() => projects.id), amount: real("amount").notNull(), amountCents: integer("amount_cents"), incurredAt: text("incurred_at").notNull(), category: text("category").notNull().default("materials"), billableToClient: integer("billable_to_client", { mode: "boolean" }).notNull().default(false), note: text("note"), ...timestamps,
 }, (table) => [index("idx_expenses_project_id").on(table.projectId)]);
 
 export const attachments = sqliteTable("attachments", {

@@ -39,7 +39,7 @@ async function ensureCoreSchema(db: D1Database) {
     )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS users (
       id text PRIMARY KEY NOT NULL, business_id text NOT NULL, auth_user_id text, email text NOT NULL,
-      display_name text NOT NULL, role text NOT NULL, hourly_cost real, is_active integer DEFAULT true NOT NULL,
+      display_name text NOT NULL, role text NOT NULL, hourly_cost real, hourly_cost_cents integer, is_active integer DEFAULT true NOT NULL,
       created_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, updated_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, deleted_at text
     )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS clients (
@@ -52,7 +52,7 @@ async function ensureCoreSchema(db: D1Database) {
       address text DEFAULT '' NOT NULL, description text DEFAULT '' NOT NULL, contact_name text DEFAULT '' NOT NULL,
       contact_phone text DEFAULT '' NOT NULL, start_date text, target_date text, completed_date text,
       status text DEFAULT 'active' NOT NULL, billing_method text NOT NULL,
-      fixed_price real DEFAULT 0 NOT NULL, client_hourly_rate real DEFAULT 0 NOT NULL, manual_charge real DEFAULT 0 NOT NULL,
+      fixed_price real DEFAULT 0 NOT NULL, fixed_price_cents integer, client_hourly_rate real DEFAULT 0 NOT NULL, client_hourly_rate_cents integer, manual_charge real DEFAULT 0 NOT NULL,
       currency text DEFAULT 'EUR' NOT NULL, created_at text DEFAULT CURRENT_TIMESTAMP NOT NULL,
       updated_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, deleted_at text
     )`),
@@ -67,12 +67,12 @@ async function ensureCoreSchema(db: D1Database) {
       created_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, updated_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, deleted_at text
     )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS payments (
-      id text PRIMARY KEY NOT NULL, project_id text NOT NULL, amount real NOT NULL, paid_at text NOT NULL,
+      id text PRIMARY KEY NOT NULL, project_id text NOT NULL, amount real NOT NULL, amount_cents integer, paid_at text NOT NULL,
       method text, note text, created_at text DEFAULT CURRENT_TIMESTAMP NOT NULL,
       updated_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, deleted_at text
     )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS expenses (
-      id text PRIMARY KEY NOT NULL, project_id text NOT NULL, amount real NOT NULL, incurred_at text NOT NULL,
+      id text PRIMARY KEY NOT NULL, project_id text NOT NULL, amount real NOT NULL, amount_cents integer, incurred_at text NOT NULL,
       category text DEFAULT 'materials' NOT NULL, billable_to_client integer DEFAULT false NOT NULL,
       note text, created_at text DEFAULT CURRENT_TIMESTAMP NOT NULL,
       updated_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, deleted_at text
@@ -114,6 +114,17 @@ async function ensureCoreSchema(db: D1Database) {
   ] as const;
   for (const [name, statement] of missingProjectColumns) {
     if (!projectColumns.results.some((column) => column.name === name)) await db.prepare(statement).run();
+  }
+  const minorUnitColumns = [
+    ["users", "hourly_cost_cents", "ALTER TABLE users ADD COLUMN hourly_cost_cents integer", "UPDATE users SET hourly_cost_cents = ROUND(hourly_cost * 100) WHERE hourly_cost IS NOT NULL"],
+    ["projects", "fixed_price_cents", "ALTER TABLE projects ADD COLUMN fixed_price_cents integer", "UPDATE projects SET fixed_price_cents = ROUND(fixed_price * 100)"],
+    ["projects", "client_hourly_rate_cents", "ALTER TABLE projects ADD COLUMN client_hourly_rate_cents integer", "UPDATE projects SET client_hourly_rate_cents = ROUND(client_hourly_rate * 100)"],
+    ["payments", "amount_cents", "ALTER TABLE payments ADD COLUMN amount_cents integer", "UPDATE payments SET amount_cents = ROUND(amount * 100)"],
+    ["expenses", "amount_cents", "ALTER TABLE expenses ADD COLUMN amount_cents integer", "UPDATE expenses SET amount_cents = ROUND(amount * 100)"],
+  ] as const;
+  for (const [table, name, alter, backfill] of minorUnitColumns) {
+    const columns = await db.prepare(`PRAGMA table_info(${table})`).all<{ name: string }>();
+    if (!columns.results.some((column) => column.name === name)) { await db.prepare(alter).run(); await db.prepare(backfill).run(); }
   }
   await db.batch([
     db.prepare("DROP INDEX IF EXISTS users_email_unique"),
@@ -193,12 +204,12 @@ async function loadState(db: D1Database, identity: Identity) {
   const projectsQuery = identity.role === "manager"
     ? db.prepare(`SELECT p.id, p.name, p.updated_at AS updatedAt, c.id AS clientId, c.name AS client, p.address, p.description, p.contact_name AS contactName, p.contact_phone AS contactPhone, p.start_date AS startDate, p.target_date AS targetDate, p.completed_date AS completedDate,
       CASE p.status WHEN 'waiting' THEN 'ממתין' WHEN 'completed' THEN 'הסתיים' ELSE 'בביצוע' END AS tag,
-      p.billing_method AS billingType, p.fixed_price AS fixedPrice, p.client_hourly_rate AS hourlyRate,
+      p.billing_method AS billingType, COALESCE(p.fixed_price_cents, ROUND(p.fixed_price * 100)) / 100.0 AS fixedPrice, COALESCE(p.client_hourly_rate_cents, ROUND(p.client_hourly_rate * 100)) / 100.0 AS hourlyRate,
       COALESCE((SELECT GROUP_CONCAT(pw.user_id) FROM project_workers pw WHERE pw.project_id = p.id), '') AS workerIds,
-      COALESCE((SELECT SUM(pay.amount) FROM payments pay WHERE pay.project_id = p.id AND pay.deleted_at IS NULL), 0) AS paidAmount,
-      COALESCE((SELECT SUM(ex.amount) FROM expenses ex WHERE ex.project_id = p.id AND ex.deleted_at IS NULL), 0) AS expenseAmount,
-      COALESCE((SELECT SUM(ex.amount) FROM expenses ex WHERE ex.project_id = p.id AND ex.billable_to_client = 1 AND ex.deleted_at IS NULL), 0) AS billableExpenseAmount,
-      COALESCE((SELECT SUM(COALESCE(te.duration_seconds, 0) / 3600.0 * COALESCE(pw.hourly_cost_override, u.hourly_cost, 0))
+      COALESCE((SELECT SUM(COALESCE(pay.amount_cents, ROUND(pay.amount * 100))) / 100.0 FROM payments pay WHERE pay.project_id = p.id AND pay.deleted_at IS NULL), 0) AS paidAmount,
+      COALESCE((SELECT SUM(COALESCE(ex.amount_cents, ROUND(ex.amount * 100))) / 100.0 FROM expenses ex WHERE ex.project_id = p.id AND ex.deleted_at IS NULL), 0) AS expenseAmount,
+      COALESCE((SELECT SUM(COALESCE(ex.amount_cents, ROUND(ex.amount * 100))) / 100.0 FROM expenses ex WHERE ex.project_id = p.id AND ex.billable_to_client = 1 AND ex.deleted_at IS NULL), 0) AS billableExpenseAmount,
+      COALESCE((SELECT SUM(COALESCE(te.duration_seconds, 0) / 3600.0 * COALESCE(pw.hourly_cost_override, COALESCE(u.hourly_cost_cents, ROUND(u.hourly_cost * 100)) / 100.0, 0))
         FROM time_entries te JOIN users u ON u.id = te.user_id LEFT JOIN project_workers pw ON pw.project_id = te.project_id AND pw.user_id = te.user_id
         WHERE te.project_id = p.id AND te.deleted_at IS NULL AND te.ended_at IS NOT NULL), 0) AS laborCost,
       COALESCE((SELECT SUM(COALESCE(te.duration_seconds, CAST((julianday('now') - julianday(te.started_at)) * 86400 AS INTEGER)))
@@ -207,7 +218,7 @@ async function loadState(db: D1Database, identity: Identity) {
       WHERE p.business_id = ? AND p.deleted_at IS NULL ORDER BY p.created_at DESC`).bind(businessId).all()
     : db.prepare(`SELECT p.id, p.name, p.updated_at AS updatedAt, c.id AS clientId, c.name AS client, p.address, p.description, p.contact_name AS contactName, p.contact_phone AS contactPhone, p.start_date AS startDate, p.target_date AS targetDate, p.completed_date AS completedDate,
       CASE p.status WHEN 'waiting' THEN 'ממתין' WHEN 'completed' THEN 'הסתיים' ELSE 'בביצוע' END AS tag,
-      'hourly' AS billingType, 0 AS fixedPrice, COALESCE(pw.hourly_cost_override, u.hourly_cost, 0) AS hourlyRate,
+      'hourly' AS billingType, 0 AS fixedPrice, COALESCE(pw.hourly_cost_override, COALESCE(u.hourly_cost_cents, ROUND(u.hourly_cost * 100)) / 100.0, 0) AS hourlyRate,
       '' AS workerIds, 0 AS paidAmount, 0 AS expenseAmount, 0 AS billableExpenseAmount, 0 AS laborCost,
       COALESCE((SELECT SUM(COALESCE(te.duration_seconds, CAST((julianday('now') - julianday(te.started_at)) * 86400 AS INTEGER)))
         FROM time_entries te WHERE te.project_id = p.id AND te.user_id = ? AND te.deleted_at IS NULL), 0) AS totalSeconds
@@ -233,14 +244,14 @@ async function loadState(db: D1Database, identity: Identity) {
       ORDER BY te.started_at DESC`).bind(identity.ownerId, businessId, identity.ownerId).all();
   const paymentsQuery = identity.role === "manager"
     ? db.prepare(`SELECT pay.id, pay.project_id AS projectId, p.name AS projectName, c.name AS clientName,
-      pay.amount, pay.paid_at AS paidAt, COALESCE(pay.method, '') AS method, COALESCE(pay.note, '') AS note, pay.updated_at AS updatedAt
+      COALESCE(pay.amount_cents, ROUND(pay.amount * 100)) / 100.0 AS amount, pay.paid_at AS paidAt, COALESCE(pay.method, '') AS method, COALESCE(pay.note, '') AS note, pay.updated_at AS updatedAt
       FROM payments pay JOIN projects p ON p.id = pay.project_id JOIN clients c ON c.id = p.client_id
       WHERE pay.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
       ORDER BY pay.paid_at DESC, pay.created_at DESC`).bind(businessId).all()
     : managerOnly();
   const expensesQuery = identity.role === "manager"
     ? db.prepare(`SELECT ex.id, ex.project_id AS projectId, p.name AS projectName, c.name AS clientName,
-      ex.amount, ex.incurred_at AS incurredAt, ex.category, ex.billable_to_client AS billableToClient,
+      COALESCE(ex.amount_cents, ROUND(ex.amount * 100)) / 100.0 AS amount, ex.incurred_at AS incurredAt, ex.category, ex.billable_to_client AS billableToClient,
       COALESCE(ex.note, '') AS note, ex.updated_at AS updatedAt
       FROM expenses ex JOIN projects p ON p.id = ex.project_id JOIN clients c ON c.id = p.client_id
       WHERE ex.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
@@ -267,7 +278,7 @@ async function loadState(db: D1Database, identity: Identity) {
     identity.role === "manager" ? db.prepare(`SELECT c.id, c.name, c.address, COALESCE(c.phone, '') AS phone, COALESCE(c.email, '') AS email, c.updated_at AS updatedAt, COUNT(p.id) AS projects
       FROM clients c LEFT JOIN projects p ON p.client_id = c.id AND p.deleted_at IS NULL
       WHERE c.business_id = ? AND c.deleted_at IS NULL GROUP BY c.id ORDER BY c.created_at DESC`).bind(businessId).all() : managerOnly(),
-    identity.role === "manager" ? db.prepare(`SELECT u.id, u.display_name AS name, u.email, COALESCE(u.hourly_cost, 0) AS hourlyCost, u.updated_at AS updatedAt,
+    identity.role === "manager" ? db.prepare(`SELECT u.id, u.display_name AS name, u.email, COALESCE(u.hourly_cost_cents, ROUND(u.hourly_cost * 100), 0) / 100.0 AS hourlyCost, u.updated_at AS updatedAt,
       CASE WHEN u.is_active = 1 THEN 'פעיל' ELSE 'מושהה' END AS status,
       CASE WHEN u.auth_user_id IS NOT NULL THEN 'connected'
         WHEN EXISTS (SELECT 1 FROM employee_invitations ei WHERE ei.employee_id = u.id AND ei.status = 'pending' AND ei.expires_at > CURRENT_TIMESTAMP) THEN 'pending'
@@ -334,18 +345,18 @@ async function loadFinancialReport(db: D1Database, identity: Identity, searchPar
   const range = [from, from, to, to];
   const result = await db.prepare([
     "SELECT p.id AS projectId, p.name AS projectName, p.created_at AS createdAt, p.billing_method AS billingType,",
-    "p.fixed_price AS fixedPrice, p.client_hourly_rate AS hourlyRate,",
+    "COALESCE(p.fixed_price_cents, ROUND(p.fixed_price * 100)) / 100.0 AS fixedPrice, COALESCE(p.client_hourly_rate_cents, ROUND(p.client_hourly_rate * 100)) / 100.0 AS hourlyRate,",
     "COALESCE((SELECT SUM(te.duration_seconds) FROM time_entries te",
     "WHERE te.project_id = p.id AND te.deleted_at IS NULL AND te.ended_at IS NOT NULL",
     "AND (? = '' OR substr(te.started_at, 1, 10) >= ?) AND (? = '' OR substr(te.started_at, 1, 10) <= ?)",
     "AND (? = 'all' OR te.user_id = ?)), 0) AS totalSeconds,",
-    "COALESCE((SELECT SUM(pay.amount) FROM payments pay WHERE pay.project_id = p.id AND pay.deleted_at IS NULL",
+    "COALESCE((SELECT SUM(COALESCE(pay.amount_cents, ROUND(pay.amount * 100))) / 100.0 FROM payments pay WHERE pay.project_id = p.id AND pay.deleted_at IS NULL",
     "AND (? = '' OR pay.paid_at >= ?) AND (? = '' OR pay.paid_at <= ?)), 0) AS paidAmount,",
-    "COALESCE((SELECT SUM(ex.amount) FROM expenses ex WHERE ex.project_id = p.id AND ex.deleted_at IS NULL",
+    "COALESCE((SELECT SUM(COALESCE(ex.amount_cents, ROUND(ex.amount * 100))) / 100.0 FROM expenses ex WHERE ex.project_id = p.id AND ex.deleted_at IS NULL",
     "AND (? = '' OR ex.incurred_at >= ?) AND (? = '' OR ex.incurred_at <= ?)), 0) AS expenseAmount,",
-    "COALESCE((SELECT SUM(ex.amount) FROM expenses ex WHERE ex.project_id = p.id AND ex.deleted_at IS NULL AND ex.billable_to_client = 1",
+    "COALESCE((SELECT SUM(COALESCE(ex.amount_cents, ROUND(ex.amount * 100))) / 100.0 FROM expenses ex WHERE ex.project_id = p.id AND ex.deleted_at IS NULL AND ex.billable_to_client = 1",
     "AND (? = '' OR ex.incurred_at >= ?) AND (? = '' OR ex.incurred_at <= ?)), 0) AS billableExpenseAmount,",
-    "COALESCE((SELECT SUM(te.duration_seconds / 3600.0 * COALESCE(pw.hourly_cost_override, u.hourly_cost, 0))",
+    "COALESCE((SELECT SUM(te.duration_seconds / 3600.0 * COALESCE(pw.hourly_cost_override, COALESCE(u.hourly_cost_cents, ROUND(u.hourly_cost * 100)) / 100.0, 0))",
     "FROM time_entries te JOIN users u ON u.id = te.user_id",
     "LEFT JOIN project_workers pw ON pw.project_id = te.project_id AND pw.user_id = te.user_id",
     "WHERE te.project_id = p.id AND te.deleted_at IS NULL AND te.ended_at IS NOT NULL",
@@ -435,12 +446,12 @@ async function loadProjectActivity(db: D1Database, identity: Identity, projectId
   if (identity.role !== "manager") return { timeEntries: timeEntries.results, payments: [], expenses: [], attachments: [] };
   const [payments, expenses, attachments] = await Promise.all([
     db.prepare(`SELECT pay.id, pay.project_id AS projectId, p.name AS projectName, c.name AS clientName,
-      pay.amount, pay.paid_at AS paidAt, COALESCE(pay.method, '') AS method, COALESCE(pay.note, '') AS note, pay.updated_at AS updatedAt
+      COALESCE(pay.amount_cents, ROUND(pay.amount * 100)) / 100.0 AS amount, pay.paid_at AS paidAt, COALESCE(pay.method, '') AS method, COALESCE(pay.note, '') AS note, pay.updated_at AS updatedAt
       FROM payments pay JOIN projects p ON p.id = pay.project_id JOIN clients c ON c.id = p.client_id
       WHERE pay.project_id = ? AND pay.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
       ORDER BY pay.paid_at DESC, pay.created_at DESC`).bind(projectId, identity.businessId).all(),
     db.prepare(`SELECT ex.id, ex.project_id AS projectId, p.name AS projectName, c.name AS clientName,
-      ex.amount, ex.incurred_at AS incurredAt, ex.category, ex.billable_to_client AS billableToClient,
+      COALESCE(ex.amount_cents, ROUND(ex.amount * 100)) / 100.0 AS amount, ex.incurred_at AS incurredAt, ex.category, ex.billable_to_client AS billableToClient,
       COALESCE(ex.note, '') AS note, ex.updated_at AS updatedAt
       FROM expenses ex JOIN projects p ON p.id = ex.project_id JOIN clients c ON c.id = p.client_id
       WHERE ex.project_id = ? AND ex.deleted_at IS NULL AND p.business_id = ? AND p.deleted_at IS NULL
@@ -589,6 +600,8 @@ function normalizedMoney(value: unknown) {
   const amount = Number(value);
   return Number.isFinite(amount) ? Math.round((amount + Number.EPSILON) * 100) / 100 : Number.NaN;
 }
+
+function moneyToCents(amount: number) { return Math.round((amount + Number.EPSILON) * 100); }
 
 function versionConflict(body: Record<string, unknown>, existing: Record<string, unknown>, entity: string, id: string) {
   if (String(body.expectedUpdatedAt ?? "") === String(existing.updatedAt ?? "")) return null;
@@ -744,25 +757,25 @@ export async function POST(request: Request) {
     const note = boundedText(body.note, 2000) ?? "";
     const paymentId = action === "updatePayment" ? String(body.id ?? "") : String(body.id ?? crypto.randomUUID());
     if (action === "updatePayment") {
-      const existing = await db.prepare(`SELECT pay.id, pay.project_id AS projectId, pay.amount, pay.paid_at AS paidAt, pay.method, pay.note, pay.updated_at AS updatedAt
+      const existing = await db.prepare(`SELECT pay.id, pay.project_id AS projectId, COALESCE(pay.amount_cents, ROUND(pay.amount * 100)) / 100.0 AS amount, pay.paid_at AS paidAt, pay.method, pay.note, pay.updated_at AS updatedAt
         FROM payments pay JOIN projects p ON p.id = pay.project_id
         WHERE pay.id = ? AND pay.deleted_at IS NULL AND p.business_id = ? LIMIT 1`).bind(paymentId, businessId).first<Record<string, unknown>>();
       if (!existing) return Response.json({ error: "התשלום לא נמצא" }, { status: 400 });
       const paymentConflict = versionConflict(body, existing, "payment", paymentId);
       if (paymentConflict) return paymentConflict;
       await db.batch([
-        db.prepare("UPDATE payments SET project_id = ?, amount = ?, paid_at = ?, method = ?, note = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(projectId, amount, paidAt, method, note, paymentId),
+        db.prepare("UPDATE payments SET project_id = ?, amount = ?, amount_cents = ?, paid_at = ?, method = ?, note = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(projectId, amount, moneyToCents(amount), paidAt, method, note, paymentId),
         db.prepare("INSERT INTO audit_log (id, business_id, actor_id, entity_type, entity_id, action, details_json) VALUES (?, ?, ?, 'payment', ?, 'update', ?)").bind(crypto.randomUUID(), businessId, identity.ownerId, paymentId, JSON.stringify({ before: existing, after: { projectId, amount, paidAt, method, note } })),
       ]);
     } else {
       await db.batch([
-        db.prepare("INSERT INTO payments (id, project_id, amount, paid_at, method, note) VALUES (?, ?, ?, ?, ?, ?)").bind(paymentId, projectId, amount, paidAt, method, note),
+        db.prepare("INSERT INTO payments (id, project_id, amount, amount_cents, paid_at, method, note) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(paymentId, projectId, amount, moneyToCents(amount), paidAt, method, note),
         db.prepare("INSERT INTO audit_log (id, business_id, actor_id, entity_type, entity_id, action, details_json) VALUES (?, ?, ?, 'payment', ?, 'create', ?)").bind(crypto.randomUUID(), businessId, identity.ownerId, paymentId, JSON.stringify({ projectId, amount, paidAt, method, note })),
       ]);
     }
   } else if (action === "deletePayment") {
     const paymentId = String(body.id ?? "");
-    const payment = await db.prepare(`SELECT pay.id, pay.project_id AS projectId, pay.amount, pay.paid_at AS paidAt, pay.method, pay.note
+    const payment = await db.prepare(`SELECT pay.id, pay.project_id AS projectId, COALESCE(pay.amount_cents, ROUND(pay.amount * 100)) / 100.0 AS amount, pay.paid_at AS paidAt, pay.method, pay.note
       FROM payments pay JOIN projects p ON p.id = pay.project_id
       WHERE pay.id = ? AND pay.deleted_at IS NULL AND p.business_id = ? LIMIT 1`).bind(paymentId, businessId).first<Record<string, unknown>>();
     if (!payment) return Response.json({ error: "התשלום לא נמצא" }, { status: 400 });
@@ -785,25 +798,25 @@ export async function POST(request: Request) {
     const note = boundedText(body.note, 2000) ?? "";
     const expenseId = action === "updateExpense" ? String(body.id ?? "") : String(body.id ?? crypto.randomUUID());
     if (action === "updateExpense") {
-      const existing = await db.prepare(`SELECT ex.id, ex.project_id AS projectId, ex.amount, ex.incurred_at AS incurredAt, ex.category, ex.billable_to_client AS billableToClient, ex.note, ex.updated_at AS updatedAt
+      const existing = await db.prepare(`SELECT ex.id, ex.project_id AS projectId, COALESCE(ex.amount_cents, ROUND(ex.amount * 100)) / 100.0 AS amount, ex.incurred_at AS incurredAt, ex.category, ex.billable_to_client AS billableToClient, ex.note, ex.updated_at AS updatedAt
         FROM expenses ex JOIN projects p ON p.id = ex.project_id
         WHERE ex.id = ? AND ex.deleted_at IS NULL AND p.business_id = ? LIMIT 1`).bind(expenseId, businessId).first<Record<string, unknown>>();
       if (!existing) return Response.json({ error: "ההוצאה לא נמצאה" }, { status: 400 });
       const expenseConflict = versionConflict(body, existing, "expense", expenseId);
       if (expenseConflict) return expenseConflict;
       await db.batch([
-        db.prepare("UPDATE expenses SET project_id = ?, amount = ?, incurred_at = ?, category = ?, billable_to_client = ?, note = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(projectId, amount, incurredAt, category, billableToClient, note, expenseId),
+        db.prepare("UPDATE expenses SET project_id = ?, amount = ?, amount_cents = ?, incurred_at = ?, category = ?, billable_to_client = ?, note = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(projectId, amount, moneyToCents(amount), incurredAt, category, billableToClient, note, expenseId),
         db.prepare("INSERT INTO audit_log (id, business_id, actor_id, entity_type, entity_id, action, details_json) VALUES (?, ?, ?, 'expense', ?, 'update', ?)").bind(crypto.randomUUID(), businessId, identity.ownerId, expenseId, JSON.stringify({ before: existing, after: { projectId, amount, incurredAt, category, billableToClient: Boolean(billableToClient), note } })),
       ]);
     } else {
       await db.batch([
-        db.prepare("INSERT INTO expenses (id, project_id, amount, incurred_at, category, billable_to_client, note) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(expenseId, projectId, amount, incurredAt, category, billableToClient, note),
+        db.prepare("INSERT INTO expenses (id, project_id, amount, amount_cents, incurred_at, category, billable_to_client, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(expenseId, projectId, amount, moneyToCents(amount), incurredAt, category, billableToClient, note),
         db.prepare("INSERT INTO audit_log (id, business_id, actor_id, entity_type, entity_id, action, details_json) VALUES (?, ?, ?, 'expense', ?, 'create', ?)").bind(crypto.randomUUID(), businessId, identity.ownerId, expenseId, JSON.stringify({ projectId, amount, incurredAt, category, billableToClient: Boolean(billableToClient), note })),
       ]);
     }
   } else if (action === "deleteExpense") {
     const expenseId = String(body.id ?? "");
-    const expense = await db.prepare(`SELECT ex.id, ex.project_id AS projectId, ex.amount, ex.incurred_at AS incurredAt, ex.category, ex.billable_to_client AS billableToClient, ex.note
+    const expense = await db.prepare(`SELECT ex.id, ex.project_id AS projectId, COALESCE(ex.amount_cents, ROUND(ex.amount * 100)) / 100.0 AS amount, ex.incurred_at AS incurredAt, ex.category, ex.billable_to_client AS billableToClient, ex.note
       FROM expenses ex JOIN projects p ON p.id = ex.project_id
       WHERE ex.id = ? AND ex.deleted_at IS NULL AND p.business_id = ? LIMIT 1`).bind(expenseId, businessId).first<Record<string, unknown>>();
     if (!expense) return Response.json({ error: "ההוצאה לא נמצאה" }, { status: 400 });
@@ -875,7 +888,7 @@ export async function POST(request: Request) {
     const hourlyCost = normalizedMoney(body.hourlyCost);
     if (!validRecordId(employeeId) || !name || !email || !validEmail(email) || !Number.isFinite(hourlyCost) || hourlyCost < 0 || hourlyCost > 1000000) return Response.json({ error: "פרטי העובד אינם תקינים" }, { status: 400 });
     await db.batch([
-      db.prepare("INSERT INTO users (id, business_id, email, display_name, role, hourly_cost) VALUES (?, ?, ?, ?, 'employee', ?)").bind(employeeId, businessId, email, name, hourlyCost),
+      db.prepare("INSERT INTO users (id, business_id, email, display_name, role, hourly_cost, hourly_cost_cents) VALUES (?, ?, ?, ?, 'employee', ?, ?)").bind(employeeId, businessId, email, name, hourlyCost, moneyToCents(hourlyCost)),
       auditStatement(db, identity, "employee", employeeId, "create", { name, email, hourlyCost }),
     ]);
   } else if (action === "updateEmployee") {
@@ -884,12 +897,12 @@ export async function POST(request: Request) {
     const email = boundedText(body.email, 254, true);
     const hourlyCost = normalizedMoney(body.hourlyCost);
     if (!validRecordId(employeeId) || !name || !email || !validEmail(email) || !Number.isFinite(hourlyCost) || hourlyCost < 0 || hourlyCost > 1000000) return Response.json({ error: "פרטי העובד אינם תקינים" }, { status: 400 });
-    const existing = await db.prepare("SELECT display_name AS name, email, hourly_cost AS hourlyCost, updated_at AS updatedAt FROM users WHERE id = ? AND business_id = ? AND role = 'employee' AND deleted_at IS NULL").bind(employeeId, businessId).first<Record<string, unknown>>();
+    const existing = await db.prepare("SELECT display_name AS name, email, COALESCE(hourly_cost_cents, ROUND(hourly_cost * 100)) / 100.0 AS hourlyCost, updated_at AS updatedAt FROM users WHERE id = ? AND business_id = ? AND role = 'employee' AND deleted_at IS NULL").bind(employeeId, businessId).first<Record<string, unknown>>();
     if (!existing) return Response.json({ error: "העובד לא נמצא" }, { status: 400 });
     const employeeConflict = versionConflict(body, existing, "employee", employeeId);
     if (employeeConflict) return employeeConflict;
     await db.batch([
-      db.prepare("UPDATE users SET display_name = ?, email = ?, hourly_cost = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND role = 'employee' AND deleted_at IS NULL").bind(name, email, hourlyCost, employeeId, businessId),
+      db.prepare("UPDATE users SET display_name = ?, email = ?, hourly_cost = ?, hourly_cost_cents = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND role = 'employee' AND deleted_at IS NULL").bind(name, email, hourlyCost, moneyToCents(hourlyCost), employeeId, businessId),
       db.prepare("UPDATE employee_invitations SET status = 'revoked', updated_at = CURRENT_TIMESTAMP WHERE employee_id = ? AND business_id = ? AND status = 'pending'").bind(employeeId, businessId),
       auditStatement(db, identity, "employee", employeeId, "update", { before: existing, after: { name, email, hourlyCost } }),
     ]);
@@ -967,18 +980,18 @@ export async function POST(request: Request) {
     }
     const projectStatements: D1PreparedStatement[] = [];
     if (action === "updateProject") {
-      existing = await db.prepare("SELECT name, address, description, contact_name AS contactName, contact_phone AS contactPhone, start_date AS startDate, target_date AS targetDate, completed_date AS completedDate, status, billing_method AS billingType, fixed_price AS fixedPrice, client_hourly_rate AS hourlyRate, updated_at AS updatedAt FROM projects WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(projectId, businessId).first<Record<string, unknown>>() ?? null;
+      existing = await db.prepare("SELECT name, address, description, contact_name AS contactName, contact_phone AS contactPhone, start_date AS startDate, target_date AS targetDate, completed_date AS completedDate, status, billing_method AS billingType, COALESCE(fixed_price_cents, ROUND(fixed_price * 100)) / 100.0 AS fixedPrice, COALESCE(client_hourly_rate_cents, ROUND(client_hourly_rate * 100)) / 100.0 AS hourlyRate, updated_at AS updatedAt FROM projects WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(projectId, businessId).first<Record<string, unknown>>() ?? null;
       if (!existing) return Response.json({ error: "הפרויקט לא נמצא" }, { status: 400 });
       if (String(body.expectedUpdatedAt ?? "") !== String(existing.updatedAt ?? "")) return Response.json({ error: "הפרויקט השתנה במכשיר אחר. הנתונים החדשים נטענו; בדוק ונסה שוב.", conflict: { entity: "project", id: projectId, server: existing } }, { status: 409 });
       const activeTimer = await db.prepare("SELECT id FROM time_entries WHERE project_id = ? AND ended_at IS NULL AND deleted_at IS NULL LIMIT 1").bind(projectId).first();
       if (activeTimer) return Response.json({ error: "יש לעצור את הטיימר הפעיל לפני עריכת הפרויקט" }, { status: 409 });
       projectStatements.push(
-        db.prepare("UPDATE projects SET client_id = ?, name = ?, address = ?, description = ?, contact_name = ?, contact_phone = ?, start_date = ?, target_date = ?, completed_date = ?, status = ?, billing_method = ?, fixed_price = ?, client_hourly_rate = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(client.id, name, address, description, contactName, contactPhone, startDate, targetDate, completedDate, projectStatus, billingType, fixedPrice, hourlyRate, projectId, businessId),
+        db.prepare("UPDATE projects SET client_id = ?, name = ?, address = ?, description = ?, contact_name = ?, contact_phone = ?, start_date = ?, target_date = ?, completed_date = ?, status = ?, billing_method = ?, fixed_price = ?, fixed_price_cents = ?, client_hourly_rate = ?, client_hourly_rate_cents = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(client.id, name, address, description, contactName, contactPhone, startDate, targetDate, completedDate, projectStatus, billingType, fixedPrice, moneyToCents(fixedPrice), hourlyRate, moneyToCents(hourlyRate), projectId, businessId),
         db.prepare("DELETE FROM project_workers WHERE project_id IN (SELECT id FROM projects WHERE id = ? AND business_id = ?)").bind(projectId, businessId),
       );
     } else {
       if (createsClient) projectStatements.push(db.prepare("INSERT INTO clients (id, business_id, name, address, phone, email) VALUES (?, ?, ?, ?, ?, ?)").bind(newClientId, businessId, newClientName, newClientAddress, newClientPhone, newClientEmail));
-      projectStatements.push(db.prepare("INSERT INTO projects (id, business_id, client_id, name, address, description, contact_name, contact_phone, start_date, target_date, completed_date, status, billing_method, fixed_price, client_hourly_rate, currency) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT currency FROM businesses WHERE id = ?))").bind(projectId, businessId, client.id, name, address, description, contactName, contactPhone, startDate, targetDate, completedDate, projectStatus, billingType, fixedPrice, hourlyRate, businessId));
+      projectStatements.push(db.prepare("INSERT INTO projects (id, business_id, client_id, name, address, description, contact_name, contact_phone, start_date, target_date, completed_date, status, billing_method, fixed_price, fixed_price_cents, client_hourly_rate, client_hourly_rate_cents, currency) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT currency FROM businesses WHERE id = ?))").bind(projectId, businessId, client.id, name, address, description, contactName, contactPhone, startDate, targetDate, completedDate, projectStatus, billingType, fixedPrice, moneyToCents(fixedPrice), hourlyRate, moneyToCents(hourlyRate), businessId));
     }
     for (const workerId of validWorkerIds) projectStatements.push(db.prepare("INSERT INTO project_workers (id, project_id, user_id) VALUES (?, ?, ?)").bind(crypto.randomUUID(), projectId, workerId));
     projectStatements.push(auditStatement(db, identity, "project", projectId, action === "updateProject" ? "update" : "create", { before: existing, after: { clientId, clientName, name, address, description, contactName, contactPhone, startDate, targetDate, completedDate, projectStatus, billingType, fixedPrice, hourlyRate, workerIds: validWorkerIds } }));
