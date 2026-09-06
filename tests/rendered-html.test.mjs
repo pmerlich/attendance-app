@@ -206,6 +206,7 @@ test("ships persistent isolated account authentication", async () => {
   const auth = await readFile(new URL("../app/auth-core.ts", import.meta.url), "utf8");
   const route = await readFile(new URL("../app/api/auth/route.ts", import.meta.url), "utf8");
   const state = await readFile(new URL("../app/api/state/route.ts", import.meta.url), "utf8");
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   const migration = await readFile(new URL("../drizzle/0012_real_accounts.sql", import.meta.url), "utf8");
   assert.match(auth, /PBKDF2_ITERATIONS = 310_000/);
   assert.match(auth, /HttpOnly; SameSite=Lax; Max-Age=/);
@@ -220,6 +221,9 @@ test("ships persistent isolated account authentication", async () => {
   assert.match(route, /action === "changePassword"/);
   assert.match(route, /token_hash <> \?/);
   assert.match(route, /declaredLength > 6 \* 1024 \* 1024/);
+  assert.match(page, /className="profile-edit-button"/);
+  assert.match(page, /editingProfile &&/);
+  assert.match(page, /aria-controls="profile-account-editor"/);
   assert.match(state, /resolveSessionIdentity/);
   assert.match(migration, /CREATE TABLE `auth_sessions`/);
 });

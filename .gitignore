@@ -42,3 +42,7 @@ yarn-error.log*
 
 # local operational backups
 /backups/
+
+# local development artifacts
+*.tsbuildinfo
+/server*.log

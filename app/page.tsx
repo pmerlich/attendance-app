@@ -654,6 +654,12 @@ function applyOptimisticOperation(state: StoredState, operation: QueuedOperation
       clientId,
       client: clientName,
       address: String(values.address ?? ""),
+      description: String(values.description ?? ""),
+      contactName: String(values.contactName ?? ""),
+      contactPhone: String(values.contactPhone ?? ""),
+      startDate: String(values.startDate ?? ""),
+      targetDate: String(values.targetDate ?? ""),
+      completedDate: "",
       tag: projectTagFromStatus(values.status),
       billingType: String(values.billingType ?? "fixed") as BillingType,
       fixedPrice: Number(values.fixedPrice ?? 0),
@@ -664,6 +670,7 @@ function applyOptimisticOperation(state: StoredState, operation: QueuedOperation
       expenseAmount: 0,
       billableExpenseAmount: 0,
       laborCost: 0,
+      updatedAt: new Date().toISOString(),
     });
     next.clients = next.clients.map((client) => (String(client.id) === clientId ? { ...client, projects: client.projects + 1 } : client));
   }
@@ -3689,6 +3696,7 @@ function RecycleBinView({ trash, restoreClient, restoreProject, restoreEmployee 
 }
 
 function ProfileView({ user, accountMode, setAccountMode, openReports, openHistory, openTrash, navigateTo, profileUpdated }: { user: AccountUser; accountMode: AccountMode; setAccountMode: (mode: AccountMode) => void; openReports: () => void; openHistory: () => void; openTrash: () => void; navigateTo: (view: View) => void; profileUpdated: () => void }) {
+  const [editingProfile, setEditingProfile] = useState(false);
   const [profileMessage, setProfileMessage] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const [profileSaving, setProfileSaving] = useState(false);
   const [passwordSaving, setPasswordSaving] = useState(false);
@@ -3721,9 +3729,10 @@ function ProfileView({ user, accountMode, setAccountMode, openReports, openHisto
         <small>{user.role === "employee" ? "עובד מחובר לצוות" : user.isGuest ? "אורח הדגמה ציבורי" : user.isLocal ? "משתמש פיתוח מקומי" : "חשבון מחובר"}</small>
       </div>
       {!user.isLocal && !user.isGuest && (
-        <button type="button" className="sign-out-link" onClick={() => void signOut()}>
-          התנתקות
-        </button>
+        <div className="profile-intro-actions">
+          {user.role === "manager" && <button type="button" className="profile-edit-button" onClick={() => setEditingProfile((open) => !open)} aria-expanded={editingProfile} aria-controls="profile-account-editor" aria-label="עריכת פרטי הפרופיל"><span aria-hidden="true">✎</span><b>{editingProfile ? "סגירה" : "עריכה"}</b></button>}
+          <button type="button" className="sign-out-link" onClick={() => void signOut()}>התנתקות</button>
+        </div>
       )}
     </div>
   );
@@ -3761,8 +3770,8 @@ function ProfileView({ user, accountMode, setAccountMode, openReports, openHisto
   return (
     <section className="page-card profile-card">
       {intro}
-      {!user.isLocal && !user.isGuest && (
-        <section className="profile-account-editor">
+      {!user.isLocal && !user.isGuest && editingProfile && (
+        <section className="profile-account-editor" id="profile-account-editor">
           <div className="profile-section-title"><span>פרטי החשבון</span><small>אפשר לעדכן את כל הפרטים בכל עת</small></div>
           <form className="auth-form" onSubmit={(event) => void submitAccountForm(event, "updateProfile")} encType="multipart/form-data">
             <div className="auth-name-grid"><label><span>שם פרטי</span><input name="firstName" defaultValue={user.firstName ?? user.displayName.split(" ")[0] ?? ""} required /></label><label><span>שם משפחה</span><input name="lastName" defaultValue={user.lastName ?? user.displayName.split(" ").slice(1).join(" ")} required /></label></div>
@@ -3770,7 +3779,7 @@ function ProfileView({ user, accountMode, setAccountMode, openReports, openHisto
             <label><span>כתובת מייל</span><input name="email" type="email" dir="ltr" defaultValue={user.email} required /></label>
             <label className="auth-upload"><span>החלפת תמונת פרופיל</span><input name="profileImage" type="file" accept="image/jpeg,image/png,image/webp" /><small>JPG, PNG או WEBP עד 5MB</small></label>
             {user.profileImageUrl && <label className="profile-remove-image"><input name="removeImage" type="checkbox" value="1" /> הסרת התמונה הנוכחית</label>}
-            <button type="submit" disabled={profileSaving}>{profileSaving ? "שומר..." : "שמירת פרטי החשבון"}</button>
+            <div className="profile-form-actions"><button type="submit" disabled={profileSaving}>{profileSaving ? "שומר..." : "שמירת פרטי החשבון"}</button><button type="button" className="secondary-button" onClick={() => { setEditingProfile(false); setProfileMessage(null); }}>ביטול</button></div>
           </form>
           <form className="auth-form profile-password-form" onSubmit={(event) => void submitAccountForm(event, "changePassword")}>
             <h3>החלפת סיסמה</h3>
