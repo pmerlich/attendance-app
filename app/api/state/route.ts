@@ -49,7 +49,9 @@ async function ensureCoreSchema(db: D1Database) {
     )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS projects (
       id text PRIMARY KEY NOT NULL, business_id text NOT NULL, client_id text NOT NULL, name text NOT NULL,
-      address text DEFAULT '' NOT NULL, status text DEFAULT 'active' NOT NULL, billing_method text NOT NULL,
+      address text DEFAULT '' NOT NULL, description text DEFAULT '' NOT NULL, contact_name text DEFAULT '' NOT NULL,
+      contact_phone text DEFAULT '' NOT NULL, start_date text, target_date text, completed_date text,
+      status text DEFAULT 'active' NOT NULL, billing_method text NOT NULL,
       fixed_price real DEFAULT 0 NOT NULL, client_hourly_rate real DEFAULT 0 NOT NULL, manual_charge real DEFAULT 0 NOT NULL,
       currency text DEFAULT 'EUR' NOT NULL, created_at text DEFAULT CURRENT_TIMESTAMP NOT NULL,
       updated_at text DEFAULT CURRENT_TIMESTAMP NOT NULL, deleted_at text
@@ -100,6 +102,18 @@ async function ensureCoreSchema(db: D1Database) {
   const userColumns = await db.prepare("PRAGMA table_info(users)").all<{ name: string }>();
   if (!userColumns.results.some((column) => column.name === "auth_user_id")) {
     await db.prepare("ALTER TABLE users ADD COLUMN auth_user_id text").run();
+  }
+  const projectColumns = await db.prepare("PRAGMA table_info(projects)").all<{ name: string }>();
+  const missingProjectColumns = [
+    ["description", "ALTER TABLE projects ADD COLUMN description text DEFAULT '' NOT NULL"],
+    ["contact_name", "ALTER TABLE projects ADD COLUMN contact_name text DEFAULT '' NOT NULL"],
+    ["contact_phone", "ALTER TABLE projects ADD COLUMN contact_phone text DEFAULT '' NOT NULL"],
+    ["start_date", "ALTER TABLE projects ADD COLUMN start_date text"],
+    ["target_date", "ALTER TABLE projects ADD COLUMN target_date text"],
+    ["completed_date", "ALTER TABLE projects ADD COLUMN completed_date text"],
+  ] as const;
+  for (const [name, statement] of missingProjectColumns) {
+    if (!projectColumns.results.some((column) => column.name === name)) await db.prepare(statement).run();
   }
   await db.batch([
     db.prepare("DROP INDEX IF EXISTS users_email_unique"),
@@ -177,7 +191,7 @@ async function loadState(db: D1Database, identity: Identity) {
   const businessId = identity.businessId;
   const managerOnly = <T = Record<string, unknown>>() => Promise.resolve({ results: [] as T[] });
   const projectsQuery = identity.role === "manager"
-    ? db.prepare(`SELECT p.id, p.name, p.updated_at AS updatedAt, c.id AS clientId, c.name AS client, p.address,
+    ? db.prepare(`SELECT p.id, p.name, p.updated_at AS updatedAt, c.id AS clientId, c.name AS client, p.address, p.description, p.contact_name AS contactName, p.contact_phone AS contactPhone, p.start_date AS startDate, p.target_date AS targetDate, p.completed_date AS completedDate,
       CASE p.status WHEN 'waiting' THEN 'ממתין' WHEN 'completed' THEN 'הסתיים' ELSE 'בביצוע' END AS tag,
       p.billing_method AS billingType, p.fixed_price AS fixedPrice, p.client_hourly_rate AS hourlyRate,
       COALESCE((SELECT GROUP_CONCAT(pw.user_id) FROM project_workers pw WHERE pw.project_id = p.id), '') AS workerIds,
@@ -191,7 +205,7 @@ async function loadState(db: D1Database, identity: Identity) {
         FROM time_entries te WHERE te.project_id = p.id AND te.deleted_at IS NULL), 0) AS totalSeconds
       FROM projects p JOIN clients c ON c.id = p.client_id
       WHERE p.business_id = ? AND p.deleted_at IS NULL ORDER BY p.created_at DESC`).bind(businessId).all()
-    : db.prepare(`SELECT p.id, p.name, p.updated_at AS updatedAt, c.id AS clientId, c.name AS client, p.address,
+    : db.prepare(`SELECT p.id, p.name, p.updated_at AS updatedAt, c.id AS clientId, c.name AS client, p.address, p.description, p.contact_name AS contactName, p.contact_phone AS contactPhone, p.start_date AS startDate, p.target_date AS targetDate, p.completed_date AS completedDate,
       CASE p.status WHEN 'waiting' THEN 'ממתין' WHEN 'completed' THEN 'הסתיים' ELSE 'בביצוע' END AS tag,
       'hourly' AS billingType, 0 AS fixedPrice, COALESCE(pw.hourly_cost_override, u.hourly_cost, 0) AS hourlyRate,
       '' AS workerIds, 0 AS paidAmount, 0 AS expenseAmount, 0 AS billableExpenseAmount, 0 AS laborCost,
@@ -911,13 +925,19 @@ export async function POST(request: Request) {
     const clientName = newClientName ?? boundedText(body.clientName, 120, true);
     const name = boundedText(body.name, 160, true);
     const address = boundedText(body.address, 300, true);
+    const description = boundedText(body.description, 4000) ?? "";
+    const contactName = boundedText(body.contactName, 160) ?? "";
+    const contactPhone = boundedText(body.contactPhone, 40) ?? "";
+    const startDate = body.startDate ? validCalendarDate(body.startDate, true) : null;
+    const targetDate = body.targetDate ? validCalendarDate(body.targetDate, true) : null;
+    const completedDate = body.completedDate ? validCalendarDate(body.completedDate, true) : null;
     const billingType = String(body.billingType ?? "fixed");
     const fixedPrice = normalizedMoney(body.fixedPrice ?? 0);
     const hourlyRate = normalizedMoney(body.hourlyRate ?? 0);
     const rawWorkerIds = Array.isArray(body.workers) ? [...new Set(body.workers.map(String))] : [];
     if (rawWorkerIds.length > 100) return Response.json({ error: "ניתן לשייך עד 100 עובדים לפרויקט" }, { status: 400 });
     const workerIds = rawWorkerIds;
-    if (!validRecordId(clientId) || !clientName || !name || !address || !["fixed", "hourly", "combined"].includes(billingType)
+    if (!validRecordId(clientId) || !clientName || !name || !address || (body.startDate && !startDate) || (body.targetDate && !targetDate) || (body.completedDate && !completedDate) || (startDate && targetDate && startDate > targetDate) || !["fixed", "hourly", "combined"].includes(billingType)
       || !Number.isFinite(fixedPrice) || fixedPrice < 0 || fixedPrice > 100000000
       || !Number.isFinite(hourlyRate) || hourlyRate < 0 || hourlyRate > 1000000
       || (billingType === "fixed" && fixedPrice <= 0) || (billingType === "hourly" && hourlyRate <= 0)
@@ -947,21 +967,21 @@ export async function POST(request: Request) {
     }
     const projectStatements: D1PreparedStatement[] = [];
     if (action === "updateProject") {
-      existing = await db.prepare("SELECT name, address, status, billing_method AS billingType, fixed_price AS fixedPrice, client_hourly_rate AS hourlyRate, updated_at AS updatedAt FROM projects WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(projectId, businessId).first<Record<string, unknown>>() ?? null;
+      existing = await db.prepare("SELECT name, address, description, contact_name AS contactName, contact_phone AS contactPhone, start_date AS startDate, target_date AS targetDate, completed_date AS completedDate, status, billing_method AS billingType, fixed_price AS fixedPrice, client_hourly_rate AS hourlyRate, updated_at AS updatedAt FROM projects WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(projectId, businessId).first<Record<string, unknown>>() ?? null;
       if (!existing) return Response.json({ error: "הפרויקט לא נמצא" }, { status: 400 });
       if (String(body.expectedUpdatedAt ?? "") !== String(existing.updatedAt ?? "")) return Response.json({ error: "הפרויקט השתנה במכשיר אחר. הנתונים החדשים נטענו; בדוק ונסה שוב.", conflict: { entity: "project", id: projectId, server: existing } }, { status: 409 });
       const activeTimer = await db.prepare("SELECT id FROM time_entries WHERE project_id = ? AND ended_at IS NULL AND deleted_at IS NULL LIMIT 1").bind(projectId).first();
       if (activeTimer) return Response.json({ error: "יש לעצור את הטיימר הפעיל לפני עריכת הפרויקט" }, { status: 409 });
       projectStatements.push(
-        db.prepare("UPDATE projects SET client_id = ?, name = ?, address = ?, status = ?, billing_method = ?, fixed_price = ?, client_hourly_rate = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(client.id, name, address, projectStatus, billingType, fixedPrice, hourlyRate, projectId, businessId),
+        db.prepare("UPDATE projects SET client_id = ?, name = ?, address = ?, description = ?, contact_name = ?, contact_phone = ?, start_date = ?, target_date = ?, completed_date = ?, status = ?, billing_method = ?, fixed_price = ?, client_hourly_rate = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(client.id, name, address, description, contactName, contactPhone, startDate, targetDate, completedDate, projectStatus, billingType, fixedPrice, hourlyRate, projectId, businessId),
         db.prepare("DELETE FROM project_workers WHERE project_id IN (SELECT id FROM projects WHERE id = ? AND business_id = ?)").bind(projectId, businessId),
       );
     } else {
       if (createsClient) projectStatements.push(db.prepare("INSERT INTO clients (id, business_id, name, address, phone, email) VALUES (?, ?, ?, ?, ?, ?)").bind(newClientId, businessId, newClientName, newClientAddress, newClientPhone, newClientEmail));
-      projectStatements.push(db.prepare("INSERT INTO projects (id, business_id, client_id, name, address, status, billing_method, fixed_price, client_hourly_rate, currency) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT currency FROM businesses WHERE id = ?))").bind(projectId, businessId, client.id, name, address, projectStatus, billingType, fixedPrice, hourlyRate, businessId));
+      projectStatements.push(db.prepare("INSERT INTO projects (id, business_id, client_id, name, address, description, contact_name, contact_phone, start_date, target_date, completed_date, status, billing_method, fixed_price, client_hourly_rate, currency) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT currency FROM businesses WHERE id = ?))").bind(projectId, businessId, client.id, name, address, description, contactName, contactPhone, startDate, targetDate, completedDate, projectStatus, billingType, fixedPrice, hourlyRate, businessId));
     }
     for (const workerId of validWorkerIds) projectStatements.push(db.prepare("INSERT INTO project_workers (id, project_id, user_id) VALUES (?, ?, ?)").bind(crypto.randomUUID(), projectId, workerId));
-    projectStatements.push(auditStatement(db, identity, "project", projectId, action === "updateProject" ? "update" : "create", { before: existing, after: { clientId, clientName, name, address, projectStatus, billingType, fixedPrice, hourlyRate, workerIds: validWorkerIds } }));
+    projectStatements.push(auditStatement(db, identity, "project", projectId, action === "updateProject" ? "update" : "create", { before: existing, after: { clientId, clientName, name, address, description, contactName, contactPhone, startDate, targetDate, completedDate, projectStatus, billingType, fixedPrice, hourlyRate, workerIds: validWorkerIds } }));
     await db.batch(projectStatements);
   } else if (action === "updateProjectStatus") {
     const projectId = String(body.id ?? "");

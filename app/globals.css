@@ -246,6 +246,11 @@ input, textarea, select { font: inherit; unicode-bidi: plaintext; text-align: st
 .project-detail-title h2 { margin: 0; font-size: 26px; font-weight: 800; color: var(--ink); font-family: 'Rubik', sans-serif; }
 .project-detail-title p { margin: 6px 0 0; color: var(--muted); font-size: 14px; font-weight: 500; }
 .project-detail-address { margin-top: 18px; padding: 14px 18px; display: flex; justify-content: space-between; align-items: center; gap: 12px; border-radius: var(--radius-md); background: #f1f5f9; color: #475569; font-size: 14px; font-weight: 500; }
+.project-work-details { margin-top:12px; padding:16px 18px; border:1px solid var(--line); border-radius:var(--radius-md); background:#fff; }
+.project-work-details p { margin:0 0 12px; white-space:pre-wrap; color:var(--ink); }
+.project-work-details dl { display:flex; flex-wrap:wrap; gap:6px 20px; margin:0; }
+.project-work-details dt { color:var(--muted); }
+.project-work-details dd { margin:0; font-weight:700; }
 .project-detail-metrics { margin-top: 20px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .project-detail-metrics article { min-height: 88px; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius-md); background: #f8fafc; }
 .project-detail-metrics span { color: var(--muted); font-size: 14px; font-weight: 500; display: block; }

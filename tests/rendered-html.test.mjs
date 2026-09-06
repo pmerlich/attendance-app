@@ -42,7 +42,7 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.ok(html.includes('href="/app-icon.png"'));
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(page, /התחלת טיימר/);
-  assert.match(page, /running && <button className="mobile-timer running"/);
+  assert.match(page, /running &&\s*\(\s*<button\s+className="mobile-timer running"/);
   assert.doesNotMatch(page, /בחירת פרויקט להפעלת טיימר/);
   assert.match(page, /project-entry-action/);
   const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
@@ -62,7 +62,7 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.ok(page.indexOf('applyStoredState(optimistic)') < page.indexOf('await enqueueOperation(operation)'), 'optimistic state must render before queue persistence');
   assert.ok(page.indexOf('await writeCachedState(optimistic)') < page.indexOf('await enqueueOperation(operation)'), 'cached state must be durable before queue completion');
   assert.match(page, /openClientProjects/);
-  assert.match(page, /לחיצה על לקוח מציגה את הפרויקטים שלו/);
+  assert.match(page, /לחיצה על לקוח מציגה את הפרויקטים\s+שלו/);
   assert.match(page, /"sync-icon-button " \+/);
   assert.match(page, /className="sync-popover"/);
   assert.doesNotMatch(page, /className="offline-notice"/);
@@ -71,10 +71,10 @@ test("server-renders the Hebrew operations dashboard", async () => {
   assert.match(page, /event\.key === "Escape"/);
   assert.match(page, /className="skip-link"/);
   assert.match(page, /project-detail-metric-link/);
-  assert.match(page, /<span>הוצאות<\/span><strong>\{formatMoney\(Number\(selectedProject\.expenseAmount/);
+  assert.match(page, /<span>הוצאות<\/span>\s*<strong>\s*\{formatMoney\(Number\(selectedProject\.expenseAmount/);
   assert.match(page, /formatTime\(Number\(entry\.durationSeconds\)\)/);
   assert.match(page, /formatTime\(totalSeconds\)/);
-  assert.match(page, /backToProject=\{\(\) => contextProject && selectProject\(contextProject\)\}/);
+  assert.match(page, /backToProject=\{\(\) =>\s*contextProject && selectProject\(contextProject\)\s*\}/);
   assert.match(page, /→ חזרה לפרויקט/);
   assert.match(page, /€ תשלום/);
   assert.match(page, /− הוצאה/);
