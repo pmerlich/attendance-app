@@ -210,3 +210,16 @@ test("ships complete queries and performance indexes", async () => {
   assert.match(migration, /idx_projects_business_deleted/);
   assert.match(migration, /idx_audit_business_created/);
 });
+
+test("uses minor currency units and recomputes offline summaries", async () => {
+  const route = await readFile(new URL("../app/api/state/route.ts", import.meta.url), "utf8");
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const migration = await readFile(new URL("../drizzle/0011_money_minor_units.sql", import.meta.url), "utf8");
+  assert.match(route, /moneyToCents/);
+  assert.match(route, /amount_cents/);
+  assert.match(route, /fixed_price_cents/);
+  assert.match(migration, /ROUND\(`amount` \* 100\)/);
+  assert.match(page, /next\.projects = next\.projects\.map/);
+  assert.match(page, /billableExpenseAmount/);
+  assert.match(page, /RecordListFilters/);
+});
