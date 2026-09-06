@@ -45,7 +45,7 @@ export async function resolveSessionIdentity(db: D1Database, request: Request): 
     FROM auth_sessions s JOIN users u ON u.id = s.user_id
     WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > CURRENT_TIMESTAMP AND u.deleted_at IS NULL AND u.is_active = 1 LIMIT 1`).bind(tokenHash).first<SessionIdentity>();
   if (!row) return null;
-  await db.prepare("UPDATE auth_sessions SET last_used_at = CURRENT_TIMESTAMP WHERE token_hash = ?").bind(tokenHash).run();
+  await db.prepare("UPDATE auth_sessions SET last_used_at = CURRENT_TIMESTAMP, expires_at = datetime('now', ?) WHERE token_hash = ?").bind(`+${SESSION_DAYS} days`, tokenHash).run();
   return { ...row, userId: row.userId || row.ownerId, isLocal: false, isGuest: false };
 }
 

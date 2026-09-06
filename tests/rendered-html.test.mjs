@@ -231,6 +231,7 @@ test("ships persistent isolated account authentication", async () => {
   const migration = await readFile(new URL("../drizzle/0012_real_accounts.sql", import.meta.url), "utf8");
   assert.match(auth, /PBKDF2_ITERATIONS = 310_000/);
   assert.match(auth, /HttpOnly; SameSite=Lax; Max-Age=/);
+  assert.match(auth, /expires_at = datetime\('now', \?\)/);
   assert.match(auth, /token_hash/);
   assert.match(route, /action === "register"/);
   assert.match(route, /action === "login"/);
