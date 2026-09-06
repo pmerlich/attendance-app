@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { ensureAuthSchema, resolveSessionIdentity } from "../../auth-core";
 
-type Identity = { userId: string; email: string; displayName: string; businessId: string; ownerId: string; role: "manager" | "employee"; profileImageKey?: string | null; isLocal: boolean; isGuest: boolean };
+type Identity = { userId: string; email: string; displayName: string; firstName?: string; lastName?: string; phone?: string; businessId: string; ownerId: string; role: "manager" | "employee"; profileImageKey?: string | null; isLocal: boolean; isGuest: boolean };
 
 async function stableKey(value: string) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
@@ -9,10 +9,6 @@ async function stableKey(value: string) {
 }
 
 async function resolveIdentity(request: Request): Promise<Identity | null> {
-  const hostname = new URL(request.url).hostname;
-  if (hostname === "menahel-avoda.er2829288.workers.dev") {
-    return { userId: "guest-demo-user-v1", email: "guest@menahel-avoda.demo", displayName: "דני לוי", businessId: "guest-demo-business-v1", ownerId: "guest-demo-owner-v1", role: "manager", isLocal: false, isGuest: true };
-  }
   const sessionIdentity = await resolveSessionIdentity(env.DB, request);
   if (sessionIdentity) return sessionIdentity;
   const userId = request.headers.get("oai-authenticated-user-id");
@@ -315,7 +311,7 @@ async function loadState(db: D1Database, identity: Identity) {
     accountMode: business?.workMode ?? "solo",
     currency: business?.currency ?? "EUR",
     storageScope: `${businessId}:${identity.ownerId}`,
-    user: { id: identity.ownerId, displayName: identity.displayName, email: identity.email, role: identity.role, profileImageUrl: identity.profileImageKey ? "/api/auth?profile=1" : null, isLocal: identity.isLocal, isGuest: identity.isGuest },
+    user: { id: identity.ownerId, displayName: identity.displayName, firstName: identity.firstName ?? "", lastName: identity.lastName ?? "", phone: identity.phone ?? "", email: identity.email, role: identity.role, profileImageUrl: identity.profileImageKey ? "/api/auth?profile=1" : null, isLocal: identity.isLocal, isGuest: identity.isGuest },
     clients: clients.results,
     employees: employees.results,
     projects: projects.results,

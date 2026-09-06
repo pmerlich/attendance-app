@@ -13,7 +13,7 @@ async function render() {
   );
 }
 
-test("server-renders the Hebrew operations dashboard", async () => {
+test("server-renders a neutral account loading screen without demo data", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
@@ -23,22 +23,8 @@ test("server-renders the Hebrew operations dashboard", async () => {
   const html = await response.text();
   assert.match(html, /<html[^>]*lang="he"[^>]*dir="rtl"/i);
   assert.match(html, /<title>מנהל עבודה \| פרויקטים, שעות וכספים<\/title>/);
-  assert.match(html, /כל הפרויקטים/);
-  assert.match(html, /יצירת פרויקט/);
-  assert.match(html, /הפעילו טיימר ישירות או פתחו פרויקט לפרטים ודיווח ידני/);
-  assert.match(html, /aria-label="הפעלת טיימר עבור/);
-  assert.match(html, /עדכון מצב הפרויקט/);
-  assert.match(html, /הסתיים/);
-  assert.match(html, /סה״כ/);
-  assert.match(html, /הכנסה צפויה/);
-  assert.doesNotMatch(html, /מוכן להתחלה/);
-  assert.doesNotMatch(html, /טיימר פעיל/);
-  assert.doesNotMatch(html, /class="account-badge"/);
-  assert.match(html, /עובד עצמאי/);
-  assert.match(html, /סל המחזור/);
-  assert.match(html, /דיווחי זמן/);
-  assert.match(html, /תשלומים/);
-  assert.match(html, /הוצאות וחומרים/);
+  assert.match(html, /טוען את החשבון שלך/);
+  assert.doesNotMatch(html, /demo-owner|guest-demo|כל הפרויקטים|יצירת פרויקט/);
   assert.ok(html.includes('href="/app-icon.png"'));
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(page, /התחלת טיימר/);
@@ -138,21 +124,13 @@ test("hardens data mutations and production delivery", async () => {
   assert.match(worker, /no-store, max-age=0/);
   assert.match(operations, /npm run backup/);
 });
-test("enables the isolated guest demo only on the preview host", async () => {
+test("requires a real account on every public host", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   const api = await readFile(new URL("../app/api/state/route.ts", import.meta.url), "utf8");
-  assert.match(api, /hostname === "menahel-avoda\.er2829288\.workers\.dev"/);
-  assert.match(api, /displayName: "דני לוי"/);
-  assert.match(api, /businessId: "guest-demo-business-v1"/);
-  assert.match(api, /isGuest: true/);
-  assert.match(api, /guest-employee-1/);
-  assert.match(api, /guest-project-1/);
-  assert.match(api, /guest-payment-1/);
-  assert.match(api, /guest-expense-1/);
-  assert.ok(api.indexOf('hostname === "menahel-avoda.er2829288.workers.dev"') < api.indexOf("if (userId && email)"), "the public demo host must ignore client-supplied identity headers");
-  assert.match(api, /מצב האורח מיועד לצפייה בלבד/);
-  assert.match(page, /מצב אורח — דני לוי/);
-  assert.match(page, /סביבת הדגמה ציבורית לקריאה בלבד/);
+  assert.doesNotMatch(api, /hostname === "menahel-avoda\.er2829288\.workers\.dev"/);
+  assert.match(api, /return null/);
+  assert.match(page, /if \(!accountReady\) return <AccountLoadingView/);
+  assert.match(page, /if \(authRequired\) return <SignInView/);
 });
 
 test("queues attachment blobs for background upload", async () => {
@@ -238,6 +216,10 @@ test("ships persistent isolated account authentication", async () => {
   assert.match(route, /action === "logout"/);
   assert.match(route, /validImageSignature/);
   assert.match(route, /COUNT\(\*\) AS count FROM auth_login_attempts/);
+  assert.match(route, /action === "updateProfile"/);
+  assert.match(route, /action === "changePassword"/);
+  assert.match(route, /token_hash <> \?/);
+  assert.match(route, /declaredLength > 6 \* 1024 \* 1024/);
   assert.match(state, /resolveSessionIdentity/);
   assert.match(migration, /CREATE TABLE `auth_sessions`/);
 });

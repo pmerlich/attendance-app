@@ -41,6 +41,8 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   if (!sameOrigin(request)) return json({ error: "הבקשה נדחתה" }, 403);
+  const declaredLength = Number(request.headers.get("content-length") ?? 0);
+  if (Number.isFinite(declaredLength) && declaredLength > 6 * 1024 * 1024) return json({ error: "הבקשה גדולה מדי" }, 413);
   await ensureBaseSchema(authEnv.DB);
   const form = await request.formData();
   const action = String(form.get("action") ?? "");
@@ -99,6 +101,57 @@ export async function POST(request: Request) {
     const token = sessionToken(request);
     if (token) await authEnv.DB.prepare("UPDATE auth_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE token_hash = ?").bind(await sha256(token)).run();
     return json({ authenticated: false }, 200, clearSessionCookie(request));
+  }
+
+  if (action === "updateProfile") {
+    const identity = await resolveSessionIdentity(authEnv.DB, request);
+    if (!identity) return json({ error: "יש להתחבר מחדש" }, 401);
+    const firstName = clean(form.get("firstName"), 80);
+    const lastName = clean(form.get("lastName"), 80);
+    const phone = clean(form.get("phone"), 40);
+    const email = clean(form.get("email"), 254)?.toLocaleLowerCase() ?? null;
+    if (!firstName || !lastName || !phone || !email || !validEmail(email)) return json({ error: "יש למלא פרטים תקינים בכל שדות החובה" }, 400);
+    const duplicate = await authEnv.DB.prepare("SELECT id FROM users WHERE lower(email) = ? AND id <> ? AND password_hash IS NOT NULL AND deleted_at IS NULL LIMIT 1").bind(email, identity.ownerId).first();
+    if (duplicate) return json({ error: "כבר קיים חשבון עם כתובת המייל הזאת" }, 409);
+    const current = await authEnv.DB.prepare("SELECT profile_image_key AS profileImageKey FROM users WHERE id = ? AND business_id = ?").bind(identity.ownerId, identity.businessId).first<{ profileImageKey: string | null }>();
+    const image = form.get("profileImage");
+    const removeImage = form.get("removeImage") === "1";
+    let nextImageKey = removeImage ? null : current?.profileImageKey ?? null;
+    let uploadedImageKey: string | null = null;
+    if (image instanceof File && image.size > 0) {
+      if (image.size > 5 * 1024 * 1024 || !["image/jpeg", "image/png", "image/webp"].includes(image.type)) return json({ error: "תמונת הפרופיל חייבת להיות JPG, PNG או WEBP ועד 5MB" }, 400);
+      const imageBytes = await image.arrayBuffer();
+      if (!validImageSignature(image.type, new Uint8Array(imageBytes).slice(0, 16))) return json({ error: "תוכן תמונת הפרופיל אינו תואם לסוג הקובץ" }, 400);
+      uploadedImageKey = `profiles/${crypto.randomUUID()}`;
+      await authEnv.FILES.put(uploadedImageKey, imageBytes, { httpMetadata: { contentType: image.type } });
+      nextImageKey = uploadedImageKey;
+    }
+    try {
+      await authEnv.DB.prepare("UPDATE users SET first_name = ?, last_name = ?, display_name = ?, phone = ?, email = ?, profile_image_key = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ?").bind(firstName, lastName, `${firstName} ${lastName}`, phone, email, nextImageKey, identity.ownerId, identity.businessId).run();
+    } catch (error) {
+      if (uploadedImageKey) await authEnv.FILES.delete(uploadedImageKey).catch(() => undefined);
+      if (String(error).includes("UNIQUE")) return json({ error: "כבר קיים חשבון עם כתובת המייל הזאת" }, 409);
+      throw error;
+    }
+    if (current?.profileImageKey && current.profileImageKey !== nextImageKey) await authEnv.FILES.delete(current.profileImageKey).catch(() => undefined);
+    return json({ updated: true });
+  }
+
+  if (action === "changePassword") {
+    const identity = await resolveSessionIdentity(authEnv.DB, request);
+    if (!identity) return json({ error: "יש להתחבר מחדש" }, 401);
+    const currentPassword = String(form.get("currentPassword") ?? "");
+    const password = String(form.get("password") ?? "");
+    const confirmPassword = String(form.get("confirmPassword") ?? "");
+    if (!validPassword(password)) return json({ error: "הסיסמה החדשה צריכה לכלול לפחות 10 תווים, אות ומספר" }, 400);
+    if (password !== confirmPassword) return json({ error: "אימות הסיסמה אינו תואם" }, 400);
+    const user = await authEnv.DB.prepare("SELECT password_hash AS passwordHash FROM users WHERE id = ? AND business_id = ?").bind(identity.ownerId, identity.businessId).first<{ passwordHash: string | null }>();
+    if (!user?.passwordHash || !(await verifyPassword(currentPassword, user.passwordHash))) return json({ error: "הסיסמה הנוכחית אינה נכונה" }, 400);
+    if (await verifyPassword(password, user.passwordHash)) return json({ error: "הסיסמה החדשה חייבת להיות שונה מהסיסמה הנוכחית" }, 400);
+    await authEnv.DB.prepare("UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ?").bind(await hashPassword(password), identity.ownerId, identity.businessId).run();
+    const activeToken = sessionToken(request);
+    if (activeToken) await authEnv.DB.prepare("UPDATE auth_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND token_hash <> ? AND revoked_at IS NULL").bind(identity.ownerId, await sha256(activeToken)).run();
+    return json({ updated: true });
   }
   return json({ error: "פעולת האימות אינה תקינה" }, 400);
 }

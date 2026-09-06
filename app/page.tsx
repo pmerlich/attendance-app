@@ -305,6 +305,9 @@ type StoredProject = Pick<Project, "id" | "name" | "clientId" | "client" | "addr
 type AccountUser = {
   id: string;
   displayName: string;
+  firstName?: string;
+  lastName?: string;
+  phone?: string;
   email: string;
   role: "manager" | "employee";
   profileImageUrl?: string | null;
@@ -846,6 +849,7 @@ export default function Home() {
     isGuest: false,
   });
   const [authRequired, setAuthRequired] = useState(false);
+  const [accountReady, setAccountReady] = useState(false);
   const [recentTimeEntries, setRecentTimeEntries] = useState<TimeEntry[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
@@ -877,6 +881,7 @@ export default function Home() {
     const storedProjects = presentProjects(data.projects);
     setAccountMode(data.accountMode);
     setCurrentUser(data.user);
+    setAccountReady(true);
     if (data.user.role === "employee") setView((current) => (["payments", "expenses", "clients", "employees", "trash", "history", "reports"].includes(current) ? "dashboard" : current));
     setClients(
       data.clients.map((client) => ({
@@ -1028,6 +1033,7 @@ export default function Home() {
           }
           if (response.status === 401) {
             setAuthRequired(true);
+            setAccountReady(true);
             interrupted = true;
             break;
           }
@@ -1149,7 +1155,7 @@ export default function Home() {
 
       if (!navigator.onLine) {
         if (cached) applyStoredState(queued.reduce((current, operation) => applyOptimisticOperation(current, operation), cached));
-        else setOfflineWithoutCache(true);
+        else { setOfflineWithoutCache(true); setAccountReady(true); }
         setSyncState("offline");
         return;
       }
@@ -1189,6 +1195,7 @@ export default function Home() {
         const identityResponse = await fetch("/api/state");
         if (identityResponse.status === 401) {
           setAuthRequired(true);
+          setAccountReady(true);
           return;
         }
         if (!identityResponse.ok) throw new Error("אימות החשבון נכשל");
@@ -1206,9 +1213,9 @@ export default function Home() {
         .then((cached) => {
           if (!active) return;
           if (cached) applyStoredState(cached);
-          else setOfflineWithoutCache(true);
+          else { setOfflineWithoutCache(true); setAccountReady(true); }
         })
-        .catch(() => setOfflineWithoutCache(true));
+        .catch(() => { setOfflineWithoutCache(true); setAccountReady(true); });
     });
 
     return () => {
@@ -1741,6 +1748,7 @@ export default function Home() {
     }
   }
 
+  if (!accountReady) return <AccountLoadingView />;
   if (offlineWithoutCache) return <OfflineUnavailableView />;
   if (authRequired) return <SignInView />;
   const isManager = currentUser.role === "manager" && !currentUser.isGuest;
@@ -1910,6 +1918,7 @@ export default function Home() {
         {view === "profile" && (
           <ProfileView
             user={currentUser}
+            profileUpdated={() => window.location.reload()}
             accountMode={accountMode}
             setAccountMode={(mode) => {
               setAccountMode(mode);
@@ -3122,6 +3131,20 @@ function EmployeesView({ employees, openNew, editEmployee, removeEmployee, invit
   );
 }
 
+function AccountLoadingView() {
+  return (
+    <main className="sign-in-shell" aria-busy="true">
+      <section className="sign-in-card account-loading-card">
+        <Image className="sign-in-logo" src="/app-icon.png" width={82} height={82} alt="מנהל עבודה" priority />
+        <p>מנהל עבודה</p>
+        <h1>טוען את החשבון שלך</h1>
+        <span>רק רגע, הנתונים המאובטחים שלך נטענים.</span>
+        <div className="account-loading-bar" />
+      </section>
+    </main>
+  );
+}
+
 function OfflineUnavailableView() {
   return (
     <main className="sign-in-shell">
@@ -3665,7 +3688,29 @@ function RecycleBinView({ trash, restoreClient, restoreProject, restoreEmployee 
   );
 }
 
-function ProfileView({ user, accountMode, setAccountMode, openReports, openHistory, openTrash, navigateTo }: { user: AccountUser; accountMode: AccountMode; setAccountMode: (mode: AccountMode) => void; openReports: () => void; openHistory: () => void; openTrash: () => void; navigateTo: (view: View) => void }) {
+function ProfileView({ user, accountMode, setAccountMode, openReports, openHistory, openTrash, navigateTo, profileUpdated }: { user: AccountUser; accountMode: AccountMode; setAccountMode: (mode: AccountMode) => void; openReports: () => void; openHistory: () => void; openTrash: () => void; navigateTo: (view: View) => void; profileUpdated: () => void }) {
+  const [profileMessage, setProfileMessage] = useState<{ kind: "success" | "error"; text: string } | null>(null);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [passwordSaving, setPasswordSaving] = useState(false);
+  async function submitAccountForm(event: FormEvent<HTMLFormElement>, action: "updateProfile" | "changePassword") {
+    event.preventDefault();
+    if (action === "updateProfile") setProfileSaving(true);
+    else setPasswordSaving(true);
+    setProfileMessage(null);
+    try {
+      const form = new FormData(event.currentTarget);
+      form.set("action", action);
+      const response = await fetch("/api/auth", { method: "POST", body: form });
+      const payload = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "השמירה נכשלה");
+      if (action === "updateProfile") profileUpdated();
+      else { event.currentTarget.reset(); setProfileMessage({ kind: "success", text: "הסיסמה עודכנה בהצלחה וכל ההתחברויות האחרות נותקו." }); }
+    } catch (error) {
+      setProfileMessage({ kind: "error", text: error instanceof Error ? error.message : "השמירה נכשלה" });
+    } finally {
+      setProfileSaving(false); setPasswordSaving(false);
+    }
+  }
   async function signOut() { const form = new FormData(); form.set("action", "logout"); await fetch("/api/auth", { method: "POST", body: form }); window.location.assign("/"); }
   const intro = (
     <div className="profile-intro">
@@ -3716,6 +3761,26 @@ function ProfileView({ user, accountMode, setAccountMode, openReports, openHisto
   return (
     <section className="page-card profile-card">
       {intro}
+      {!user.isLocal && !user.isGuest && (
+        <section className="profile-account-editor">
+          <div className="profile-section-title"><span>פרטי החשבון</span><small>אפשר לעדכן את כל הפרטים בכל עת</small></div>
+          <form className="auth-form" onSubmit={(event) => void submitAccountForm(event, "updateProfile")} encType="multipart/form-data">
+            <div className="auth-name-grid"><label><span>שם פרטי</span><input name="firstName" defaultValue={user.firstName ?? user.displayName.split(" ")[0] ?? ""} required /></label><label><span>שם משפחה</span><input name="lastName" defaultValue={user.lastName ?? user.displayName.split(" ").slice(1).join(" ")} required /></label></div>
+            <label><span>טלפון</span><input name="phone" type="tel" dir="ltr" defaultValue={user.phone ?? ""} required /></label>
+            <label><span>כתובת מייל</span><input name="email" type="email" dir="ltr" defaultValue={user.email} required /></label>
+            <label className="auth-upload"><span>החלפת תמונת פרופיל</span><input name="profileImage" type="file" accept="image/jpeg,image/png,image/webp" /><small>JPG, PNG או WEBP עד 5MB</small></label>
+            {user.profileImageUrl && <label className="profile-remove-image"><input name="removeImage" type="checkbox" value="1" /> הסרת התמונה הנוכחית</label>}
+            <button type="submit" disabled={profileSaving}>{profileSaving ? "שומר..." : "שמירת פרטי החשבון"}</button>
+          </form>
+          <form className="auth-form profile-password-form" onSubmit={(event) => void submitAccountForm(event, "changePassword")}>
+            <h3>החלפת סיסמה</h3>
+            <label><span>סיסמה נוכחית</span><input name="currentPassword" type="password" autoComplete="current-password" required /></label>
+            <div className="auth-name-grid"><label><span>סיסמה חדשה</span><input name="password" type="password" minLength={10} autoComplete="new-password" required /></label><label><span>אימות סיסמה חדשה</span><input name="confirmPassword" type="password" minLength={10} autoComplete="new-password" required /></label></div>
+            <button type="submit" disabled={passwordSaving}>{passwordSaving ? "מעדכן..." : "עדכון הסיסמה"}</button>
+          </form>
+          {profileMessage && <div className={profileMessage.kind === "error" ? "auth-error" : "profile-success"} role="status">{profileMessage.text}</div>}
+        </section>
+      )}
       <section className="profile-quick-section">
         <div className="profile-section-title">
           <span>גישה מהירה</span>

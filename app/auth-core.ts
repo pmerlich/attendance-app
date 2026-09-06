@@ -1,4 +1,4 @@
-export type SessionIdentity = { userId: string; email: string; displayName: string; businessId: string; ownerId: string; role: "manager" | "employee"; profileImageKey?: string | null; isLocal: boolean; isGuest: boolean };
+export type SessionIdentity = { userId: string; email: string; displayName: string; firstName: string; lastName: string; phone: string; businessId: string; ownerId: string; role: "manager" | "employee"; profileImageKey?: string | null; isLocal: boolean; isGuest: boolean };
 
 const SESSION_COOKIE = "menahel_session";
 const SESSION_DAYS = 365;
@@ -41,7 +41,9 @@ export async function resolveSessionIdentity(db: D1Database, request: Request): 
   const token = sessionToken(request);
   if (!token) return null;
   const tokenHash = await sha256(token);
-  const row = await db.prepare(`SELECT u.id AS ownerId, u.auth_user_id AS userId, u.email, u.display_name AS displayName, u.business_id AS businessId, u.role, u.profile_image_key AS profileImageKey
+  const row = await db.prepare(`SELECT u.id AS ownerId, u.auth_user_id AS userId, u.email, u.display_name AS displayName,
+    COALESCE(u.first_name, '') AS firstName, COALESCE(u.last_name, '') AS lastName, COALESCE(u.phone, '') AS phone,
+    u.business_id AS businessId, u.role, u.profile_image_key AS profileImageKey
     FROM auth_sessions s JOIN users u ON u.id = s.user_id
     WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > CURRENT_TIMESTAMP AND u.deleted_at IS NULL AND u.is_active = 1 LIMIT 1`).bind(tokenHash).first<SessionIdentity>();
   if (!row) return null;
