@@ -1182,6 +1182,21 @@ img, svg, iframe { max-width: 100%; }
 }
 .sign-in-card a:hover { background: var(--green-dark); transform: translateY(-1px); }
 .sign-in-card small { display: block; margin-top: 12px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.auth-card { width:min(540px,calc(100vw - 28px)); max-width:540px; }
+.auth-tabs { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin:18px 0; padding:4px; border-radius:12px; background:#eef4f1; }
+.auth-tabs button { min-height:42px; border:0; border-radius:9px; background:transparent; color:var(--muted); font-weight:800; }
+.auth-tabs button.active { background:#fff; color:var(--green-dark); box-shadow:var(--shadow-sm); }
+.auth-form,.auth-form label { display:grid; gap:7px; }
+.auth-form { gap:14px; text-align:right; }
+.auth-form label > span { color:var(--ink); font-size:13px; font-weight:800; }
+.auth-form input { width:100%; min-height:46px; padding:10px 12px; border:1px solid var(--line); border-radius:10px; background:#fff; color:var(--ink); font:inherit; }
+.auth-form input:focus { outline:3px solid rgba(5,150,105,.14); border-color:var(--green); }
+.auth-name-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.auth-upload { padding:12px; border:1px dashed #a9c8bb; border-radius:10px; background:#f8fbfa; }
+.auth-upload input { padding:8px; }
+.auth-upload small,.auth-form > small { margin:0; }
+.auth-error { padding:10px 12px; border:1px solid #fecaca; border-radius:9px; background:#fef2f2; color:#b91c1c; font-size:13px; font-weight:700; }
+.profile-avatar img { width:100%; height:100%; border-radius:inherit; object-fit:cover; }
 
 .employee-card, .client-record-card, .attachment-card, .project-row, .payment-list article, .time-entry-list article { min-width: 0; }
 .employee-card p, .invite-link input { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

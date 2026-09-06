@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
+import { ensureAuthSchema, resolveSessionIdentity } from "../../auth-core";
 
-type Identity = { userId: string; email: string; displayName: string; businessId: string; ownerId: string; role: "manager" | "employee"; isLocal: boolean; isGuest: boolean };
+type Identity = { userId: string; email: string; displayName: string; businessId: string; ownerId: string; role: "manager" | "employee"; profileImageKey?: string | null; isLocal: boolean; isGuest: boolean };
 
 async function stableKey(value: string) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
@@ -9,12 +10,11 @@ async function stableKey(value: string) {
 
 async function resolveIdentity(request: Request): Promise<Identity | null> {
   const hostname = new URL(request.url).hostname;
-  if (["localhost", "127.0.0.1", "::1"].includes(hostname)) {
-    return { userId: "local-demo-user", email: "menachem@example.com", displayName: "מנחם", businessId: "demo-business", ownerId: "demo-owner", role: "manager", isLocal: true, isGuest: false };
-  }
   if (hostname === "menahel-avoda.er2829288.workers.dev") {
     return { userId: "guest-demo-user-v1", email: "guest@menahel-avoda.demo", displayName: "דני לוי", businessId: "guest-demo-business-v1", ownerId: "guest-demo-owner-v1", role: "manager", isLocal: false, isGuest: true };
   }
+  const sessionIdentity = await resolveSessionIdentity(env.DB, request);
+  if (sessionIdentity) return sessionIdentity;
   const userId = request.headers.get("oai-authenticated-user-id");
   const email = request.headers.get("oai-authenticated-user-email");
   if (userId && email) {
@@ -99,6 +99,7 @@ async function ensureCoreSchema(db: D1Database) {
       UNIQUE(business_id, user_id, operation_id)
     )`),
   ]);
+  await ensureAuthSchema(db);
   const userColumns = await db.prepare("PRAGMA table_info(users)").all<{ name: string }>();
   if (!userColumns.results.some((column) => column.name === "auth_user_id")) {
     await db.prepare("ALTER TABLE users ADD COLUMN auth_user_id text").run();
@@ -314,7 +315,7 @@ async function loadState(db: D1Database, identity: Identity) {
     accountMode: business?.workMode ?? "solo",
     currency: business?.currency ?? "EUR",
     storageScope: `${businessId}:${identity.ownerId}`,
-    user: { id: identity.ownerId, displayName: identity.displayName, email: identity.email, role: identity.role, isLocal: identity.isLocal, isGuest: identity.isGuest },
+    user: { id: identity.ownerId, displayName: identity.displayName, email: identity.email, role: identity.role, profileImageUrl: identity.profileImageKey ? "/api/auth?profile=1" : null, isLocal: identity.isLocal, isGuest: identity.isGuest },
     clients: clients.results,
     employees: employees.results,
     projects: projects.results,
@@ -385,10 +386,10 @@ async function loadFinancialReport(db: D1Database, identity: Identity, searchPar
 }
 
 async function prepareRequest(request: Request) {
-  const rawIdentity = await resolveIdentity(request);
-  if (!rawIdentity) return null;
   const db = env.DB;
   await prepareSchema(db);
+  const rawIdentity = await resolveIdentity(request);
+  if (!rawIdentity) return null;
   const membership = await db.prepare(`SELECT id, business_id AS businessId, role
     FROM users WHERE auth_user_id = ? AND deleted_at IS NULL AND is_active = 1
     ORDER BY CASE role WHEN 'employee' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1`)
@@ -403,10 +404,10 @@ async function prepareRequest(request: Request) {
 }
 
 async function acceptInvitation(request: Request, token: string) {
-  const rawIdentity = await resolveIdentity(request);
-  if (!rawIdentity) return Response.json({ error: "יש להתחבר לפני קבלת ההזמנה" }, { status: 401 });
   const db = env.DB;
   await prepareSchema(db);
+  const rawIdentity = await resolveIdentity(request);
+  if (!rawIdentity) return Response.json({ error: "יש להתחבר לפני קבלת ההזמנה" }, { status: 401 });
   const invitation = await db.prepare(`SELECT ei.id, ei.business_id AS businessId, ei.employee_id AS employeeId, ei.email
     FROM employee_invitations ei JOIN users u ON u.id = ei.employee_id
     WHERE ei.token = ? AND ei.status = 'pending' AND ei.expires_at > CURRENT_TIMESTAMP

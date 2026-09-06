@@ -223,3 +223,20 @@ test("uses minor currency units and recomputes offline summaries", async () => {
   assert.match(page, /billableExpenseAmount/);
   assert.match(page, /RecordListFilters/);
 });
+
+test("ships persistent isolated account authentication", async () => {
+  const auth = await readFile(new URL("../app/auth-core.ts", import.meta.url), "utf8");
+  const route = await readFile(new URL("../app/api/auth/route.ts", import.meta.url), "utf8");
+  const state = await readFile(new URL("../app/api/state/route.ts", import.meta.url), "utf8");
+  const migration = await readFile(new URL("../drizzle/0012_real_accounts.sql", import.meta.url), "utf8");
+  assert.match(auth, /PBKDF2_ITERATIONS = 310_000/);
+  assert.match(auth, /HttpOnly; SameSite=Lax; Max-Age=/);
+  assert.match(auth, /token_hash/);
+  assert.match(route, /action === "register"/);
+  assert.match(route, /action === "login"/);
+  assert.match(route, /action === "logout"/);
+  assert.match(route, /validImageSignature/);
+  assert.match(route, /COUNT\(\*\) AS count FROM auth_login_attempts/);
+  assert.match(state, /resolveSessionIdentity/);
+  assert.match(migration, /CREATE TABLE `auth_sessions`/);
+});

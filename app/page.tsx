@@ -307,6 +307,7 @@ type AccountUser = {
   displayName: string;
   email: string;
   role: "manager" | "employee";
+  profileImageUrl?: string | null;
   isLocal: boolean;
   isGuest?: boolean;
 };
@@ -3138,15 +3139,37 @@ function OfflineUnavailableView() {
 }
 
 function SignInView() {
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setError(""); setSubmitting(true);
+    try {
+      const form = new FormData(event.currentTarget); form.set("action", mode);
+      const response = await fetch("/api/auth", { method: "POST", body: form });
+      const payload = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "הפעולה נכשלה");
+      window.location.reload();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "הפעולה נכשלה"); setSubmitting(false); }
+  }
   return (
     <main className="sign-in-shell">
-      <section className="sign-in-card">
+      <section className="sign-in-card auth-card">
         <Image className="sign-in-logo" src="/app-icon.png" width={82} height={82} alt="מנהל עבודה" />
         <p>מנהל עבודה</p>
-        <h1>החשבון שלך מחכה לך</h1>
-        <span>כדי לשמור על הפרויקטים והמידע הכספי שלך בנפרד, יש להתחבר לפני שממשיכים.</span>
-        <a href="/signin-with-chatgpt?return_to=%2F">התחברות עם ChatGPT</a>
-        <small>בסביבה המקומית הכניסה מתבצעת אוטומטית עם משתמש הפיתוח.</small>
+        <h1>{mode === "login" ? "כניסה לחשבון" : "יצירת חשבון חדש"}</h1>
+        <div className="auth-tabs"><button type="button" className={mode === "login" ? "active" : ""} onClick={() => { setMode("login"); setError(""); }}>כניסה</button><button type="button" className={mode === "register" ? "active" : ""} onClick={() => { setMode("register"); setError(""); }}>הרשמה</button></div>
+        <form className="auth-form" onSubmit={submit} encType="multipart/form-data">
+          {mode === "register" && <div className="auth-name-grid"><label><span>שם פרטי</span><input name="firstName" autoComplete="given-name" required /></label><label><span>שם משפחה</span><input name="lastName" autoComplete="family-name" required /></label></div>}
+          {mode === "register" && <label><span>טלפון</span><input name="phone" type="tel" dir="ltr" autoComplete="tel" required /></label>}
+          <label><span>כתובת מייל</span><input name="email" type="email" dir="ltr" autoComplete="email" required /></label>
+          <label><span>סיסמה</span><input name="password" type="password" dir="ltr" minLength={10} autoComplete={mode === "login" ? "current-password" : "new-password"} required /></label>
+          {mode === "register" && <label><span>אימות סיסמה</span><input name="confirmPassword" type="password" dir="ltr" minLength={10} autoComplete="new-password" required /></label>}
+          {mode === "register" && <label className="auth-upload"><span>תמונת פרופיל (אופציונלי)</span><input name="profileImage" type="file" accept="image/jpeg,image/png,image/webp" /><small>JPG, PNG או WEBP עד 5MB</small></label>}
+          {mode === "register" && <small>הסיסמה צריכה לכלול לפחות 10 תווים, אות ומספר.</small>}
+          {error && <div className="auth-error" role="alert">{error}</div>}
+          <button type="submit" disabled={submitting}>{submitting ? "נא להמתין…" : mode === "login" ? "כניסה" : "יצירת חשבון"}</button>
+        </form>
       </section>
     </main>
   );
@@ -3643,18 +3666,19 @@ function RecycleBinView({ trash, restoreClient, restoreProject, restoreEmployee 
 }
 
 function ProfileView({ user, accountMode, setAccountMode, openReports, openHistory, openTrash, navigateTo }: { user: AccountUser; accountMode: AccountMode; setAccountMode: (mode: AccountMode) => void; openReports: () => void; openHistory: () => void; openTrash: () => void; navigateTo: (view: View) => void }) {
+  async function signOut() { const form = new FormData(); form.set("action", "logout"); await fetch("/api/auth", { method: "POST", body: form }); window.location.assign("/"); }
   const intro = (
     <div className="profile-intro">
-      <div className="profile-avatar">{user.displayName.charAt(0)}</div>
+      <div className="profile-avatar">{user.profileImageUrl ? <Image src={user.profileImageUrl} width={72} height={72} alt={`תמונת הפרופיל של ${user.displayName}`} unoptimized /> : user.displayName.charAt(0)}</div>
       <div>
         <h2 dir="auto">{user.displayName}</h2>
         <p dir="ltr">{user.email}</p>
         <small>{user.role === "employee" ? "עובד מחובר לצוות" : user.isGuest ? "אורח הדגמה ציבורי" : user.isLocal ? "משתמש פיתוח מקומי" : "חשבון מחובר"}</small>
       </div>
       {!user.isLocal && !user.isGuest && (
-        <a className="sign-out-link" href="/signout-with-chatgpt?return_to=%2F">
+        <button type="button" className="sign-out-link" onClick={() => void signOut()}>
           התנתקות
-        </a>
+        </button>
       )}
     </div>
   );
