@@ -493,7 +493,7 @@ function applyOptimisticOperation(state: StoredState, operation: QueuedOperation
         source: "timer" as const,
       },
       ...next.recentTimeEntries.filter((entry) => entry.id !== id),
-    ].slice(0, 50);
+    ];
   }
   if (operation.action === "stopTimer" && next.activeTimer) {
     const endedAt = sqlTimestamp(values.endedAt);
@@ -517,7 +517,7 @@ function applyOptimisticOperation(state: StoredState, operation: QueuedOperation
         source: "manual" as const,
       },
       ...next.recentTimeEntries.filter((entry) => entry.id !== id),
-    ].slice(0, 50);
+    ];
   }
   if (operation.action === "updateTimeEntry")
     next.recentTimeEntries = next.recentTimeEntries.map((entry) =>
@@ -766,6 +766,17 @@ function applyOptimisticOperation(state: StoredState, operation: QueuedOperation
         : expense,
     );
   if (operation.action === "deleteExpense") next.expenses = next.expenses.filter((expense) => expense.id !== id);
+
+  next.projects = next.projects.map((item) => {
+    const itemId = String(item.id);
+    const totalSeconds = next.recentTimeEntries.filter((entry) => String(entry.projectId) === itemId).reduce((sum, entry) => sum + Number(entry.durationSeconds || 0), 0);
+    const paidAmount = next.payments.filter((payment) => String(payment.projectId) === itemId).reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+    const projectExpenses = next.expenses.filter((expense) => String(expense.projectId) === itemId);
+    const expenseAmount = projectExpenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0);
+    const billableExpenseAmount = projectExpenses.filter((expense) => Boolean(expense.billableToClient)).reduce((sum, expense) => sum + Number(expense.amount || 0), 0);
+    const laborCost = next.recentTimeEntries.filter((entry) => String(entry.projectId) === itemId).reduce((sum, entry) => sum + Number(entry.durationSeconds || 0) / 3600 * Number(next.employees.find((employee) => String(employee.id) === String(entry.userId))?.hourlyCost ?? 0), 0);
+    return { ...item, totalSeconds, paidAmount, expenseAmount, billableExpenseAmount, laborCost };
+  });
 
   return next;
 }
