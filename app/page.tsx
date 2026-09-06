@@ -2993,7 +2993,7 @@ function EmployeesView({ employees, openNew, editEmployee, removeEmployee, invit
               <span className={`connection-pill ${employee.connectionStatus ?? "not_invited"}`}>{employee.connectionStatus === "connected" ? "מחובר למערכת" : employee.connectionStatus === "pending" ? "הזמנה ממתינה" : "טרם הוזמן"}</span>
               <div className="employee-rate">
                 <span>עלות לשעה</span>
-                <strong>€{employee.hourlyCost}</strong>
+                <strong>{formatMoney(employee.hourlyCost)}</strong>
               </div>
               {inviteUrl && (
                 <div className="invite-link">
@@ -3128,17 +3128,18 @@ function ReportsView({ projects, employees, projectId, setProjectId, employeeId,
   const totals = rows.reduce(
     (sum, row) => ({
       hours: sum.hours + row.hours,
+      seconds: sum.seconds + row.totalSeconds,
       expected: sum.expected + row.expected,
       paid: sum.paid + row.paidAmount,
       costs: sum.costs + row.costs,
       labor: sum.labor + row.laborCost,
       profit: sum.profit + row.profit,
     }),
-    { hours: 0, expected: 0, paid: 0, costs: 0, labor: 0, profit: 0 },
+    { hours: 0, seconds: 0, expected: 0, paid: 0, costs: 0, labor: 0, profit: 0 },
   );
   const receivedProfit = totals.paid - totals.costs;
   const rangeLabel = from || to ? "טווח: " + (from || "התחלה") + " עד " + (to || "היום") : "כל התקופה";
-  const exportRows: WorkbookCell[][] = employeeMode ? [["עובד", "פרויקט", "שעות", "סכום לעובד (EUR)"], ...rows.map((row) => [selectedEmployee?.name ?? "עובד", row.projectName, Number(row.hours.toFixed(2)), Number(row.laborCost.toFixed(2))])] : [["פרויקט", "שעות", "הכנסה צפויה", "התקבל", "הוצאות עסק", "עלות עובדים", "רווח צפוי"], ...rows.map((row) => [row.projectName, Number(row.hours.toFixed(2)), Number(row.expected.toFixed(2)), Number(row.paidAmount.toFixed(2)), Number(row.expenseAmount.toFixed(2)), Number(row.laborCost.toFixed(2)), Number(row.profit.toFixed(2))])];
+  const exportRows: WorkbookCell[][] = employeeMode ? [["עובד", "פרויקט", "זמן (HH:MM:SS)", `סכום לעובד (${activeCurrency})`], ...rows.map((row) => [selectedEmployee?.name ?? "עובד", row.projectName, formatTime(row.totalSeconds), Number(row.laborCost.toFixed(2))])] : [["פרויקט", "זמן (HH:MM:SS)", "הכנסה צפויה", "התקבל", "הוצאות עסק", "עלות עובדים", "רווח צפוי"], ...rows.map((row) => [row.projectName, formatTime(row.totalSeconds), Number(row.expected.toFixed(2)), Number(row.paidAmount.toFixed(2)), Number(row.expenseAmount.toFixed(2)), Number(row.laborCost.toFixed(2)), Number(row.profit.toFixed(2))])];
   function csvCell(value: WorkbookCell) {
     let text = String(value);
     if (/^[=+\-@\t\r]/.test(text)) text = "'" + text;
@@ -3190,9 +3191,9 @@ function ReportsView({ projects, employees, projectId, setProjectId, employeeId,
       return;
     }
     printWindow.opener = null;
-    const tableRows = employeeMode ? rows.map((row) => ["<tr><td>", escapeHtml(row.projectName), "</td><td>", row.hours.toFixed(1), "</td><td>€", row.laborCost.toFixed(2), "</td></tr>"].join("")).join("") : rows.map((row) => ["<tr><td>", escapeHtml(row.projectName), "</td><td>", row.hours.toFixed(1), "</td><td>€", Math.round(row.expected).toLocaleString(), "</td><td>€", Math.round(row.paidAmount).toLocaleString(), "</td><td>€", Math.round(row.expenseAmount).toLocaleString(), "</td><td>€", Math.round(row.laborCost).toLocaleString(), "</td><td>€", Math.round(row.profit).toLocaleString(), "</td></tr>"].join("")).join("");
+    const tableRows = employeeMode ? rows.map((row) => ["<tr><td>", escapeHtml(row.projectName), "</td><td>", formatTime(row.totalSeconds), "</td><td>", escapeHtml(formatMoney(row.laborCost)), "</td></tr>"].join("")).join("") : rows.map((row) => ["<tr><td>", escapeHtml(row.projectName), "</td><td>", formatTime(row.totalSeconds), "</td><td>", escapeHtml(formatMoney(row.expected)), "</td><td>", escapeHtml(formatMoney(row.paidAmount)), "</td><td>", escapeHtml(formatMoney(row.expenseAmount)), "</td><td>", escapeHtml(formatMoney(row.laborCost)), "</td><td>", escapeHtml(formatMoney(row.profit)), "</td></tr>"].join("")).join("");
     const reportTitle = employeeMode ? "דוח עובד — " + (selectedEmployee?.name ?? "עובד") : "דוח כספי";
-    const summary = employeeMode ? `<div>שעות: ${totals.hours.toFixed(1)}</div><div>סכום לעובד: €${totals.labor.toFixed(2)}</div>` : `<div>הכנסה צפויה: €${Math.round(totals.expected).toLocaleString()}</div><div>רווח צפוי: €${Math.round(totals.profit).toLocaleString()}</div><div>התקבל בפועל: €${Math.round(totals.paid).toLocaleString()}</div>`;
+    const summary = employeeMode ? `<div>זמן: ${formatTime(totals.seconds)}</div><div>סכום לעובד: ${escapeHtml(formatMoney(totals.labor))}</div>` : `<div>הכנסה צפויה: ${escapeHtml(formatMoney(totals.expected))}</div><div>רווח צפוי: ${escapeHtml(formatMoney(totals.profit))}</div><div>התקבל בפועל: ${escapeHtml(formatMoney(totals.paid))}</div>`;
     const headings = employeeMode ? "<th>פרויקט</th><th>שעות</th><th>סכום לעובד</th>" : "<th>פרויקט</th><th>שעות</th><th>צפוי</th><th>התקבל</th><th>הוצאות</th><th>עובדים</th><th>רווח</th>";
     printWindow.document.write(["<!doctype html><html lang='he' dir='rtl'><head><meta charset='utf-8'><title>", escapeHtml(reportTitle), "</title><style>body{font-family:Arial,sans-serif;color:#173b2e;padding:28px}h1{margin:0 0 8px}.meta{color:#64766e;margin-bottom:24px}.summary{display:flex;gap:24px;margin:20px 0}.summary div{padding:12px 16px;background:#eef6f2;border-radius:10px}table{width:100%;border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #dfe8e3;text-align:right}th{background:#1e7a59;color:white}@media print{body{padding:0}}</style></head><body><h1>מנהל עבודה — ", escapeHtml(reportTitle), "</h1><div class='meta'>", escapeHtml(rangeLabel), " · הופק בתאריך ", escapeHtml(new Date().toLocaleDateString("he-IL")), "</div><div class='summary'>", summary, "</div><table><thead><tr>", headings, "</tr></thead><tbody>", tableRows, "</tbody></table><script>window.addEventListener('load',function(){window.print()});</scr" + "ipt></body></html>"].join(""));
     printWindow.document.close();
@@ -3256,11 +3257,11 @@ function ReportsView({ projects, employees, projectId, setProjectId, employeeId,
           </article>
           <article>
             <span>שעות</span>
-            <strong>{totals.hours.toFixed(1)}</strong>
+            <strong>{formatTime(totals.seconds)}</strong>
           </article>
           <article>
             <span>סכום לעובד</span>
-            <strong>€{totals.labor.toFixed(2)}</strong>
+            <strong>{formatMoney(totals.labor)}</strong>
           </article>
           <article>
             <span>פרויקטים בדוח</span>
@@ -3271,20 +3272,20 @@ function ReportsView({ projects, employees, projectId, setProjectId, employeeId,
         <section className="finance-summary report-summary">
           <article>
             <span>שעות</span>
-            <strong>{totals.hours.toFixed(1)}</strong>
+            <strong>{formatTime(totals.seconds)}</strong>
           </article>
           <article>
             <span>הכנסה צפויה</span>
-            <strong>€{Math.round(totals.expected).toLocaleString()}</strong>
+            <strong>{formatMoney(totals.expected)}</strong>
           </article>
           <article>
             <span>רווח צפוי</span>
-            <strong>€{Math.round(totals.profit).toLocaleString()}</strong>
+            <strong>{formatMoney(totals.profit)}</strong>
             <small>כולל הוצאות ועלויות עובדים</small>
           </article>
           <article className={receivedProfit < 0 ? "negative" : "positive"}>
             <span>רווח לפי תקבולים</span>
-            <strong>€{Math.round(receivedProfit).toLocaleString()}</strong>
+            <strong>{formatMoney(receivedProfit)}</strong>
             <small>מה שהתקבל בפועל פחות כל העלויות</small>
           </article>
         </section>
@@ -3295,7 +3296,7 @@ function ReportsView({ projects, employees, projectId, setProjectId, employeeId,
             <h2>{employeeMode ? "סיכום עובד לפי פרויקט" : "סיכום לפי פרויקט"}</h2>
             <p>
               {rows.length} פרויקטים בדוח
-              {employeeMode ? ` · ${totals.hours.toFixed(1)} שעות` : ` · התקבל בפועל: €${Math.round(totals.paid).toLocaleString()}`}
+              {employeeMode ? ` · ${formatTime(totals.seconds)}` : ` · התקבל בפועל: ${formatMoney(totals.paid)}`}
             </p>
           </div>
         </div>
@@ -3311,8 +3312,8 @@ function ReportsView({ projects, employees, projectId, setProjectId, employeeId,
               {rows.map((row) => (
                 <div className="report-table-row" key={row.projectId}>
                   <strong dir="auto">{row.projectName}</strong>
-                  <span>{row.hours.toFixed(1)}</span>
-                  <b>€{row.laborCost.toFixed(2)}</b>
+                  <span>{formatTime(row.totalSeconds)}</span>
+                  <b>{formatMoney(row.laborCost)}</b>
                 </div>
               ))}
             </div>
@@ -3329,11 +3330,11 @@ function ReportsView({ projects, employees, projectId, setProjectId, employeeId,
               {rows.map((row) => (
                 <div className="report-table-row" key={row.projectId}>
                   <strong dir="auto">{row.projectName}</strong>
-                  <span>{row.hours.toFixed(1)}</span>
-                  <span>€{Math.round(row.expected).toLocaleString()}</span>
-                  <span>€{Math.round(row.paidAmount).toLocaleString()}</span>
-                  <span title={"הוצאות: €" + Math.round(row.expenseAmount).toLocaleString() + " · עובדים: €" + Math.round(row.laborCost).toLocaleString()}>€{Math.round(row.costs).toLocaleString()}</span>
-                  <b className={row.profit < 0 ? "negative-text" : "positive-text"}>€{Math.round(row.profit).toLocaleString()}</b>
+                  <span>{formatTime(row.totalSeconds)}</span>
+                  <span>{formatMoney(row.expected)}</span>
+                  <span>{formatMoney(row.paidAmount)}</span>
+                  <span title={`הוצאות: ${formatMoney(row.expenseAmount)} · עובדים: ${formatMoney(row.laborCost)}`}>{formatMoney(row.costs)}</span>
+                  <b className={row.profit < 0 ? "negative-text" : "positive-text"}>{formatMoney(row.profit)}</b>
                 </div>
               ))}
             </div>
@@ -3798,7 +3799,7 @@ function EmployeeForm({ initial, submit }: { initial?: Employee; submit: (event:
         <Field label="אימייל">
           <input name="email" dir="ltr" type="email" required defaultValue={initial?.email} placeholder="name@example.com" />
         </Field>
-        <Field label="עלות לשעה (EUR)">
+        <Field label={`עלות לשעה (${activeCurrency})`}>
           <input name="hourlyCost" dir="ltr" type="number" min="0" step="0.01" required defaultValue={initial?.hourlyCost} placeholder="0.00" />
         </Field>
       </div>
@@ -3863,7 +3864,7 @@ function PaymentForm({ projects, initialProjectId, initial, submit }: { projects
             ))}
           </select>
         </Field>
-        <Field label="סכום שהתקבל (EUR)">
+        <Field label={`סכום שהתקבל (${activeCurrency})`}>
           <input name="amount" dir="ltr" type="number" min="0.01" step="0.01" required defaultValue={initial?.amount} placeholder="0.00" />
         </Field>
         <Field label="תאריך התשלום">
@@ -3958,7 +3959,7 @@ function AttachmentForm({ projects, expenses, initialProjectId, initialExpenseId
             <option value="">קובץ כללי של הפרויקט</option>
             {matchingExpenses.map((expense) => (
               <option key={expense.id} value={expense.id}>
-                {expenseCategoryLabels[expense.category]} · €{expense.amount.toLocaleString()} · {new Date(expense.incurredAt + "T12:00:00").toLocaleDateString("he-IL")}
+                {expenseCategoryLabels[expense.category]} · {formatMoney(expense.amount)} · {new Date(expense.incurredAt + "T12:00:00").toLocaleDateString("he-IL")}
               </option>
             ))}
           </select>
@@ -4010,7 +4011,7 @@ function ExpenseForm({ projects, initialProjectId, initial, submit }: { projects
             ))}
           </select>
         </Field>
-        <Field label="סכום ההוצאה (EUR)">
+        <Field label={`סכום ההוצאה (${activeCurrency})`}>
           <input name="amount" dir="ltr" type="number" min="0.01" step="0.01" required defaultValue={initial?.amount} placeholder="0.00" />
         </Field>
         <Field label="תאריך ההוצאה">
@@ -4142,12 +4143,12 @@ function ProjectForm({ accountMode, clients, employees, billingType, setBillingT
       </fieldset>
       <div className="form-grid conditional-fields">
         {(billingType === "fixed" || billingType === "combined") && (
-          <Field label={billingType === "fixed" ? `${isSolo ? "השכר" : "המחיר"} הגלובלי (EUR)` : "סכום הבסיס (EUR)"}>
+          <Field label={billingType === "fixed" ? `${isSolo ? "השכר" : "המחיר"} הגלובלי (${activeCurrency})` : `סכום הבסיס (${activeCurrency})`}>
             <input name="fixedPrice" dir="ltr" type="number" min="0" step="0.01" required defaultValue={initial?.fixedPrice} placeholder="0.00" />
           </Field>
         )}
         {(billingType === "hourly" || billingType === "combined") && (
-          <Field label={`${isSolo ? "השכר שלי" : "תעריף ללקוח"} לשעה (EUR)`}>
+          <Field label={`${isSolo ? "השכר שלי" : "תעריף ללקוח"} לשעה (${activeCurrency})`}>
             <input name="hourlyRate" dir="ltr" type="number" min="0" step="0.01" required defaultValue={initial?.hourlyRate} placeholder="0.00" />
           </Field>
         )}
@@ -4160,7 +4161,7 @@ function ProjectForm({ accountMode, clients, employees, billingType, setBillingT
               <input type="checkbox" name="workers" value={employee.id} defaultChecked={initial?.workerIds.includes(String(employee.id))} />
               <span className="mini-avatar">{employee.name.charAt(0)}</span>
               <span dir="auto">{employee.name}</span>
-              <small>€{employee.hourlyCost}/שעה</small>
+              <small>{formatMoney(employee.hourlyCost)}/שעה</small>
             </label>
           ))}
         </fieldset>
@@ -4173,7 +4174,7 @@ function ProjectForm({ accountMode, clients, employees, billingType, setBillingT
 function FormActions({ label }: { label: string }) {
   return (
     <footer className="form-actions">
-      <span>כל השדות נשמרים ב־EUR</span>
+      <span>כל השדות נשמרים ב־{activeCurrency}</span>
       <button type="submit" className="primary-button">
         {label}
       </button>
