@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
-import { enqueueOperation, readCachedState, readQueuedOperations, removeQueuedOperation, setOfflineScope, writeCachedState, type QueuedOperation } from "./offline-store";
+import { enqueueAttachment, enqueueOperation, readCachedState, readQueuedAttachments, readQueuedOperations, removeQueuedAttachment, removeQueuedOperation, setOfflineScope, writeCachedState, type QueuedAttachment, type QueuedOperation } from "./offline-store";
 import { createXlsx, type WorkbookCell } from "./xlsx-export";
 
 type View = "dashboard" | "projects" | "time" | "payments" | "expenses" | "clients" | "employees" | "trash" | "history" | "reports" | "profile";
@@ -1071,26 +1071,55 @@ export default function Home() {
     }
   }
 
+  async function syncQueuedAttachments() {
+    if (!navigator.onLine) return;
+    const queued = await readQueuedAttachments();
+    for (const attachment of queued) {
+      const form = new FormData();
+      form.set("projectId", attachment.projectId);
+      if (attachment.expenseId) form.set("expenseId", attachment.expenseId);
+      form.set("file", attachment.blob, attachment.fileName);
+      let response: Response;
+      try { response = await fetch("/api/state", { method: "POST", body: form }); }
+      catch { setSyncState("offline"); return; }
+      if (response.status === 401) { setAuthRequired(true); return; }
+      if (response.status >= 500) { setSyncState("error"); return; }
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({})) as { error?: string };
+        await enqueueAttachment({ ...attachment, lastError: payload.error ?? `העלאת ${attachment.fileName} נדחתה` });
+        setSyncError(payload.error ?? `העלאת ${attachment.fileName} נדחתה`);
+        continue;
+      }
+      await removeQueuedAttachment(attachment.id);
+      applyStoredState(await response.json() as StoredState);
+    }
+    const [remainingOperations, remainingAttachments] = await Promise.all([readQueuedOperations(), readQueuedAttachments()]);
+    setPendingCount(remainingOperations.length + remainingAttachments.length);
+    if (!remainingOperations.length && !remainingAttachments.length) setSyncState("saved");
+  }
+
   async function retryQueuedOperations() {
-    const queued = await readQueuedOperations();
-    await Promise.all(queued.filter((operation) => operation.lastError).map((operation) => enqueueOperation({ ...operation, lastError: undefined })));
+    const [queued, attachments] = await Promise.all([readQueuedOperations(), readQueuedAttachments()]);
+    await Promise.all([...queued.filter((operation) => operation.lastError).map((operation) => enqueueOperation({ ...operation, lastError: undefined })), ...attachments.filter((attachment) => attachment.lastError).map((attachment) => enqueueAttachment({ ...attachment, lastError: undefined }))]);
     setSyncError("");
     await syncQueuedOperations();
+    await syncQueuedAttachments();
   }
 
   async function discardRejectedOperations() {
-    const queued = await readQueuedOperations();
-    await Promise.all(queued.filter((operation) => operation.lastError).map((operation) => removeQueuedOperation(operation.id)));
-    const remaining = await readQueuedOperations();
-    setPendingCount(remaining.length);
+    const [queued, attachments] = await Promise.all([readQueuedOperations(), readQueuedAttachments()]);
+    await Promise.all([...queued.filter((operation) => operation.lastError).map((operation) => removeQueuedOperation(operation.id)), ...attachments.filter((attachment) => attachment.lastError).map((attachment) => removeQueuedAttachment(attachment.id))]);
+    const [remaining, remainingAttachments] = await Promise.all([readQueuedOperations(), readQueuedAttachments()]);
+    setPendingCount(remaining.length + remainingAttachments.length);
     setSyncError("");
-    setSyncState(remaining.length ? "loading" : "saved");
+    setSyncState(remaining.length || remainingAttachments.length ? "loading" : "saved");
     if (remaining.length) await syncQueuedOperations();
+    if (remainingAttachments.length) await syncQueuedAttachments();
   }
   useEffect(() => {
     let active = true;
     const handleOnline = () => {
-      if (active) void syncQueuedOperations();
+      if (active) void syncQueuedOperations().then(() => syncQueuedAttachments());
     };
     const handleOffline = () => {
       if (active) setSyncState("offline");
@@ -1154,9 +1183,10 @@ export default function Home() {
         const identityState = (await identityResponse.json()) as StoredState;
         applyStoredState(identityState);
       }
-      const scopedQueue = await readQueuedOperations().catch(() => []);
-      setPendingCount(scopedQueue.length);
+      const [scopedQueue, scopedAttachments] = await Promise.all([readQueuedOperations().catch(() => []), readQueuedAttachments().catch(() => [])]);
+      setPendingCount(scopedQueue.length + scopedAttachments.length);
       await syncQueuedOperations();
+      await syncQueuedAttachments();
     })().catch(() => {
       if (!active) return;
       setSyncState("offline");
@@ -1441,11 +1471,26 @@ export default function Home() {
 
   async function uploadAttachment(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const file = form.get("file");
+    if (!(file instanceof File)) return;
+    const queuedAttachment: QueuedAttachment = { id: crypto.randomUUID(), projectId: String(form.get("projectId") ?? ""), expenseId: String(form.get("expenseId") ?? ""), fileName: file.name, contentType: file.type, blob: file, createdAt: new Date().toISOString() };
+    if (!navigator.onLine) {
+      await enqueueAttachment(queuedAttachment);
+      const [operations, attachments] = await Promise.all([readQueuedOperations(), readQueuedAttachments()]);
+      setPendingCount(operations.length + attachments.length);
+      setSyncState("offline");
+      setInviteNotice({ kind: "success", text: "הקבלה נשמרה במכשיר ותועלה אוטומטית כשיחזור החיבור." });
+      setModal(null);
+      setEditingId(null);
+      setView("expenses");
+      return;
+    }
     setSyncState("loading");
     try {
       const response = await fetch("/api/state", {
         method: "POST",
-        body: new FormData(event.currentTarget),
+        body: form,
       });
       if (!response.ok) {
         const error = (await response.json().catch(() => ({}))) as {
@@ -1459,7 +1504,18 @@ export default function Home() {
       setEditingId(null);
       setView("expenses");
     } catch (error) {
-      setSyncState(navigator.onLine ? "error" : "offline");
+      if (!navigator.onLine || error instanceof TypeError) {
+        await enqueueAttachment(queuedAttachment);
+        const [operations, attachments] = await Promise.all([readQueuedOperations(), readQueuedAttachments()]);
+        setPendingCount(operations.length + attachments.length);
+        setSyncState("offline");
+        setInviteNotice({ kind: "success", text: "הקבלה נשמרה במכשיר ותועלה אוטומטית כשיחזור החיבור." });
+        setModal(null);
+        setEditingId(null);
+        setView("expenses");
+        return;
+      }
+      setSyncState("error");
       setInviteNotice({
         kind: "error",
         text: error instanceof Error ? error.message : "העלאת הקובץ נכשלה. אפשר לנסות שוב.",

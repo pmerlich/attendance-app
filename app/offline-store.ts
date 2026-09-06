@@ -6,11 +6,14 @@ export type QueuedOperation = {
   lastError?: string;
 };
 
+export type QueuedAttachment = { id: string; projectId: string; expenseId: string; fileName: string; contentType: string; blob: Blob; createdAt: string; lastError?: string };
+
 const DATABASE_PREFIX = "menahel-avoda-offline";
 const SCOPE_KEY = "menahel-avoda-offline-scope";
-const DATABASE_VERSION = 1;
+const DATABASE_VERSION = 2;
 const STATE_STORE = "state";
 const QUEUE_STORE = "operations";
+const ATTACHMENT_STORE = "attachments";
 const STATE_KEY = "latest";
 
 function currentScope() {
@@ -32,6 +35,7 @@ function openDatabase() {
       const database = request.result;
       if (!database.objectStoreNames.contains(STATE_STORE)) database.createObjectStore(STATE_STORE);
       if (!database.objectStoreNames.contains(QUEUE_STORE)) database.createObjectStore(QUEUE_STORE, { keyPath: "id" });
+      if (!database.objectStoreNames.contains(ATTACHMENT_STORE)) database.createObjectStore(ATTACHMENT_STORE, { keyPath: "id" });
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error("פתיחת האחסון המקומי נכשלה"));
@@ -70,4 +74,16 @@ export function enqueueOperation(operation: QueuedOperation) {
 
 export function removeQueuedOperation(id: string) {
   return transact<undefined>(QUEUE_STORE, "readwrite", (store) => store.delete(id)).then(() => undefined);
+}
+
+export function readQueuedAttachments() {
+  return transact<QueuedAttachment[]>(ATTACHMENT_STORE, "readonly", (store) => store.getAll()).then((items) => items.sort((left, right) => left.createdAt.localeCompare(right.createdAt)));
+}
+
+export function enqueueAttachment(attachment: QueuedAttachment) {
+  return transact<IDBValidKey>(ATTACHMENT_STORE, "readwrite", (store) => store.put(attachment)).then(() => undefined);
+}
+
+export function removeQueuedAttachment(id: string) {
+  return transact<undefined>(ATTACHMENT_STORE, "readwrite", (store) => store.delete(id)).then(() => undefined);
 }

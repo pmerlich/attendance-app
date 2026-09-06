@@ -155,6 +155,16 @@ test("enables the isolated guest demo only on the preview host", async () => {
   assert.match(page, /סביבת הדגמה ציבורית לקריאה בלבד/);
 });
 
+test("queues attachment blobs for background upload", async () => {
+  const store = await readFile(new URL("../app/offline-store.ts", import.meta.url), "utf8");
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(store, /DATABASE_VERSION = 2/);
+  assert.match(store, /ATTACHMENT_STORE/);
+  assert.match(store, /blob: Blob/);
+  assert.match(page, /syncQueuedAttachments/);
+  assert.match(page, /enqueueAttachment\(queuedAttachment\)/);
+});
+
 test("isolates offline data and validates critical mutations", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   const offline = await readFile(new URL("../app/offline-store.ts", import.meta.url), "utf8");
