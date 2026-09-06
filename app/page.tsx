@@ -2572,8 +2572,21 @@ function TimeEntryList({ entries, editEntry, removeEntry }: { entries: TimeEntry
   );
 }
 
+function RecordListFilters({ query, setQuery, from, setFrom, to, setTo, order, setOrder }: { query: string; setQuery: (value: string) => void; from: string; setFrom: (value: string) => void; to: string; setTo: (value: string) => void; order: "newest" | "oldest"; setOrder: (value: "newest" | "oldest") => void }) {
+  return <div className="record-list-filters"><label className="search-box standalone"><span>⌕</span><input dir="auto" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="חיפוש ברשומות" aria-label="חיפוש ברשומות" /></label><label><span>מתאריך</span><input type="date" max={to || undefined} value={from} onChange={(event) => setFrom(event.target.value)} /></label><label><span>עד תאריך</span><input type="date" min={from || undefined} value={to} onChange={(event) => setTo(event.target.value)} /></label><label><span>מיון</span><select value={order} onChange={(event) => setOrder(event.target.value as "newest" | "oldest")}><option value="newest">חדש לישן</option><option value="oldest">ישן לחדש</option></select></label></div>;
+}
+
 function TimeEntriesView({ entries, contextProject, backToProject, showAll, openNew, editEntry, removeEntry }: { entries: TimeEntry[]; contextProject?: Project; backToProject: () => void; showAll: () => void; openNew: () => void; editEntry: (entry: TimeEntry) => void; removeEntry: (entry: TimeEntry) => void }) {
-  const totalSeconds = entries.reduce((sum, entry) => sum + Number(entry.durationSeconds), 0);
+  const [recordQuery, setRecordQuery] = useState("");
+  const [recordFrom, setRecordFrom] = useState("");
+  const [recordTo, setRecordTo] = useState("");
+  const [recordOrder, setRecordOrder] = useState<"newest" | "oldest">("newest");
+  const visibleEntries = useMemo(() => entries.filter((entry) => {
+    const date = entry.startedAt.slice(0, 10);
+    const text = `${entry.projectName} ${entry.workerName} ${entry.description}`.toLocaleLowerCase();
+    return text.includes(recordQuery.trim().toLocaleLowerCase()) && (!recordFrom || date >= recordFrom) && (!recordTo || date <= recordTo);
+  }).sort((a, b) => recordOrder === "newest" ? b.startedAt.localeCompare(a.startedAt) : a.startedAt.localeCompare(b.startedAt)), [entries, recordFrom, recordOrder, recordQuery, recordTo]);
+  const totalSeconds = visibleEntries.reduce((sum, entry) => sum + Number(entry.durationSeconds), 0);
   return (
     <>
       <section className="page-actions-bar">
@@ -2594,7 +2607,7 @@ function TimeEntriesView({ entries, contextProject, backToProject, showAll, open
         </div>
         <div>
           <span>מספר דיווחים</span>
-          <strong>{entries.length}</strong>
+          <strong>{visibleEntries.length}</strong>
           <small>{contextProject ? contextProject.name : "בכל הפרויקטים"}</small>
         </div>
       </section>
@@ -2612,8 +2625,9 @@ function TimeEntriesView({ entries, contextProject, backToProject, showAll, open
             </div>
           )}
         </div>
-        {entries.length ? (
-          <TimeEntryList entries={entries} editEntry={editEntry} removeEntry={removeEntry} />
+        <RecordListFilters query={recordQuery} setQuery={setRecordQuery} from={recordFrom} setFrom={setRecordFrom} to={recordTo} setTo={setRecordTo} order={recordOrder} setOrder={setRecordOrder} />
+        {visibleEntries.length ? (
+          <TimeEntryList entries={visibleEntries} editEntry={editEntry} removeEntry={removeEntry} />
         ) : (
           <div className="empty-state">
             <div>
@@ -2639,9 +2653,17 @@ const paymentMethodLabels: Record<Payment["method"], string> = {
 };
 
 function PaymentsView({ projects, payments, contextProject, backToProject, showAll, openNew, editPayment, removePayment }: { projects: Project[]; payments: Payment[]; contextProject?: Project; backToProject: () => void; showAll: () => void; openNew: () => void; editPayment: (payment: Payment) => void; removePayment: (payment: Payment) => void }) {
+  const [recordQuery, setRecordQuery] = useState("");
+  const [recordFrom, setRecordFrom] = useState("");
+  const [recordTo, setRecordTo] = useState("");
+  const [recordOrder, setRecordOrder] = useState<"newest" | "oldest">("newest");
+  const visiblePayments = useMemo(() => payments.filter((payment) => {
+    const text = `${payment.projectName} ${payment.clientName} ${payment.note} ${paymentMethodLabels[payment.method]}`.toLocaleLowerCase();
+    return text.includes(recordQuery.trim().toLocaleLowerCase()) && (!recordFrom || payment.paidAt >= recordFrom) && (!recordTo || payment.paidAt <= recordTo);
+  }).sort((a, b) => recordOrder === "newest" ? b.paidAt.localeCompare(a.paidAt) : a.paidAt.localeCompare(b.paidAt)), [payments, recordFrom, recordOrder, recordQuery, recordTo]);
   const relevantProjects = contextProject ? projects.filter((project) => String(project.id) === String(contextProject.id)) : projects;
   const expected = relevantProjects.reduce((sum, project) => sum + project.expectedAmount, 0);
-  const received = payments.reduce((sum, payment) => sum + payment.amount, 0);
+  const received = visiblePayments.reduce((sum, payment) => sum + payment.amount, 0);
   return (
     <>
       <section className="page-actions-bar">
@@ -2682,9 +2704,10 @@ function PaymentsView({ projects, payments, contextProject, backToProject, showA
             </div>
           )}
         </div>
-        {payments.length ? (
+        <RecordListFilters query={recordQuery} setQuery={setRecordQuery} from={recordFrom} setFrom={setRecordFrom} to={recordTo} setTo={setRecordTo} order={recordOrder} setOrder={setRecordOrder} />
+        {visiblePayments.length ? (
           <div className="payment-list">
-            {payments.map((payment) => (
+            {visiblePayments.map((payment) => (
               <article key={payment.id}>
                 <div className="payment-symbol">¤</div>
                 <div>
@@ -2731,11 +2754,19 @@ const expenseCategoryLabels: Record<Expense["category"], string> = {
 };
 
 function ExpensesView({ projects, expenses, attachments, contextProject, backToProject, showAll, openNew, openAttachment, previewAttachment, editExpense, removeExpense, removeAttachment }: { projects: Project[]; expenses: Expense[]; attachments: Attachment[]; contextProject?: Project; backToProject: () => void; showAll: () => void; openNew: () => void; openAttachment: (expense?: Expense) => void; previewAttachment: (attachment: Attachment) => void; editExpense: (expense: Expense) => void; removeExpense: (expense: Expense) => void; removeAttachment: (attachment: Attachment) => void }) {
+  const [recordQuery, setRecordQuery] = useState("");
+  const [recordFrom, setRecordFrom] = useState("");
+  const [recordTo, setRecordTo] = useState("");
+  const [recordOrder, setRecordOrder] = useState<"newest" | "oldest">("newest");
+  const visibleExpenses = useMemo(() => expenses.filter((expense) => {
+    const text = `${expense.projectName} ${expense.clientName} ${expense.note} ${expenseCategoryLabels[expense.category]}`.toLocaleLowerCase();
+    return text.includes(recordQuery.trim().toLocaleLowerCase()) && (!recordFrom || expense.incurredAt >= recordFrom) && (!recordTo || expense.incurredAt <= recordTo);
+  }).sort((a, b) => recordOrder === "newest" ? b.incurredAt.localeCompare(a.incurredAt) : a.incurredAt.localeCompare(b.incurredAt)), [expenses, recordFrom, recordOrder, recordQuery, recordTo]);
   const relevantProjects = contextProject ? projects.filter((project) => String(project.id) === String(contextProject.id)) : projects;
   const revenue = relevantProjects.reduce((sum, project) => sum + project.expectedAmount, 0);
-  const directCosts = expenses.reduce((sum, expense) => sum + expense.amount, 0);
+  const directCosts = visibleExpenses.reduce((sum, expense) => sum + expense.amount, 0);
   const laborCosts = relevantProjects.reduce((sum, project) => sum + Number(project.laborCost ?? 0), 0);
-  const billable = expenses.filter((expense) => Boolean(expense.billableToClient)).reduce((sum, expense) => sum + expense.amount, 0);
+  const billable = visibleExpenses.filter((expense) => Boolean(expense.billableToClient)).reduce((sum, expense) => sum + expense.amount, 0);
   const profit = revenue - directCosts - laborCosts;
   return (
     <>
@@ -2786,9 +2817,10 @@ function ExpensesView({ projects, expenses, attachments, contextProject, backToP
             </div>
           )}
         </div>
-        {expenses.length ? (
+        <RecordListFilters query={recordQuery} setQuery={setRecordQuery} from={recordFrom} setFrom={setRecordFrom} to={recordTo} setTo={setRecordTo} order={recordOrder} setOrder={setRecordOrder} />
+        {visibleExpenses.length ? (
           <div className="payment-list expense-list">
-            {expenses.map((expense) => {
+            {visibleExpenses.map((expense) => {
               const receipts = attachments.filter((attachment) => attachment.expenseId === expense.id);
               return (
                 <article className="expense-row" key={expense.id}>

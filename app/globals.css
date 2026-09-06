@@ -482,6 +482,8 @@ input, textarea, select { font: inherit; unicode-bidi: plaintext; text-align: st
 }
 
 @media (max-width: 760px) {
+  .record-list-filters { grid-template-columns:1fr 1fr; }
+  .record-list-filters .search-box { grid-column:1 / -1; }
   .topbar { flex-direction: column; align-items: flex-start; gap: 12px; }
   .topbar h1 { font-size: 26px; }
   .section-head { flex-direction: column; align-items: flex-start; gap: 8px; }
@@ -583,6 +585,9 @@ input, textarea, select { font: inherit; unicode-bidi: plaintext; text-align: st
 .audit-row strong { font-size: 15px; font-weight: 700; color: var(--ink); }
 .audit-row span { font-size: 13px; color: var(--muted); display: block; margin-top: 2px; }
 .audit-row small { display:block; max-width:680px; margin-top:5px; color:var(--ink-soft); overflow-wrap:anywhere; }
+.record-list-filters { display:grid; grid-template-columns:minmax(220px,1fr) repeat(3,minmax(130px,auto)); gap:10px; align-items:end; margin:14px 0 18px; }
+.record-list-filters > label:not(.search-box) { display:grid; gap:5px; color:var(--muted); font-size:12px; font-weight:700; }
+.record-list-filters input,.record-list-filters select { min-height:44px; border:1px solid var(--line); border-radius:10px; padding:8px 10px; background:#fff; color:var(--ink); }
 .audit-row time { font-size: 12px; color: var(--muted); margin-right: auto; }
 
 
