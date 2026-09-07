@@ -6,7 +6,11 @@ const authEnv = env as unknown as AuthEnv;
 
 function clean(value: FormDataEntryValue | null, max: number) { const text = String(value ?? "").trim(); return text && text.length <= max ? text : null; }
 function validEmail(value: string) { return value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value); }
-function validPassword(value: string) { return value.length >= 10 && value.length <= 128 && /[A-Za-z\p{L}]/u.test(value) && /\d/.test(value); }
+// Minimum raised from 10 to 12 (L-02) to align with the common 12-character security
+// baseline. This only affects registration and choosing a NEW password on changePassword -
+// login never calls validPassword(), so existing users with a shorter password already set
+// keep logging in with it unchanged.
+function validPassword(value: string) { return value.length >= 12 && value.length <= 128 && /[A-Za-z\p{L}]/u.test(value) && /\d/.test(value); }
 function sameOrigin(request: Request) { const origin = request.headers.get("origin"); return !origin || origin === new URL(request.url).origin; }
 function validImageSignature(type: string, bytes: Uint8Array) { const ascii = (start: number, length: number) => String.fromCharCode(...bytes.slice(start, start + length)); if (type === "image/jpeg") return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff; if (type === "image/png") return bytes.slice(0, 8).every((value, index) => value === [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a][index]); return type === "image/webp" && ascii(0, 4) === "RIFF" && ascii(8, 4) === "WEBP"; }
 async function loginKey(request: Request, email: string) { return sha256(`${request.headers.get("cf-connecting-ip") ?? "local"}:${email}`); }
@@ -64,7 +68,7 @@ export async function POST(request: Request) {
     const confirmPassword = String(form.get("confirmPassword") ?? "");
     const registerContactError = contactFieldError(firstName, lastName, phone, email);
     if (registerContactError) return json({ error: registerContactError }, 400);
-    if (!validPassword(password)) return json({ error: "הסיסמה צריכה לכלול לפחות 10 תווים, אות אחת ומספר אחד לפחות" }, 400);
+    if (!validPassword(password)) return json({ error: "הסיסמה צריכה לכלול לפחות 12 תווים, אות אחת ומספר אחד לפחות" }, 400);
     if (password !== confirmPassword) return json({ error: "אימות הסיסמה אינו תואם לסיסמה שהוזנה" }, 400);
     const exists = await authEnv.DB.prepare("SELECT id FROM users WHERE lower(email) = ? AND password_hash IS NOT NULL AND deleted_at IS NULL LIMIT 1").bind(email).first();
     if (exists) return json({ error: "כבר קיים חשבון עם כתובת המייל הזאת" }, 409);
@@ -153,7 +157,7 @@ export async function POST(request: Request) {
     const currentPassword = String(form.get("currentPassword") ?? "");
     const password = String(form.get("password") ?? "");
     const confirmPassword = String(form.get("confirmPassword") ?? "");
-    if (!validPassword(password)) return json({ error: "הסיסמה החדשה צריכה לכלול לפחות 10 תווים, אות ומספר" }, 400);
+    if (!validPassword(password)) return json({ error: "הסיסמה החדשה צריכה לכלול לפחות 12 תווים, אות ומספר" }, 400);
     if (password !== confirmPassword) return json({ error: "אימות הסיסמה אינו תואם" }, 400);
     const user = await authEnv.DB.prepare("SELECT password_hash AS passwordHash FROM users WHERE id = ? AND business_id = ?").bind(identity.ownerId, identity.businessId).first<{ passwordHash: string | null }>();
     if (!user?.passwordHash || !(await verifyPassword(currentPassword, user.passwordHash))) return json({ error: "הסיסמה הנוכחית אינה נכונה" }, 400);

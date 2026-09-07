@@ -3289,10 +3289,13 @@ function SignInView() {
           {mode === "register" && <div className="auth-name-grid"><label><span>שם פרטי</span><input name="firstName" autoComplete="given-name" required /></label><label><span>שם משפחה</span><input name="lastName" autoComplete="family-name" required /></label></div>}
           {mode === "register" && <label><span>טלפון</span><input name="phone" type="tel" dir="ltr" autoComplete="tel" required /></label>}
           <label><span>כתובת מייל</span><input name="email" type="email" dir="ltr" autoComplete="email" required /></label>
-          <label><span>סיסמה</span><input name="password" type="password" dir="ltr" minLength={10} autoComplete={mode === "login" ? "current-password" : "new-password"} required /></label>
-          {mode === "register" && <label><span>אימות סיסמה</span><input name="confirmPassword" type="password" dir="ltr" minLength={10} autoComplete="new-password" required /></label>}
+          {/* No minLength on login: existing accounts may have a shorter password already set
+              (the server-side minimum only ever applies going forward), and an HTML5
+              minLength here would block a valid login from submitting at all. */}
+          <label><span>סיסמה</span><input name="password" type="password" dir="ltr" minLength={mode === "register" ? 12 : undefined} autoComplete={mode === "login" ? "current-password" : "new-password"} required /></label>
+          {mode === "register" && <label><span>אימות סיסמה</span><input name="confirmPassword" type="password" dir="ltr" minLength={12} autoComplete="new-password" required /></label>}
           {mode === "register" && <label className="auth-upload"><span>תמונת פרופיל (אופציונלי)</span><input name="profileImage" type="file" accept="image/jpeg,image/png,image/webp" /><small>JPG, PNG או WEBP עד 5MB</small></label>}
-          {mode === "register" && <small>הסיסמה צריכה לכלול לפחות 10 תווים, אות ומספר.</small>}
+          {mode === "register" && <small>הסיסמה צריכה לכלול לפחות 12 תווים, אות ומספר.</small>}
           <button type="submit" className="primary-button" disabled={submitting}>{submitting ? "נא להמתין…" : mode === "login" ? "כניסה" : "יצירת חשבון"}</button>
         </form>
       </section>
@@ -3873,6 +3876,7 @@ function ProfileView({ user, accountMode, setAccountMode, openReports, openHisto
             <p>מוצגים לך רק הפרויקטים שאליהם שויכת, דיווחי הזמן שלך והשכר המחושב לפי התעריף שלך.</p>
           </div>
         </div>
+        <a className="privacy-link" href="/privacy.html" target="_blank" rel="noopener noreferrer">מדיניות פרטיות ופנייה בנושא המידע האישי שלי</a>
       </section>
     );
   return (
@@ -3898,7 +3902,7 @@ function ProfileView({ user, accountMode, setAccountMode, openReports, openHisto
           }}>
             <h3>החלפת סיסמה</h3>
             <label><span>סיסמה נוכחית</span><input name="currentPassword" type="password" autoComplete="current-password" required /></label>
-            <div className="auth-name-grid"><label><span>סיסמה חדשה</span><input name="password" type="password" minLength={10} autoComplete="new-password" required /></label><label><span>אימות סיסמה חדשה</span><input name="confirmPassword" type="password" minLength={10} autoComplete="new-password" required /></label></div>
+            <div className="auth-name-grid"><label><span>סיסמה חדשה</span><input name="password" type="password" minLength={12} autoComplete="new-password" required /></label><label><span>אימות סיסמה חדשה</span><input name="confirmPassword" type="password" minLength={12} autoComplete="new-password" required /></label></div>
             <button type="submit" className="primary-button" disabled={passwordSaving}>{passwordSaving ? "מעדכן..." : "עדכון הסיסמה"}</button>
           </form>
           <NoticeToast notice={profileMessage} close={() => setProfileMessage(null)} />
@@ -3995,6 +3999,7 @@ function ProfileView({ user, accountMode, setAccountMode, openReports, openHisto
           </span>
           <b>←</b>
         </button>
+        <a className="privacy-link" href="/privacy.html" target="_blank" rel="noopener noreferrer">מדיניות פרטיות ופנייה בנושא מידע אישי</a>
       </div>
     </section>
   );

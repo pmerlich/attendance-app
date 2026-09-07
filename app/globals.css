@@ -646,6 +646,8 @@ input, textarea, select { font: inherit; unicode-bidi: plaintext; text-align: st
 .profile-trash-link small { font-size: 12px; color: var(--muted); display: block; margin-top: 3px; }
 .profile-trash-link b { margin-right: auto; font-size: 16px; color: var(--muted); transition: var(--transition); }
 .profile-trash-link:hover b { color: var(--green); transform: translateX(-3px); }
+.privacy-link { display: block; margin-top: 14px; font-size: 13px; color: var(--muted); text-decoration: underline; text-underline-offset: 2px; }
+.privacy-link:hover { color: var(--green); }
 
 
 /* General Page Card Wrapper (Essential for consistent views) */

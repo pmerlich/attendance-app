@@ -20,7 +20,8 @@ test("server-renders a neutral account loading screen without demo data", async 
   assert.equal(response.headers.get("x-content-type-options"), "nosniff");
   assert.equal(response.headers.get("x-frame-options"), "DENY");
   assert.match(response.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
-  assert.match(response.headers.get("content-security-policy") ?? "", /script-src 'self' 'unsafe-inline' 'unsafe-eval'/);
+  assert.match(response.headers.get("content-security-policy") ?? "", /script-src 'self' 'unsafe-eval'/);
+  assert.doesNotMatch(response.headers.get("content-security-policy") ?? "", /script-src[^;]*'unsafe-inline'/);
   const html = await response.text();
   assert.match(html, /<html[^>]*lang="he"[^>]*dir="rtl"/i);
   assert.match(html, /<title>מנהל עבודה \| פרויקטים, שעות וכספים<\/title>/);
@@ -132,6 +133,14 @@ test("requires a real account on every public host", async () => {
   assert.match(api, /return null/);
   assert.match(page, /if \(!accountReady\) return <AccountLoadingView/);
   assert.match(page, /if \(authRequired\) return <SignInView/);
+  // resolveIdentity() must resolve identity ONLY from the app's own session cookie.
+  // A prior revision also trusted client-supplied "oai-authenticated-user-*" headers
+  // with no verification they came from a trusted proxy - any direct HTTP client could
+  // forge them and obtain, or take over, an account with no password. Never bring this
+  // fallback back without a verified trust boundary in front of it.
+  assert.doesNotMatch(api, /oai-authenticated-user-id/);
+  assert.doesNotMatch(api, /oai-authenticated-user-email/);
+  assert.match(api, /async function resolveIdentity\(request: Request\): Promise<Identity \| null> \{\s*return resolveSessionIdentity\(env\.DB, request\);\s*\}/);
 });
 
 test("queues attachment blobs for background upload", async () => {
@@ -178,7 +187,10 @@ test("isolates offline data and validates critical mutations", async () => {
   assert.match(api, /בתמחור קבוע יש להזין מחיר גדול מאפס/);
   assert.match(api, /בתמחור שעתי יש להזין תעריף גדול מאפס/);
   assert.match(api, /p\.client_id AS clientId/);
-  assert.match(worker, /script-src 'self' 'unsafe-inline'/);
+  // script-src must stay free of 'unsafe-inline' in every environment - it was removed
+  // once (docs/SOLO_WORKER_AUDIT.md S-27) and silently reintroduced by a later fix (H-01).
+  assert.match(worker, /script-src 'self'\$\{developmentScripts\}/);
+  assert.doesNotMatch(worker, /script-src 'self' 'unsafe-inline'/);
   assert.match(worker, /url\.hostname === "localhost".*unsafe-eval/);
   assert.match(api, /projectStatements\.push\(auditStatement/);
   assert.match(api, /if \(createsClient\) projectStatements\.push/);
@@ -195,6 +207,19 @@ test("isolates offline data and validates critical mutations", async () => {
   assert.match(page, /expectedUpdatedAt: editingEmployee\?\.updatedAt/);
   assert.match(page, /expectedUpdatedAt: editingEntry\?\.updatedAt/);
   assert.match(api, /rawWorkerIds\.length > 100/);
+  // H-02: the offline-operation idempotency record must commit in the SAME db.batch() as
+  // the mutation it guards, not a separate trailing batch - otherwise a connection drop
+  // between the two lets an offline retry with the same operationId double-apply.
+  assert.match(api, /const writes: D1PreparedStatement\[\] = \[\];/);
+  assert.match(api, /if \(writes\.length\) await db\.batch\(writes\);/);
+  assert.doesNotMatch(api, /\]\);\s*\n\s*if \(operationId\) \{\s*\n\s*await db\.batch\(/);
+  // M-01: /api/state must reject cross-origin POSTs the same way /api/auth already does.
+  assert.match(api, /function sameOrigin\(request: Request\)/);
+  assert.match(api, /if \(!sameOrigin\(request\)\) return Response\.json/);
+  // M-02: a privacy notice must exist and be reachable from the profile screen.
+  const privacyPage = await readFile(new URL("../public/privacy.html", import.meta.url), "utf8");
+  assert.match(privacyPage, /מדיניות פרטיות/);
+  assert.match(page, /href="\/privacy\.html"/);
   assert.match(api, /fixedPriceInRange/);
   assert.match(page, /function formatMoney/);
   assert.match(page, /window\.addEventListener\("popstate"/);
@@ -257,6 +282,11 @@ test("ships persistent isolated account authentication", async () => {
   assert.match(serviceWorker, /url\.pathname\.startsWith\("\/_next\/"\)/);
   assert.match(state, /resolveSessionIdentity/);
   assert.match(migration, /CREATE TABLE `auth_sessions`/);
+  // L-02: 12-character password minimum, but never enforced on the login field itself -
+  // existing accounts may still have a shorter password already set, and login never
+  // calls validPassword() at all.
+  assert.match(route, /value\.length >= 12 && value\.length <= 128/);
+  assert.match(page, /minLength=\{mode === "register" \? 12 : undefined\}/);
 });
 
 test("selects an existing client by id, keeps the timer display isolated from browsing, and offers a permanent trash purge", async () => {
