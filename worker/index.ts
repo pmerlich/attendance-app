@@ -1,6 +1,7 @@
 /** Cloudflare Worker entry point for the vinext-starter template. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
+import { sessionCookie, sessionToken } from "../app/auth-core";
 
 interface Env {
   ASSETS: Fetcher;
@@ -26,15 +27,18 @@ interface ExecutionContext {
 // dangerouslyAllowSVG: true in next.config.js and uncomment below:
 // const imageConfig: ImageConfig = { dangerouslyAllowSVG: true };
 
-function secureResponse(response: Response, url: URL) {
+function secureResponse(response: Response, url: URL, request: Request) {
   const headers = new Headers(response.headers);
   headers.set("x-content-type-options", "nosniff");
   headers.set("x-frame-options", "DENY");
   headers.set("referrer-policy", "strict-origin-when-cross-origin");
   headers.set("permissions-policy", "camera=(self), geolocation=(), microphone=()");
-  headers.set("content-security-policy", "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; frame-src 'self' blob:; connect-src 'self'");
+  const developmentScripts = url.hostname === "localhost" || url.hostname === "127.0.0.1" ? " 'unsafe-eval'" : "";
+  headers.set("content-security-policy", `default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'${developmentScripts}; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; frame-src 'self' blob:; connect-src 'self' ws: wss:`);
   if (url.protocol === "https:") headers.set("strict-transport-security", "max-age=31536000; includeSubDomains");
   if (url.pathname.startsWith("/api/")) headers.set("cache-control", "no-store, max-age=0");
+  const activeSession = sessionToken(request);
+  if (activeSession && url.pathname === "/api/state" && response.status < 400) headers.append("set-cookie", sessionCookie(activeSession, request));
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
@@ -56,7 +60,7 @@ const worker = {
       response = await handler.fetch(request, env, ctx);
     }
 
-    return secureResponse(response, url);
+    return secureResponse(response, url, request);
   },
 };
 

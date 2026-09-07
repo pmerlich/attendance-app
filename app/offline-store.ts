@@ -3,21 +3,49 @@ export type QueuedOperation = {
   action: string;
   values: Record<string, unknown>;
   createdAt: string;
+  lastError?: string;
 };
 
-const DATABASE_NAME = "menahel-avoda-offline";
-const DATABASE_VERSION = 1;
+export type QueuedAttachment = { id: string; projectId: string; expenseId: string; fileName: string; contentType: string; blob: Blob; createdAt: string; lastError?: string };
+
+const DATABASE_PREFIX = "menahel-avoda-offline";
+const SCOPE_KEY = "menahel-avoda-offline-scope";
+const DATABASE_VERSION = 2;
 const STATE_STORE = "state";
 const QUEUE_STORE = "operations";
+const ATTACHMENT_STORE = "attachments";
 const STATE_KEY = "latest";
+
+function currentScope() {
+  if (typeof window === "undefined") return "unscoped";
+  return window.localStorage.getItem(SCOPE_KEY) ?? "unscoped";
+}
+
+export function setOfflineScope(scope: string) {
+  if (typeof window === "undefined") return;
+  const normalized = scope.replace(/[^a-zA-Z0-9._:-]/g, "-").slice(0, 250);
+  if (!normalized) throw new Error("זהות האחסון המקומי אינה תקינה");
+  window.localStorage.setItem(SCOPE_KEY, normalized);
+}
+
+export function clearOfflineScope() {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(SCOPE_KEY);
+}
+
+export function deleteLegacyUnscopedStore() {
+  if (typeof indexedDB === "undefined") return;
+  indexedDB.deleteDatabase(`${DATABASE_PREFIX}:unscoped`);
+}
 
 function openDatabase() {
   return new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
+    const request = indexedDB.open(`${DATABASE_PREFIX}:${currentScope()}`, DATABASE_VERSION);
     request.onupgradeneeded = () => {
       const database = request.result;
       if (!database.objectStoreNames.contains(STATE_STORE)) database.createObjectStore(STATE_STORE);
       if (!database.objectStoreNames.contains(QUEUE_STORE)) database.createObjectStore(QUEUE_STORE, { keyPath: "id" });
+      if (!database.objectStoreNames.contains(ATTACHMENT_STORE)) database.createObjectStore(ATTACHMENT_STORE, { keyPath: "id" });
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error("פתיחת האחסון המקומי נכשלה"));
@@ -56,4 +84,16 @@ export function enqueueOperation(operation: QueuedOperation) {
 
 export function removeQueuedOperation(id: string) {
   return transact<undefined>(QUEUE_STORE, "readwrite", (store) => store.delete(id)).then(() => undefined);
+}
+
+export function readQueuedAttachments() {
+  return transact<QueuedAttachment[]>(ATTACHMENT_STORE, "readonly", (store) => store.getAll()).then((items) => items.sort((left, right) => left.createdAt.localeCompare(right.createdAt)));
+}
+
+export function enqueueAttachment(attachment: QueuedAttachment) {
+  return transact<IDBValidKey>(ATTACHMENT_STORE, "readwrite", (store) => store.put(attachment)).then(() => undefined);
+}
+
+export function removeQueuedAttachment(id: string) {
+  return transact<undefined>(ATTACHMENT_STORE, "readwrite", (store) => store.delete(id)).then(() => undefined);
 }
