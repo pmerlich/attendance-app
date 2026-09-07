@@ -155,11 +155,28 @@ test("isolates offline data and validates critical mutations", async () => {
   assert.match(page, /clearOfflineScope\(\)/);
   assert.ok(page.indexOf('const identityResponse = await fetch("/api/state")') < page.indexOf("const [scopedQueue, scopedAttachments]"), "account identity must select the offline scope before its queue is read");
   assert.match(page, /syncRequestedRef\.current = true/);
+  assert.match(page, /While online, let the server validate before closing a form/);
+  assert.match(page, /removeQueuedOperation\(operation\.id\)/);
+  assert.match(page, /onInvalidCapture/);
+  assert.match(page, /invalidFieldMessage/);
+  assert.match(page, /showFormError\(error, "שמירת הלקוח נכשלה/);
+  assert.match(page, /invalidClientField/);
+  assert.ok(page.indexOf("if (invalidClientField)") < page.indexOf('await saveAction(editingId ? "updateClient" : "addClient"'), "client validation must run before the request");
+  assert.match(page, /role=\{notice\.kind === "error" \? "alert" : "status"\}/);
+  assert.match(page, /className="notice-toast-layer"/);
+  assert.match(page, /function NoticeToast/);
+  assert.match(page, /file\.size > 10 \* 1024 \* 1024/);
   assert.match(page, /rerunRequested.*queueMicrotask/s);
   assert.match(page, /storageScope/);
   assert.match(page, /saveAction\("stopTimer", \{ id:/);
   assert.match(api, /function validCalendarDate/);
   assert.match(api, /WHERE te\.id = \? AND te\.user_id = \?/);
+  assert.match(api, /repeated offline replay is successful/);
+  assert.match(api, /שם הלקוח חסר או ארוך מ־120 תווים/);
+  assert.match(api, /function employeeFieldError/);
+  assert.match(api, /עלות השעה של העובד אינה תקינה/);
+  assert.match(api, /בתמחור קבוע יש להזין מחיר גדול מאפס/);
+  assert.match(api, /בתמחור שעתי יש להזין תעריף גדול מאפס/);
   assert.match(api, /p\.client_id AS clientId/);
   assert.match(worker, /script-src 'self' 'unsafe-inline'/);
   assert.match(worker, /url\.hostname === "localhost".*unsafe-eval/);
@@ -215,7 +232,9 @@ test("ships persistent isolated account authentication", async () => {
   const state = await readFile(new URL("../app/api/state/route.ts", import.meta.url), "utf8");
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   const migration = await readFile(new URL("../drizzle/0012_real_accounts.sql", import.meta.url), "utf8");
-  assert.match(auth, /PBKDF2_ITERATIONS = 310_000/);
+  assert.match(auth, /PBKDF2_ITERATIONS = 100_000/);
+  assert.match(auth, /iterations > 100_000/);
+  assert.match(route, /contactFieldError/);
   assert.match(auth, /HttpOnly; SameSite=Lax; Max-Age=/);
   assert.match(auth, /expires_at = datetime\('now', \?\)/);
   assert.match(auth, /token_hash/);
@@ -238,4 +257,51 @@ test("ships persistent isolated account authentication", async () => {
   assert.match(serviceWorker, /url\.pathname\.startsWith\("\/_next\/"\)/);
   assert.match(state, /resolveSessionIdentity/);
   assert.match(migration, /CREATE TABLE `auth_sessions`/);
+});
+
+test("selects an existing client by id, keeps the timer display isolated from browsing, and offers a permanent trash purge", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const api = await readFile(new URL("../app/api/state/route.ts", import.meta.url), "utf8");
+  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+
+  // Project creation must resolve the picked client by id, not by re-deriving it from the
+  // select's DOM index against a separately-sorted array (that mismatch silently produced an
+  // empty clientId/clientName for any existing-client pick).
+  assert.match(page, /option key=\{client\.id\} value=\{String\(client\.id\)\}/);
+  assert.match(page, /const clientId = String\(data\.get\("client"\) \?\? ""\)/);
+  assert.match(page, /const selectedClient = clients\.find\(\(client\) => String\(client\.id\) === clientId\)/);
+  // newClientName is "" (not null) when absent, so the clientName fallback must check truthiness
+  // (||), not nullishness (??) - that mismatch made every existing-client project rejected.
+  assert.match(api, /const clientName = newClientName \|\| boundedText\(body\.clientName, 120, true\)/);
+
+  // Viewing/selecting a project must never reassign activeProject while a timer is running on a
+  // different project - activeProject drives the timer widget and the per-card "is this the
+  // running timer" badge, so reassigning it made browsing look like the timer had moved.
+  assert.match(page, /if \(!running\) setActiveProject\(project\)/);
+  assert.match(page, /selectedProjectId !== null \? projects\.find\(\(project\) => String\(project\.id\) === String\(selectedProjectId\)\) \?\? null : null/);
+  assert.match(page, /const timerDisabled = project\.tag === "הסתיים" \|\| \(running && !isTimerProject\)/);
+
+  // Recycle bin: permanent delete alongside restore, for clients, projects and employees.
+  assert.match(api, /action === "purgeProject"/);
+  assert.match(api, /action === "purgeClient"/);
+  assert.match(api, /action === "purgeEmployee"/);
+  assert.match(api, /async function purgeProjectCascade/);
+  assert.match(api, /hasTimeHistory/);
+  assert.match(page, /function purgeRecord/);
+  assert.match(page, /className="purge-button"/);
+  assert.match(page, /אינה הפיכה ולא ניתן יהיה לשחזר/);
+
+  // Profile picture replaces the initial-letter avatar in both the desktop sidebar and topbar.
+  assert.match(page, /currentUser\.profileImageUrl \? <Image src=\{currentUser\.profileImageUrl\}/);
+  assert.match(css, /\.user-avatar img, \.profile-button img/);
+
+  // Every submit button under .auth-form must carry an explicit style class - a bare <button> in
+  // this codebase renders with no background or border at all.
+  assert.match(page, /<button type="submit" className="primary-button" disabled=\{submitting\}/);
+  assert.match(page, /<button type="submit" className="primary-button" disabled=\{profileSaving\}/);
+  assert.match(page, /<button type="submit" className="primary-button" disabled=\{passwordSaving\}/);
+
+  // Mobile filter row: a bare `1fr` grid track won't shrink below a date input's intrinsic
+  // width, which pushed the row off-screen - it must be minmax(0, 1fr).
+  assert.match(css, /\.record-list-filters \{ grid-template-columns: minmax\(0, 1fr\) minmax\(0, 1fr\); \}/);
 });

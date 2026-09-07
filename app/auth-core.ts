@@ -2,23 +2,28 @@ export type SessionIdentity = { userId: string; email: string; displayName: stri
 
 const SESSION_COOKIE = "menahel_session";
 const SESSION_DAYS = 365;
-const PBKDF2_ITERATIONS = 310_000;
+// Cloudflare Workers' crypto.subtle enforces a hard cap of 100,000 PBKDF2 iterations
+// (higher counts throw NotSupportedError at runtime) - this must stay at or below that cap.
+const PBKDF2_ITERATIONS = 100_000;
 
 function bytesToHex(bytes: Uint8Array) { return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(""); }
 function hexToBytes(value: string) { if (!/^(?:[0-9a-f]{2})+$/i.test(value)) throw new Error("invalid hex"); return Uint8Array.from(value.match(/.{2}/g) ?? [], (part) => Number.parseInt(part, 16)); }
 export function randomToken(bytes = 32) { const value = new Uint8Array(bytes); crypto.getRandomValues(value); return bytesToHex(value); }
 export async function sha256(value: string) { return bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)))); }
 
-export async function hashPassword(password: string, saltHex = randomToken(16)) {
+export async function hashPassword(password: string, saltHex = randomToken(16), iterations = PBKDF2_ITERATIONS) {
   const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: hexToBytes(saltHex), iterations: PBKDF2_ITERATIONS }, key, 256);
-  return `pbkdf2-sha256$${PBKDF2_ITERATIONS}$${saltHex}$${bytesToHex(new Uint8Array(bits))}`;
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: hexToBytes(saltHex), iterations }, key, 256);
+  return `pbkdf2-sha256$${iterations}$${saltHex}$${bytesToHex(new Uint8Array(bits))}`;
 }
 
 export async function verifyPassword(password: string, stored: string) {
-  const [algorithm, iterations, salt] = stored.split("$");
-  if (algorithm !== "pbkdf2-sha256" || Number(iterations) !== PBKDF2_ITERATIONS || !salt) return false;
-  const candidate = await hashPassword(password, salt);
+  const [algorithm, iterationsText, salt] = stored.split("$");
+  // Re-derive with the iteration count recorded in the stored hash (not the current constant) so a
+  // future change to PBKDF2_ITERATIONS never locks existing users out; still enforce the runtime's cap.
+  const iterations = Number(iterationsText);
+  if (algorithm !== "pbkdf2-sha256" || !Number.isInteger(iterations) || iterations < 1 || iterations > 100_000 || !salt) return false;
+  const candidate = await hashPassword(password, salt, iterations);
   if (candidate.length !== stored.length) return false;
   let mismatch = 0;
   for (let index = 0; index < stored.length; index += 1) mismatch |= candidate.charCodeAt(index) ^ stored.charCodeAt(index);

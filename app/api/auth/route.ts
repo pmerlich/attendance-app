@@ -10,6 +10,14 @@ function validPassword(value: string) { return value.length >= 10 && value.lengt
 function sameOrigin(request: Request) { const origin = request.headers.get("origin"); return !origin || origin === new URL(request.url).origin; }
 function validImageSignature(type: string, bytes: Uint8Array) { const ascii = (start: number, length: number) => String.fromCharCode(...bytes.slice(start, start + length)); if (type === "image/jpeg") return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff; if (type === "image/png") return bytes.slice(0, 8).every((value, index) => value === [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a][index]); return type === "image/webp" && ascii(0, 4) === "RIFF" && ascii(8, 4) === "WEBP"; }
 async function loginKey(request: Request, email: string) { return sha256(`${request.headers.get("cf-connecting-ip") ?? "local"}:${email}`); }
+function contactFieldError(firstName: string | null, lastName: string | null, phone: string | null, email: string | null) {
+  if (!firstName) return "יש להזין שם פרטי (עד 80 תווים)";
+  if (!lastName) return "יש להזין שם משפחה (עד 80 תווים)";
+  if (!phone) return "יש להזין מספר טלפון (עד 40 תווים)";
+  if (!email) return "יש להזין כתובת אימייל";
+  if (!validEmail(email)) return "כתובת האימייל אינה תקינה";
+  return null;
+}
 
 async function ensureBaseSchema(db: D1Database) {
   await db.batch([
@@ -54,9 +62,10 @@ export async function POST(request: Request) {
     const email = clean(form.get("email"), 254)?.toLocaleLowerCase() ?? null;
     const password = String(form.get("password") ?? "");
     const confirmPassword = String(form.get("confirmPassword") ?? "");
-    if (!firstName || !lastName || !phone || !email || !validEmail(email)) return json({ error: "יש למלא פרטים תקינים בכל שדות החובה" }, 400);
-    if (!validPassword(password)) return json({ error: "הסיסמה צריכה לכלול לפחות 10 תווים, אות ומספר" }, 400);
-    if (password !== confirmPassword) return json({ error: "אימות הסיסמה אינו תואם" }, 400);
+    const registerContactError = contactFieldError(firstName, lastName, phone, email);
+    if (registerContactError) return json({ error: registerContactError }, 400);
+    if (!validPassword(password)) return json({ error: "הסיסמה צריכה לכלול לפחות 10 תווים, אות אחת ומספר אחד לפחות" }, 400);
+    if (password !== confirmPassword) return json({ error: "אימות הסיסמה אינו תואם לסיסמה שהוזנה" }, 400);
     const exists = await authEnv.DB.prepare("SELECT id FROM users WHERE lower(email) = ? AND password_hash IS NOT NULL AND deleted_at IS NULL LIMIT 1").bind(email).first();
     if (exists) return json({ error: "כבר קיים חשבון עם כתובת המייל הזאת" }, 409);
     const image = form.get("profileImage");
@@ -110,7 +119,8 @@ export async function POST(request: Request) {
     const lastName = clean(form.get("lastName"), 80);
     const phone = clean(form.get("phone"), 40);
     const email = clean(form.get("email"), 254)?.toLocaleLowerCase() ?? null;
-    if (!firstName || !lastName || !phone || !email || !validEmail(email)) return json({ error: "יש למלא פרטים תקינים בכל שדות החובה" }, 400);
+    const profileContactError = contactFieldError(firstName, lastName, phone, email);
+    if (profileContactError) return json({ error: profileContactError }, 400);
     const duplicate = await authEnv.DB.prepare("SELECT id FROM users WHERE lower(email) = ? AND id <> ? AND password_hash IS NOT NULL AND deleted_at IS NULL LIMIT 1").bind(email, identity.ownerId).first();
     if (duplicate) return json({ error: "כבר קיים חשבון עם כתובת המייל הזאת" }, 409);
     const current = await authEnv.DB.prepare("SELECT profile_image_key AS profileImageKey FROM users WHERE id = ? AND business_id = ?").bind(identity.ownerId, identity.businessId).first<{ profileImageKey: string | null }>();

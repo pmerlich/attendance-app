@@ -605,9 +605,35 @@ function versionConflict(body: Record<string, unknown>, existing: Record<string,
   return Response.json({ error: "הרשומה השתנתה במכשיר אחר. הנתונים החדשים נטענו; בדוק ונסה שוב.", conflict: { entity, id, server: existing } }, { status: 409 });
 }
 
+function employeeFieldError(employeeId: string, name: string | null, email: string | null, hourlyCost: number) {
+  if (!validRecordId(employeeId)) return Response.json({ error: "מזהה העובד אינו תקין" }, { status: 400 });
+  if (!name) return Response.json({ error: "שם העובד חסר או ארוך מ־120 תווים" }, { status: 400 });
+  if (!email) return Response.json({ error: "כתובת האימייל של העובד חסרה" }, { status: 400 });
+  if (!validEmail(email)) return Response.json({ error: "כתובת האימייל של העובד אינה תקינה" }, { status: 400 });
+  if (!Number.isFinite(hourlyCost) || hourlyCost < 0 || hourlyCost > 1000000) return Response.json({ error: "עלות השעה של העובד אינה תקינה (בין 0 ל־1,000,000)" }, { status: 400 });
+  return null;
+}
+
 function auditStatement(db: D1Database, identity: Identity, entityType: string, entityId: string, action: string, details: Record<string, unknown> = {}) {
   return db.prepare("INSERT INTO audit_log (id, business_id, actor_id, entity_type, entity_id, action, details_json) VALUES (?, ?, ?, ?, ?, ?, ?)")
     .bind(crypto.randomUUID(), identity.businessId, identity.ownerId, entityType, entityId, action, JSON.stringify(details));
+}
+
+// Permanently erases one project and everything scoped to it (its own time entries, payments,
+// expenses, worker assignments and attachments - including their R2 objects). Only ever called on
+// a project that is already sitting in the recycle bin (deleted_at IS NOT NULL); audit_log rows
+// are kept as history. Does not touch the client - callers cascade into this per trashed project.
+async function purgeProjectCascade(db: D1Database, businessId: string, projectId: string): Promise<D1PreparedStatement[]> {
+  const attachments = await db.prepare("SELECT object_key AS objectKey FROM attachments WHERE project_id = ? AND business_id = ?").bind(projectId, businessId).all<{ objectKey: string }>();
+  await Promise.all(attachments.results.map((row) => env.FILES.delete(row.objectKey).catch(() => undefined)));
+  return [
+    db.prepare("DELETE FROM attachments WHERE project_id = ? AND business_id = ?").bind(projectId, businessId),
+    db.prepare("DELETE FROM payments WHERE project_id = ?").bind(projectId),
+    db.prepare("DELETE FROM expenses WHERE project_id = ?").bind(projectId),
+    db.prepare("DELETE FROM time_entries WHERE project_id = ?").bind(projectId),
+    db.prepare("DELETE FROM project_workers WHERE project_id = ?").bind(projectId),
+    db.prepare("DELETE FROM projects WHERE id = ? AND business_id = ?").bind(projectId, businessId),
+  ];
 }
 
 export async function POST(request: Request) {
@@ -636,7 +662,7 @@ export async function POST(request: Request) {
       .bind(businessId, identity.ownerId, operationId).first();
     if (completed) return Response.json(await loadState(db, identity));
   }
-  const managerActions = new Set(["setAccountMode", "addClient", "updateClient", "deleteClient", "addEmployee", "updateEmployee", "deleteEmployee", "addProject", "updateProject", "updateProjectStatus", "deleteProject", "restoreClient", "restoreProject", "restoreEmployee", "createEmployeeInvitation", "addPayment", "updatePayment", "deletePayment", "addExpense", "updateExpense", "deleteExpense", "deleteAttachment"]);
+  const managerActions = new Set(["setAccountMode", "addClient", "updateClient", "deleteClient", "addEmployee", "updateEmployee", "deleteEmployee", "addProject", "updateProject", "updateProjectStatus", "deleteProject", "restoreClient", "restoreProject", "restoreEmployee", "purgeClient", "purgeProject", "purgeEmployee", "createEmployeeInvitation", "addPayment", "updatePayment", "deletePayment", "addExpense", "updateExpense", "deleteExpense", "deleteAttachment"]);
   if (identity.role !== "manager" && managerActions.has(action)) return Response.json({ error: "הפעולה זמינה למנהל בלבד" }, { status: 403 });
 
   if (action === "startTimer") {
@@ -665,18 +691,21 @@ export async function POST(request: Request) {
     if (!validRecordId(timerId)) return Response.json({ error: "מזהה הטיימר אינו תקין" }, { status: 400 });
     const endedAt = normalizeClientTimestamp(body.endedAt);
     if (!endedAt) return Response.json({ error: "זמן עצירת הטיימר אינו תקין" }, { status: 400 });
-    const timer = await db.prepare(`SELECT te.id FROM time_entries te JOIN projects p ON p.id = te.project_id
-      WHERE te.id = ? AND te.user_id = ? AND te.ended_at IS NULL AND te.deleted_at IS NULL AND p.business_id = ? LIMIT 1`)
+    const timer = await db.prepare(`SELECT te.id, te.ended_at AS endedAt FROM time_entries te JOIN projects p ON p.id = te.project_id
+      WHERE te.id = ? AND te.user_id = ? AND te.deleted_at IS NULL AND p.business_id = ? LIMIT 1`)
       .bind(timerId, identity.ownerId, businessId).first();
     if (!timer) return Response.json({ error: "הטיימר הפעיל לא נמצא" }, { status: 409 });
-    await db.batch([
-      db.prepare(`UPDATE time_entries SET ended_at = ?,
-      duration_seconds = MAX(1, CAST((julianday(?) - julianday(started_at)) * 86400 AS INTEGER)), updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND user_id = ? AND ended_at IS NULL AND deleted_at IS NULL`)
-        .bind(endedAt, endedAt, timerId, identity.ownerId),
-      db.prepare("INSERT INTO audit_log (id, business_id, actor_id, entity_type, entity_id, action, details_json) VALUES (?, ?, ?, 'time_entry', ?, 'timer_stop', ?)")
-        .bind(crypto.randomUUID(), businessId, identity.ownerId, timerId, JSON.stringify({ endedAt })),
-    ]);
+    // A repeated offline replay is successful when this timer was already stopped.
+    if (!timer.endedAt) {
+      await db.batch([
+        db.prepare(`UPDATE time_entries SET ended_at = ?,
+        duration_seconds = MAX(1, CAST((julianday(?) - julianday(started_at)) * 86400 AS INTEGER)), updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND user_id = ? AND ended_at IS NULL AND deleted_at IS NULL`)
+          .bind(endedAt, endedAt, timerId, identity.ownerId),
+        db.prepare("INSERT INTO audit_log (id, business_id, actor_id, entity_type, entity_id, action, details_json) VALUES (?, ?, ?, 'time_entry', ?, 'timer_stop', ?)")
+          .bind(crypto.randomUUID(), businessId, identity.ownerId, timerId, JSON.stringify({ endedAt })),
+      ]);
+    }
   } else if (action === "addManualTime") {
     const projectId = String(body.projectId ?? "");
     if (!validRecordId(projectId)) return Response.json({ error: "מזהה הפרויקט אינו תקין" }, { status: 400 });
@@ -845,7 +874,10 @@ export async function POST(request: Request) {
     const address = boundedText(body.address, 300, true);
     const phone = boundedText(body.phone, 40) ?? "";
     const email = boundedText(body.email, 254) ?? "";
-    if (!validRecordId(clientId) || !name || !address || !validEmail(email)) return Response.json({ error: "פרטי הלקוח אינם תקינים" }, { status: 400 });
+    if (!validRecordId(clientId)) return Response.json({ error: "מזהה הלקוח אינו תקין" }, { status: 400 });
+    if (!name) return Response.json({ error: "שם הלקוח חסר או ארוך מ־120 תווים" }, { status: 400 });
+    if (!address) return Response.json({ error: "כתובת הלקוח חסרה או ארוכה מ־300 תווים" }, { status: 400 });
+    if (!validEmail(email)) return Response.json({ error: "כתובת האימייל של הלקוח אינה תקינה" }, { status: 400 });
     await db.batch([
       db.prepare("INSERT INTO clients (id, business_id, name, address, phone, email) VALUES (?, ?, ?, ?, ?, ?)").bind(clientId, businessId, name, address, phone, email),
       auditStatement(db, identity, "client", clientId, "create", { name, address }),
@@ -856,7 +888,10 @@ export async function POST(request: Request) {
     const address = boundedText(body.address, 300, true);
     const phone = boundedText(body.phone, 40) ?? "";
     const email = boundedText(body.email, 254) ?? "";
-    if (!validRecordId(clientId) || !name || !address || !validEmail(email)) return Response.json({ error: "פרטי הלקוח אינם תקינים" }, { status: 400 });
+    if (!validRecordId(clientId)) return Response.json({ error: "מזהה הלקוח אינו תקין" }, { status: 400 });
+    if (!name) return Response.json({ error: "שם הלקוח חסר או ארוך מ־120 תווים" }, { status: 400 });
+    if (!address) return Response.json({ error: "כתובת הלקוח חסרה או ארוכה מ־300 תווים" }, { status: 400 });
+    if (!validEmail(email)) return Response.json({ error: "כתובת האימייל של הלקוח אינה תקינה" }, { status: 400 });
     const existing = await db.prepare("SELECT name, address, phone, email, updated_at AS updatedAt FROM clients WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(clientId, businessId).first<Record<string, unknown>>();
     if (!existing) return Response.json({ error: "הלקוח לא נמצא" }, { status: 400 });
     const clientConflict = versionConflict(body, existing, "client", clientId);
@@ -883,7 +918,8 @@ export async function POST(request: Request) {
     const name = boundedText(body.name, 120, true);
     const email = boundedText(body.email, 254, true);
     const hourlyCost = normalizedMoney(body.hourlyCost);
-    if (!validRecordId(employeeId) || !name || !email || !validEmail(email) || !Number.isFinite(hourlyCost) || hourlyCost < 0 || hourlyCost > 1000000) return Response.json({ error: "פרטי העובד אינם תקינים" }, { status: 400 });
+    const employeeError = employeeFieldError(employeeId, name, email, hourlyCost);
+    if (employeeError) return employeeError;
     await db.batch([
       db.prepare("INSERT INTO users (id, business_id, email, display_name, role, hourly_cost, hourly_cost_cents) VALUES (?, ?, ?, ?, 'employee', ?, ?)").bind(employeeId, businessId, email, name, hourlyCost, moneyToCents(hourlyCost)),
       auditStatement(db, identity, "employee", employeeId, "create", { name, email, hourlyCost }),
@@ -893,7 +929,8 @@ export async function POST(request: Request) {
     const name = boundedText(body.name, 120, true);
     const email = boundedText(body.email, 254, true);
     const hourlyCost = normalizedMoney(body.hourlyCost);
-    if (!validRecordId(employeeId) || !name || !email || !validEmail(email) || !Number.isFinite(hourlyCost) || hourlyCost < 0 || hourlyCost > 1000000) return Response.json({ error: "פרטי העובד אינם תקינים" }, { status: 400 });
+    const employeeError = employeeFieldError(employeeId, name, email, hourlyCost);
+    if (employeeError) return employeeError;
     const existing = await db.prepare("SELECT display_name AS name, email, COALESCE(hourly_cost_cents, ROUND(hourly_cost * 100)) / 100.0 AS hourlyCost, updated_at AS updatedAt FROM users WHERE id = ? AND business_id = ? AND role = 'employee' AND deleted_at IS NULL").bind(employeeId, businessId).first<Record<string, unknown>>();
     if (!existing) return Response.json({ error: "העובד לא נמצא" }, { status: 400 });
     const employeeConflict = versionConflict(body, existing, "employee", employeeId);
@@ -932,7 +969,9 @@ export async function POST(request: Request) {
     const newClientName = boundedText(body.newClientName, 120);
     const newClientId = String(body.newClientId ?? "");
     const clientId = newClientName ? newClientId : String(body.clientId ?? "");
-    const clientName = newClientName ?? boundedText(body.clientName, 120, true);
+    // newClientName is "" (not null) when absent, since boundedText() only returns null for a
+    // missing *required* field - so this must fall through on falsy, not just on nullish.
+    const clientName = newClientName || boundedText(body.clientName, 120, true);
     const name = boundedText(body.name, 160, true);
     const address = boundedText(body.address, 300, true);
     const description = boundedText(body.description, 4000) ?? "";
@@ -947,18 +986,27 @@ export async function POST(request: Request) {
     const rawWorkerIds = Array.isArray(body.workers) ? [...new Set(body.workers.map(String))] : [];
     if (rawWorkerIds.length > 100) return Response.json({ error: "ניתן לשייך עד 100 עובדים לפרויקט" }, { status: 400 });
     const workerIds = rawWorkerIds;
-    if (!validRecordId(clientId) || !clientName || !name || !address || (body.startDate && !startDate) || (body.targetDate && !targetDate) || (body.completedDate && !completedDate) || (startDate && targetDate && startDate > targetDate) || !["fixed", "hourly", "combined"].includes(billingType)
-      || !Number.isFinite(fixedPrice) || fixedPrice < 0 || fixedPrice > 100000000
-      || !Number.isFinite(hourlyRate) || hourlyRate < 0 || hourlyRate > 1000000
-      || (billingType === "fixed" && fixedPrice <= 0) || (billingType === "hourly" && hourlyRate <= 0)
-      || (billingType === "combined" && fixedPrice <= 0 && hourlyRate <= 0)) {
-      return Response.json({ error: "פרטי הפרויקט או התמחור אינם תקינים" }, { status: 400 });
-    }
+    if (!clientName) return Response.json({ error: "יש לבחור לקוח קיים או להזין שם ללקוח חדש (עד 120 תווים)" }, { status: 400 });
+    if (!validRecordId(clientId)) return Response.json({ error: "יש לבחור לקוח מהרשימה או להזין לקוח חדש תקין" }, { status: 400 });
+    if (!name) return Response.json({ error: "שם הפרויקט חסר או ארוך מ־160 תווים" }, { status: 400 });
+    if (!address) return Response.json({ error: "כתובת הפרויקט חסרה או ארוכה מ־300 תווים" }, { status: 400 });
+    if (body.startDate && !startDate) return Response.json({ error: "תאריך ההתחלה אינו תקין או נמצא ברשומה פגומה" }, { status: 400 });
+    if (body.targetDate && !targetDate) return Response.json({ error: "תאריך היעד אינו תקין או נמצא ברשומה פגומה" }, { status: 400 });
+    if (body.completedDate && !completedDate) return Response.json({ error: "תאריך הסיום אינו תקין או נמצא ברשומה פגומה" }, { status: 400 });
+    if (startDate && targetDate && startDate > targetDate) return Response.json({ error: "תאריך היעד לא יכול להיות לפני תאריך ההתחלה" }, { status: 400 });
+    if (!["fixed", "hourly", "combined"].includes(billingType)) return Response.json({ error: "יש לבחור שיטת תמחור: קבוע, שעתי או משולב" }, { status: 400 });
+    if (!Number.isFinite(fixedPrice) || fixedPrice < 0 || fixedPrice > 100000000) return Response.json({ error: "המחיר הקבוע אינו תקין" }, { status: 400 });
+    if (!Number.isFinite(hourlyRate) || hourlyRate < 0 || hourlyRate > 1000000) return Response.json({ error: "התעריף השעתי אינו תקין" }, { status: 400 });
+    if (billingType === "fixed" && fixedPrice <= 0) return Response.json({ error: "בתמחור קבוע יש להזין מחיר גדול מאפס" }, { status: 400 });
+    if (billingType === "hourly" && hourlyRate <= 0) return Response.json({ error: "בתמחור שעתי יש להזין תעריף גדול מאפס" }, { status: 400 });
+    if (billingType === "combined" && fixedPrice <= 0 && hourlyRate <= 0) return Response.json({ error: "בתמחור משולב יש להזין מחיר קבוע או תעריף שעתי גדול מאפס" }, { status: 400 });
     const createsClient = action === "addProject" && Boolean(newClientName);
     const newClientAddress = boundedText(body.newClientAddress, 300, createsClient);
     const newClientPhone = boundedText(body.newClientPhone, 40) ?? "";
     const newClientEmail = boundedText(body.newClientEmail, 254) ?? "";
-    if (createsClient && (!validRecordId(newClientId) || !newClientAddress || !validEmail(newClientEmail))) return Response.json({ error: "פרטי הלקוח החדש אינם תקינים" }, { status: 400 });
+    if (createsClient && !validRecordId(newClientId)) return Response.json({ error: "מזהה הלקוח החדש אינו תקין" }, { status: 400 });
+    if (createsClient && !newClientAddress) return Response.json({ error: "כתובת הלקוח החדש חסרה או ארוכה מ־300 תווים" }, { status: 400 });
+    if (createsClient && !validEmail(newClientEmail)) return Response.json({ error: "כתובת האימייל של הלקוח החדש אינה תקינה" }, { status: 400 });
     const client = createsClient
       ? { id: newClientId, name: newClientName! }
       : await db.prepare("SELECT id, name FROM clients WHERE id = ? AND business_id = ? AND deleted_at IS NULL LIMIT 1").bind(clientId, businessId).first<{ id: string; name: string }>();
@@ -1045,6 +1093,43 @@ export async function POST(request: Request) {
     await db.batch([
       db.prepare("UPDATE users SET deleted_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND business_id = ? AND role = 'employee' AND deleted_at IS NOT NULL").bind(employeeId, businessId),
       auditStatement(db, identity, "employee", employeeId, "restore"),
+    ]);
+  } else if (action === "purgeProject") {
+    const projectId = String(body.id ?? "");
+    if (!validRecordId(projectId)) return Response.json({ error: "מזהה הפרויקט אינו תקין" }, { status: 400 });
+    const project = await db.prepare("SELECT name FROM projects WHERE id = ? AND business_id = ? AND deleted_at IS NOT NULL").bind(projectId, businessId).first<{ name: string }>();
+    if (!project) return Response.json({ error: "הפרויקט לא נמצא בסל המחזור" }, { status: 400 });
+    const statements = await purgeProjectCascade(db, businessId, projectId);
+    await db.batch([...statements, auditStatement(db, identity, "project", projectId, "purge", { name: project.name })]);
+  } else if (action === "purgeClient") {
+    const clientId = String(body.id ?? "");
+    if (!validRecordId(clientId)) return Response.json({ error: "מזהה הלקוח אינו תקין" }, { status: 400 });
+    const client = await db.prepare("SELECT name FROM clients WHERE id = ? AND business_id = ? AND deleted_at IS NOT NULL").bind(clientId, businessId).first<{ name: string }>();
+    if (!client) return Response.json({ error: "הלקוח לא נמצא בסל המחזור" }, { status: 400 });
+    // A client only ever appears in the trash together with all of its projects (deleteClient
+    // trashes both at once, and a trashed client cannot receive new active projects), so every
+    // project still pointing at it here is safe to purge along with it.
+    const trashedProjects = await db.prepare("SELECT id FROM projects WHERE client_id = ? AND business_id = ? AND deleted_at IS NOT NULL").bind(clientId, businessId).all<{ id: string }>();
+    const statements: D1PreparedStatement[] = [];
+    for (const row of trashedProjects.results) statements.push(...(await purgeProjectCascade(db, businessId, row.id)));
+    statements.push(db.prepare("DELETE FROM clients WHERE id = ? AND business_id = ?").bind(clientId, businessId));
+    statements.push(auditStatement(db, identity, "client", clientId, "purge", { name: client.name, projectsRemoved: trashedProjects.results.length }));
+    await db.batch(statements);
+  } else if (action === "purgeEmployee") {
+    const employeeId = String(body.id ?? "");
+    if (!validRecordId(employeeId)) return Response.json({ error: "מזהה העובד אינו תקין" }, { status: 400 });
+    const employee = await db.prepare("SELECT display_name AS name, email FROM users WHERE id = ? AND business_id = ? AND role = 'employee' AND deleted_at IS NOT NULL").bind(employeeId, businessId).first<Record<string, unknown>>();
+    if (!employee) return Response.json({ error: "העובד לא נמצא בסל המחזור" }, { status: 400 });
+    // Time entries join to users to compute cost across every project, including ones this
+    // employee has nothing else to do with - deleting the row would silently corrupt those
+    // projects' cost totals. Block the purge instead of risking that.
+    const hasTimeHistory = await db.prepare("SELECT id FROM time_entries WHERE user_id = ? LIMIT 1").bind(employeeId).first();
+    if (hasTimeHistory) return Response.json({ error: "לא ניתן למחוק לצמיתות עובד עם היסטוריית דיווחי שעות, כדי לא לפגוע בדיוק הדוחות הכספיים של הפרויקטים. אפשר להשאיר אותו בסל המחזור." }, { status: 409 });
+    await db.batch([
+      db.prepare("DELETE FROM project_workers WHERE user_id = ?").bind(employeeId),
+      db.prepare("DELETE FROM employee_invitations WHERE employee_id = ? AND business_id = ?").bind(employeeId, businessId),
+      db.prepare("DELETE FROM users WHERE id = ? AND business_id = ? AND role = 'employee' AND deleted_at IS NOT NULL").bind(employeeId, businessId),
+      auditStatement(db, identity, "employee", employeeId, "purge", employee),
     ]);
   } else {
     return Response.json({ error: "פעולה לא מוכרת" }, { status: 400 });

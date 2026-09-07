@@ -440,7 +440,8 @@ type ProjectActivity = {
 };
 
 const offlineCreationActions = new Set(["addClient", "addEmployee", "addProject", "addClientProject", "addManualTime", "addPayment", "addExpense"]);
-const onlineOnlyActions = new Set(["createEmployeeInvitation", "deleteAttachment"]);
+// Irreversible actions must fail loudly offline rather than sit queued and fire unattended later.
+const onlineOnlyActions = new Set(["createEmployeeInvitation", "deleteAttachment", "purgeClient", "purgeProject", "purgeEmployee"]);
 
 function prepareQueuedOperation(action: string, values: Record<string, unknown>): QueuedOperation {
   const prepared = { ...values };
@@ -970,6 +971,37 @@ export default function Home() {
     const current = stateRef.current;
     if (!current) throw new Error("אין עדיין עותק מקומי שאפשר לעדכן");
 
+    // While online, let the server validate before closing a form. If the request cannot
+    // reach the server, continue through the local-first queue below for offline safety.
+    if (navigator.onLine) {
+      setSyncState("loading");
+      try {
+        const response = await fetch("/api/state", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action, ...operation.values, operationId: operation.id }),
+        });
+        if (response.ok) {
+          const serverState = (await response.json()) as StoredState;
+          applyStoredState(serverState);
+          await writeCachedState(serverState);
+          setSyncError("");
+          setSyncState("saved");
+          return serverState;
+        }
+        if (response.status < 500 && ![408, 425, 429].includes(response.status)) {
+          const payload = (await response.json().catch(() => ({}))) as { error?: string };
+          const reason = payload.error ?? "הנתונים שהוזנו אינם תקינים";
+          setSyncError("");
+          setSyncState(pendingCount ? "loading" : "saved");
+          throw new Error(reason);
+        }
+      } catch (error) {
+        // Validation errors are deliberate and must be shown in the open form.
+        if (!(error instanceof TypeError)) throw error;
+      }
+    }
+
     // The interface is local-first: reflect the action immediately, then persist and sync it in the background.
     const optimistic = applyOptimisticOperation(current, operation);
     applyStoredState(optimistic);
@@ -1022,11 +1054,6 @@ export default function Home() {
         applyStoredState(queuedAfterFetch.reduce((current, operation) => applyOptimisticOperation(current, operation), serverState));
       } else {
         for (const operation of operations) {
-          if (operation.lastError) {
-            rejected += 1;
-            setSyncError(operation.lastError);
-            continue;
-          }
           let response: Response;
           try {
             response = await fetch("/api/state", {
@@ -1056,17 +1083,15 @@ export default function Home() {
             applyStoredState(queuedAfterSave.reduce((current, queued) => applyOptimisticOperation(current, queued), serverState));
             continue;
           }
-          if (response.status >= 500) {
+          if (response.status >= 500 || response.status === 408 || response.status === 425 || response.status === 429) {
             interrupted = true;
             setSyncState("error");
             break;
           }
-          const errorPayload = (await response.json().catch(() => ({}))) as {
-            error?: string;
-          };
-          const reason = errorPayload.error ?? `הפעולה ${operation.action} נדחתה (${response.status})`;
-          await enqueueOperation({ ...operation, lastError: reason });
-          setSyncError(reason);
+          // Retrying an unchanged 4xx payload cannot succeed. Remove legacy invalid data
+          // instead of presenting it forever as a connectivity/sync failure.
+          await removeQueuedOperation(operation.id);
+          setSyncError("");
           rejected += 1;
         }
       }
@@ -1078,7 +1103,6 @@ export default function Home() {
           const queuedAfterRejection = await readQueuedOperations();
           applyStoredState(queuedAfterRejection.reduce((current, queued) => applyOptimisticOperation(current, queued), authoritative));
         }
-        interrupted = true;
       }
       const remaining = await readQueuedOperations();
       setPendingCount(remaining.length);
@@ -1090,7 +1114,7 @@ export default function Home() {
           setSyncState(navigator.onLine ? "error" : "offline");
         }
       } else if (!authRequired) {
-        setSyncState(rejected ? "error" : "saved");
+        setSyncState("saved");
       }
     } catch {
       interrupted = true;
@@ -1318,7 +1342,10 @@ export default function Home() {
   }
 
   function selectProject(project: Project) {
-    setActiveProject(project);
+    // Selecting a project to view is unrelated to the running timer - never reassign
+    // activeProject (which drives the timer widget) while a timer is running elsewhere,
+    // or the timer display would misleadingly appear to jump to the viewed project.
+    if (!running) setActiveProject(project);
     setSelectedDashboardProjectId(project.id);
     setContextProjectId(project.id);
     setView("dashboard");
@@ -1326,7 +1353,7 @@ export default function Home() {
   }
 
   async function openProjectSection(project: Project, nextView: "time" | "payments" | "expenses") {
-    setActiveProject(project);
+    if (!running) setActiveProject(project);
     setSelectedDashboardProjectId(null);
     setContextProjectId(project.id);
     setView(nextView);
@@ -1403,7 +1430,13 @@ export default function Home() {
     }
   }
 
+  function showFormError(error: unknown, fallback: string) {
+    setSyncError("");
+    setInviteNotice({ kind: "error", text: error instanceof Error ? error.message : fallback });
+  }
+
   function openTimeEntry(projectId?: RecordId) {
+    setInviteNotice(null);
     setEditingId(null);
     if (projectId !== undefined) setContextProjectId(projectId);
     setModal("time");
@@ -1411,6 +1444,7 @@ export default function Home() {
 
   function openEditTimeEntry(entry: TimeEntry) {
     if (!entry.endedAt) return;
+    setInviteNotice(null);
     setEditingId(entry.id);
     setContextProjectId(entry.projectId);
     setModal("time");
@@ -1426,6 +1460,7 @@ export default function Home() {
   }
 
   function openPayment(payment?: Payment, projectId?: RecordId) {
+    setInviteNotice(null);
     setEditingId(payment?.id ?? null);
     if (payment) setContextProjectId(payment.projectId);
     else if (projectId !== undefined) setContextProjectId(projectId);
@@ -1448,8 +1483,8 @@ export default function Home() {
       });
       setModal(null);
       setEditingId(null);
-    } catch {
-      setSyncState("error");
+    } catch (error) {
+      showFormError(error, "שמירת התשלום נכשלה. יש לבדוק את הפרטים ולנסות שוב.");
     }
   }
 
@@ -1463,6 +1498,7 @@ export default function Home() {
   }
 
   function openExpense(expense?: Expense, projectId?: RecordId) {
+    setInviteNotice(null);
     setEditingId(expense?.id ?? null);
     if (expense) setContextProjectId(expense.projectId);
     else if (projectId !== undefined) setContextProjectId(projectId);
@@ -1486,8 +1522,8 @@ export default function Home() {
       });
       setModal(null);
       setEditingId(null);
-    } catch {
-      setSyncState("error");
+    } catch (error) {
+      showFormError(error, "שמירת ההוצאה נכשלה. יש לבדוק את הפרטים ולנסות שוב.");
     }
   }
 
@@ -1501,6 +1537,7 @@ export default function Home() {
   }
 
   function openAttachment(expense?: Expense) {
+    setInviteNotice(null);
     setEditingId(expense?.id ?? null);
     setModal("attachment");
   }
@@ -1514,7 +1551,18 @@ export default function Home() {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const file = form.get("file");
-    if (!(file instanceof File)) return;
+    if (!(file instanceof File) || file.size <= 0) {
+      showFormError(new Error("יש לבחור קובץ להעלאה."), "יש לבחור קובץ להעלאה.");
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      showFormError(new Error("הקובץ גדול מ־10MB. יש לבחור קובץ קטן יותר."), "הקובץ גדול מדי.");
+      return;
+    }
+    if (!/\.(jpe?g|png|webp|heic|heif|pdf)$/i.test(file.name)) {
+      showFormError(new Error("אפשר להעלות קובצי JPG, PNG, WEBP, HEIC או PDF בלבד."), "סוג הקובץ אינו נתמך.");
+      return;
+    }
     const queuedAttachment: QueuedAttachment = { id: crypto.randomUUID(), projectId: String(form.get("projectId") ?? ""), expenseId: String(form.get("expenseId") ?? ""), fileName: file.name, contentType: file.type, blob: file, createdAt: new Date().toISOString() };
     if (!navigator.onLine) {
       await enqueueAttachment(queuedAttachment);
@@ -1556,11 +1604,7 @@ export default function Home() {
         setView("expenses");
         return;
       }
-      setSyncState("error");
-      setInviteNotice({
-        kind: "error",
-        text: error instanceof Error ? error.message : "העלאת הקובץ נכשלה. אפשר לנסות שוב.",
-      });
+      showFormError(error, "העלאת הקובץ נכשלה. אפשר לנסות שוב.");
     }
   }
 
@@ -1574,12 +1618,14 @@ export default function Home() {
   }
 
   function openNew(type: EntityType) {
+    setInviteNotice(null);
     setEditingId(null);
     setBillingType("fixed");
     setModal(type);
   }
 
   function openEdit(type: EntityType, record: Client | Employee | Project) {
+    setInviteNotice(null);
     if (type === "project" && running && String(activeProject.id) === String(record.id)) {
       setInviteNotice({
         kind: "error",
@@ -1618,23 +1664,51 @@ export default function Home() {
     }
   }
 
+  async function purgeRecord(type: EntityType, id: RecordId, name: string) {
+    if (!window.confirm(`למחוק את ${name} לצמיתות? הפעולה אינה הפיכה ולא ניתן יהיה לשחזר את הנתונים.`)) return;
+    try {
+      await saveAction(type === "client" ? "purgeClient" : type === "employee" ? "purgeEmployee" : "purgeProject", { id });
+    } catch (error) {
+      showFormError(error, "המחיקה לצמיתות נכשלה. אפשר לנסות שוב.");
+    }
+  }
+
   async function addClient(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
+    const name = String(data.get("name") ?? "").trim();
+    const address = String(data.get("address") ?? "").trim();
+    const phone = String(data.get("phone") ?? "").trim();
+    const email = String(data.get("email") ?? "").trim();
+    const invalidClientField =
+      !name ? { field: "name", message: "יש להזין שם לקוח." }
+      : name.length > 120 ? { field: "name", message: "שם הלקוח ארוך מדי. מותר להזין עד 120 תווים." }
+      : !address ? { field: "address", message: "יש להזין כתובת לקוח." }
+      : address.length > 300 ? { field: "address", message: "כתובת הלקוח ארוכה מדי. מותר להזין עד 300 תווים." }
+      : phone.length > 40 ? { field: "phone", message: "מספר הטלפון ארוך מדי. מותר להזין עד 40 תווים." }
+      : email.length > 254 ? { field: "email", message: "כתובת האימייל ארוכה מדי. מותר להזין עד 254 תווים." }
+      : email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? { field: "email", message: "כתובת האימייל אינה תקינה. יש להזין כתובת מלאה, לדוגמה name@example.com." }
+      : null;
+    if (invalidClientField) {
+      setInviteNotice({ kind: "error", text: invalidClientField.message });
+      const field = event.currentTarget.elements.namedItem(invalidClientField.field);
+      if (field instanceof HTMLElement) field.focus();
+      return;
+    }
     try {
       const editingClient = editingId ? clients.find((client) => client.id === editingId) : undefined;
       await saveAction(editingId ? "updateClient" : "addClient", {
         id: editingId,
         expectedUpdatedAt: editingClient?.updatedAt,
-        name: data.get("name"),
-        address: data.get("address"),
-        phone: data.get("phone"),
-        email: data.get("email"),
+        name,
+        address,
+        phone,
+        email,
       });
       setModal(null);
       setEditingId(null);
-    } catch {
-      setSyncState("error");
+    } catch (error) {
+      showFormError(error, "שמירת הלקוח נכשלה. יש לבדוק את הפרטים ולנסות שוב.");
     }
   }
 
@@ -1652,8 +1726,8 @@ export default function Home() {
       });
       setModal(null);
       setEditingId(null);
-    } catch {
-      setSyncState("error");
+    } catch (error) {
+      showFormError(error, "שמירת העובד נכשלה. יש לבדוק את הפרטים ולנסות שוב.");
     }
   }
 
@@ -1685,11 +1759,9 @@ export default function Home() {
     const fixedPrice = Number(data.get("fixedPrice") || 0);
     const hourlyRate = Number(data.get("hourlyRate") || 0);
     const newClientName = String(data.get("newClientName") ?? "").trim();
-    const clientSelect = event.currentTarget.elements.namedItem("client") as HTMLSelectElement | null;
     const editingProject = editingId ? projects.find((project) => String(project.id) === String(editingId)) : undefined;
-    const orderedClients = editingProject ? [...clients].sort((left, right) => Number(String(right.id) === String(editingProject.clientId)) - Number(String(left.id) === String(editingProject.clientId))) : clients;
-    const selectedClient = clientSelect && clientSelect.selectedIndex > 0 ? orderedClients[clientSelect.selectedIndex - 1] : undefined;
-    const clientId = String(selectedClient?.id ?? "");
+    const clientId = String(data.get("client") ?? "");
+    const selectedClient = clients.find((client) => String(client.id) === clientId);
     try {
       if (!editingId && newClientName) {
         await saveAction("addProject", {
@@ -1737,8 +1809,8 @@ export default function Home() {
       setModal(null);
       setEditingId(null);
       setView("dashboard");
-    } catch {
-      setSyncState("error");
+    } catch (error) {
+      showFormError(error, "שמירת הפרויקט נכשלה. יש לבדוק את הפרטים ולנסות שוב.");
     }
   }
 
@@ -1753,6 +1825,10 @@ export default function Home() {
       });
       return;
     }
+    if (durationSeconds < 60 || durationSeconds > 24 * 60 * 60) {
+      setInviteNotice({ kind: "error", text: "משך הדיווח חייב להיות בין דקה אחת ל־24 שעות." });
+      return;
+    }
     try {
       const editingEntry = editingId ? recentTimeEntries.find((entry) => entry.id === editingId) : undefined;
       await saveAction(editingId ? "updateTimeEntry" : "addManualTime", {
@@ -1765,8 +1841,8 @@ export default function Home() {
       });
       setModal(null);
       setEditingId(null);
-    } catch {
-      setSyncState("error");
+    } catch (error) {
+      showFormError(error, "שמירת דיווח הזמן נכשלה. יש לבדוק את הפרטים ולנסות שוב.");
     }
   }
 
@@ -1797,6 +1873,7 @@ export default function Home() {
       <a className="skip-link" href="#main-content">
         דילוג לתוכן הראשי
       </a>
+      <NoticeToast notice={inviteNotice} close={() => setInviteNotice(null)} />
       <aside className="sidebar" aria-label="ניווט ראשי">
         <button className="brand" onClick={() => navigate("dashboard")}>
           <Image className="brand-image" src="/app-icon.png" width={42} height={42} alt="" />
@@ -1852,7 +1929,7 @@ export default function Home() {
           )}
         </nav>
         <button className="sidebar-foot" onClick={() => navigate("profile")}>
-          <div className="user-avatar">{currentUser.displayName.charAt(0)}</div>
+          <div className="user-avatar">{currentUser.profileImageUrl ? <Image src={currentUser.profileImageUrl} width={38} height={38} alt="" unoptimized /> : currentUser.displayName.charAt(0)}</div>
           <div>
             <strong dir="auto">{currentUser.displayName}</strong>
             <small>{currentUser.isGuest ? "אורח הדגמה" : !isManager ? "עובד בצוות" : accountMode === "solo" ? "עובד עצמאי" : "מעסיק עובדים"}</small>
@@ -1891,7 +1968,7 @@ export default function Home() {
               )}
             </div>
             <button className="icon-button profile-button" onClick={() => navigate("profile")} aria-label="פתיחת הפרופיל">
-              {currentUser.displayName.charAt(0)}
+              {currentUser.profileImageUrl ? <Image src={currentUser.profileImageUrl} width={42} height={42} alt="" unoptimized /> : currentUser.displayName.charAt(0)}
             </button>
           </div>
         </header>
@@ -1903,16 +1980,6 @@ export default function Home() {
             <p>זו סביבת הדגמה ציבורית לקריאה בלבד. הנתונים לדוגמה אינם ניתנים לשינוי.</p>
           </div>
         )}
-        {!modal && inviteNotice && (
-          <div className={`invite-notice ${inviteNotice.kind}`} role="status">
-            <span>{inviteNotice.kind === "success" ? "✓" : "!"}</span>
-            <strong>{inviteNotice.text}</strong>
-            <button onClick={() => setInviteNotice(null)} aria-label="סגירת ההודעה">
-              ×
-            </button>
-          </div>
-        )}
-
         {view === "dashboard" && (projects.length ? <Dashboard canManage={isManager} accountMode={accountMode} activeProject={activeProject} selectedProjectId={selectedDashboardProjectId} running={running} seconds={seconds} projects={projects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} toggleProjectTimer={(project) => void toggleProjectTimer(project)} updateProjectStatus={(project, status) => void updateProjectStatus(project, status)} stopTimer={() => void stopTimer()} selectProject={selectProject} closeProject={() => setSelectedDashboardProjectId(null)} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} showManual={() => openTimeEntry(activeProject.id)} openNew={() => openNew("project")} openProjectSection={openProjectSection} openPayment={(project) => openPayment(undefined, project.id)} openExpense={(project) => openExpense(undefined, project.id)} /> : <NoProjectsView isManager={isManager} openNew={() => openNew("project")} />)}
         {view === "projects" && <ProjectsView canManage={isManager} projects={visibleProjects} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} activeProject={activeProject} running={running} selectProject={selectProject} editProject={(project) => openEdit("project", project)} removeProject={(project) => void removeRecord("project", project.id, project.name)} openNew={() => openNew("project")} />}
         {view === "time" && <TimeEntriesView entries={visibleTimeEntries} contextProject={contextProject} backToProject={() => contextProject && selectProject(contextProject)} showAll={() => setContextProjectId(null)} openNew={() => openTimeEntry(contextProject?.id)} editEntry={openEditTimeEntry} removeEntry={(entry) => void removeTimeEntry(entry)} />}
@@ -1934,7 +2001,17 @@ export default function Home() {
           />
         )}
         {isManager && view === "employees" && <EmployeesView employees={employees} openNew={() => openNew("employee")} editEmployee={(employee) => openEdit("employee", employee)} removeEmployee={(employee) => void removeRecord("employee", employee.id, employee.name)} inviteEmployee={(employee) => void inviteEmployee(employee)} />}
-        {isManager && view === "trash" && <RecycleBinView trash={trash} restoreClient={(id, restoreProjects) => void restoreRecord("client", id, restoreProjects)} restoreProject={(id) => void restoreRecord("project", id)} restoreEmployee={(id) => void restoreRecord("employee", id)} />}
+        {isManager && view === "trash" && (
+          <RecycleBinView
+            trash={trash}
+            restoreClient={(id, restoreProjects) => void restoreRecord("client", id, restoreProjects)}
+            restoreProject={(id) => void restoreRecord("project", id)}
+            restoreEmployee={(id) => void restoreRecord("employee", id)}
+            purgeClient={(id, name) => void purgeRecord("client", id, name)}
+            purgeProject={(id, name) => void purgeRecord("project", id, name)}
+            purgeEmployee={(id, name) => void purgeRecord("employee", id, name)}
+          />
+        )}
         {isManager && view === "history" && <AuditLogView entries={auditLog} />}
         {isManager && view === "reports" && <ReportsView projects={projects} employees={employees} projectId={reportProjectId} setProjectId={setReportProjectId} employeeId={reportEmployeeId} setEmployeeId={setReportEmployeeId} from={reportFrom} setFrom={setReportFrom} to={reportTo} setTo={setReportTo} />}
         {view === "profile" && (
@@ -1985,7 +2062,6 @@ export default function Home() {
             setEditingId(null);
             setInviteNotice(null);
           }}
-          inviteNotice={inviteNotice}
           setInviteNotice={setInviteNotice}
         >
           {modal === "project" && <ProjectForm accountMode={accountMode} clients={projectFormClients} employees={employees} billingType={billingType} setBillingType={setBillingType} initial={editingProject} submit={addProject} />}
@@ -2227,7 +2303,7 @@ function Dashboard({
     const searchableText = (project.name + " " + project.client + " " + project.address).toLocaleLowerCase();
     return matchesStatus && searchableText.includes(normalizedQuery);
   });
-  const selectedProject = !running && selectedProjectId !== null ? activeProject : null;
+  const selectedProject = !running && selectedProjectId !== null ? projects.find((project) => String(project.id) === String(selectedProjectId)) ?? null : null;
   const activeCount = projects.filter((project) => project.tag === "בביצוע").length;
   const totalExpected = projects.reduce((sum, project) => sum + project.expectedAmount, 0);
   const totalProfit = projects.reduce((sum, project) => sum + Number(project.profitAmount ?? project.expectedAmount), 0);
@@ -3199,12 +3275,17 @@ function SignInView() {
   }
   return (
     <main className="sign-in-shell">
+      <NoticeToast notice={error ? { kind: "error", text: error } : null} close={() => setError("")} />
       <section className="sign-in-card auth-card">
         <Image className="sign-in-logo" src="/app-icon.png" width={82} height={82} alt="מנהל עבודה" />
         <p>מנהל עבודה</p>
         <h1>{mode === "login" ? "כניסה לחשבון" : "יצירת חשבון חדש"}</h1>
         <div className="auth-tabs"><button type="button" className={mode === "login" ? "active" : ""} onClick={() => { setMode("login"); setError(""); }}>כניסה</button><button type="button" className={mode === "register" ? "active" : ""} onClick={() => { setMode("register"); setError(""); }}>הרשמה</button></div>
-        <form className="auth-form" onSubmit={submit} encType="multipart/form-data">
+        <form className="auth-form" onSubmit={submit} encType="multipart/form-data" onInvalidCapture={(event) => {
+          const field = event.target;
+          if (!(field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement)) return;
+          setError(invalidFieldMessage(field));
+        }}>
           {mode === "register" && <div className="auth-name-grid"><label><span>שם פרטי</span><input name="firstName" autoComplete="given-name" required /></label><label><span>שם משפחה</span><input name="lastName" autoComplete="family-name" required /></label></div>}
           {mode === "register" && <label><span>טלפון</span><input name="phone" type="tel" dir="ltr" autoComplete="tel" required /></label>}
           <label><span>כתובת מייל</span><input name="email" type="email" dir="ltr" autoComplete="email" required /></label>
@@ -3212,8 +3293,7 @@ function SignInView() {
           {mode === "register" && <label><span>אימות סיסמה</span><input name="confirmPassword" type="password" dir="ltr" minLength={10} autoComplete="new-password" required /></label>}
           {mode === "register" && <label className="auth-upload"><span>תמונת פרופיל (אופציונלי)</span><input name="profileImage" type="file" accept="image/jpeg,image/png,image/webp" /><small>JPG, PNG או WEBP עד 5MB</small></label>}
           {mode === "register" && <small>הסיסמה צריכה לכלול לפחות 10 תווים, אות ומספר.</small>}
-          {error && <div className="auth-error" role="alert">{error}</div>}
-          <button type="submit" disabled={submitting}>{submitting ? "נא להמתין…" : mode === "login" ? "כניסה" : "יצירת חשבון"}</button>
+          <button type="submit" className="primary-button" disabled={submitting}>{submitting ? "נא להמתין…" : mode === "login" ? "כניסה" : "יצירת חשבון"}</button>
         </form>
       </section>
     </main>
@@ -3600,7 +3680,7 @@ function formatDeletedAt(value: string) {
   return Number.isNaN(date.getTime()) ? "נמחק לאחרונה" : `נמחק ב־${date.toLocaleDateString("he-IL")}`;
 }
 
-function RecycleBinView({ trash, restoreClient, restoreProject, restoreEmployee }: { trash: TrashState; restoreClient: (id: RecordId, restoreProjects: boolean) => void; restoreProject: (id: RecordId) => void; restoreEmployee: (id: RecordId) => void }) {
+function RecycleBinView({ trash, restoreClient, restoreProject, restoreEmployee, purgeClient, purgeProject, purgeEmployee }: { trash: TrashState; restoreClient: (id: RecordId, restoreProjects: boolean) => void; restoreProject: (id: RecordId) => void; restoreEmployee: (id: RecordId) => void; purgeClient: (id: RecordId, name: string) => void; purgeProject: (id: RecordId, name: string) => void; purgeEmployee: (id: RecordId, name: string) => void }) {
   const total = trash.clients.length + trash.projects.length + trash.employees.length;
   return (
     <section className="page-card trash-card">
@@ -3646,6 +3726,9 @@ function RecycleBinView({ trash, restoreClient, restoreProject, restoreEmployee 
                           שחזור עם {Number(client.projectCount)} פרויקטים
                         </button>
                       )}
+                      <button className="purge-button" onClick={() => purgeClient(client.id, client.name)} aria-label={"מחיקת " + client.name + " לצמיתות"}>
+                        מחיקה לצמיתות
+                      </button>
                     </div>
                   </article>
                 ))}
@@ -3671,9 +3754,14 @@ function RecycleBinView({ trash, restoreClient, restoreProject, restoreEmployee 
                       </span>
                       <small>{formatDeletedAt(project.deletedAt)}</small>
                     </div>
-                    <button className="restore-primary" onClick={() => restoreProject(project.id)}>
-                      שחזור פרויקט
-                    </button>
+                    <div className="restore-actions">
+                      <button className="restore-primary" onClick={() => restoreProject(project.id)}>
+                        שחזור פרויקט
+                      </button>
+                      <button className="purge-button" onClick={() => purgeProject(project.id, project.name)} aria-label={"מחיקת " + project.name + " לצמיתות"}>
+                        מחיקה לצמיתות
+                      </button>
+                    </div>
                   </article>
                 ))}
               </div>
@@ -3696,9 +3784,14 @@ function RecycleBinView({ trash, restoreClient, restoreProject, restoreEmployee 
                       <span dir="ltr">{employee.email}</span>
                       <small>{formatDeletedAt(employee.deletedAt)}</small>
                     </div>
-                    <button className="restore-primary" onClick={() => restoreEmployee(employee.id)}>
-                      שחזור עובד
-                    </button>
+                    <div className="restore-actions">
+                      <button className="restore-primary" onClick={() => restoreEmployee(employee.id)}>
+                        שחזור עובד
+                      </button>
+                      <button className="purge-button" onClick={() => purgeEmployee(employee.id, employee.name)} aria-label={"מחיקת " + employee.name + " לצמיתות"}>
+                        מחיקה לצמיתות
+                      </button>
+                    </div>
                   </article>
                 ))}
               </div>
@@ -3788,21 +3881,27 @@ function ProfileView({ user, accountMode, setAccountMode, openReports, openHisto
       {!user.isLocal && !user.isGuest && editingProfile && (
         <section className="profile-account-editor" id="profile-account-editor">
           <div className="profile-section-title"><span>פרטי החשבון</span><small>אפשר לעדכן את כל הפרטים בכל עת</small></div>
-          <form className="auth-form" onSubmit={(event) => void submitAccountForm(event, "updateProfile")} encType="multipart/form-data">
+          <form className="auth-form" onSubmit={(event) => void submitAccountForm(event, "updateProfile")} encType="multipart/form-data" onInvalidCapture={(event) => {
+            const field = event.target;
+            if (field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement) setProfileMessage({ kind: "error", text: invalidFieldMessage(field) });
+          }}>
             <div className="auth-name-grid"><label><span>שם פרטי</span><input name="firstName" defaultValue={user.firstName ?? user.displayName.split(" ")[0] ?? ""} required /></label><label><span>שם משפחה</span><input name="lastName" defaultValue={user.lastName ?? user.displayName.split(" ").slice(1).join(" ")} required /></label></div>
             <label><span>טלפון</span><input name="phone" type="tel" dir="ltr" defaultValue={user.phone ?? ""} required /></label>
             <label><span>כתובת מייל</span><input name="email" type="email" dir="ltr" defaultValue={user.email} required /></label>
             <label className="auth-upload"><span>החלפת תמונת פרופיל</span><input name="profileImage" type="file" accept="image/jpeg,image/png,image/webp" /><small>JPG, PNG או WEBP עד 5MB</small></label>
             {user.profileImageUrl && <label className="profile-remove-image"><input name="removeImage" type="checkbox" value="1" /> הסרת התמונה הנוכחית</label>}
-            <div className="profile-form-actions"><button type="submit" disabled={profileSaving}>{profileSaving ? "שומר..." : "שמירת פרטי החשבון"}</button><button type="button" className="secondary-button" onClick={() => { setEditingProfile(false); setProfileMessage(null); }}>ביטול</button></div>
+            <div className="profile-form-actions"><button type="submit" className="primary-button" disabled={profileSaving}>{profileSaving ? "שומר..." : "שמירת פרטי החשבון"}</button><button type="button" className="secondary-button" onClick={() => { setEditingProfile(false); setProfileMessage(null); }}>ביטול</button></div>
           </form>
-          <form className="auth-form profile-password-form" onSubmit={(event) => void submitAccountForm(event, "changePassword")}>
+          <form className="auth-form profile-password-form" onSubmit={(event) => void submitAccountForm(event, "changePassword")} onInvalidCapture={(event) => {
+            const field = event.target;
+            if (field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement) setProfileMessage({ kind: "error", text: invalidFieldMessage(field) });
+          }}>
             <h3>החלפת סיסמה</h3>
             <label><span>סיסמה נוכחית</span><input name="currentPassword" type="password" autoComplete="current-password" required /></label>
             <div className="auth-name-grid"><label><span>סיסמה חדשה</span><input name="password" type="password" minLength={10} autoComplete="new-password" required /></label><label><span>אימות סיסמה חדשה</span><input name="confirmPassword" type="password" minLength={10} autoComplete="new-password" required /></label></div>
-            <button type="submit" disabled={passwordSaving}>{passwordSaving ? "מעדכן..." : "עדכון הסיסמה"}</button>
+            <button type="submit" className="primary-button" disabled={passwordSaving}>{passwordSaving ? "מעדכן..." : "עדכון הסיסמה"}</button>
           </form>
-          {profileMessage && <div className={profileMessage.kind === "error" ? "auth-error" : "profile-success"} role="status">{profileMessage.text}</div>}
+          <NoticeToast notice={profileMessage} close={() => setProfileMessage(null)} />
         </section>
       )}
       <section className="profile-quick-section">
@@ -3901,7 +4000,34 @@ function ProfileView({ user, accountMode, setAccountMode, openReports, openHisto
   );
 }
 
-function Modal({ title, close, children, inviteNotice, setInviteNotice }: { title: string; close: () => void; children: React.ReactNode; inviteNotice?: { kind: "success" | "error"; text: string } | null; setInviteNotice?: (notice: { kind: "success" | "error"; text: string } | null) => void }) {
+function NoticeToast({ notice, close }: { notice: { kind: "success" | "error"; text: string } | null; close: () => void }) {
+  if (!notice) return null;
+  return (
+    <div className="notice-toast-layer">
+      <div className={`invite-notice ${notice.kind}`} role={notice.kind === "error" ? "alert" : "status"} aria-live={notice.kind === "error" ? "assertive" : "polite"}>
+        <span aria-hidden="true">{notice.kind === "success" ? "✓" : "!"}</span>
+        <strong dir="auto">{notice.text}</strong>
+        <button type="button" onClick={close} aria-label="סגירת ההודעה">×</button>
+      </div>
+    </div>
+  );
+}
+
+function invalidFieldMessage(field: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement) {
+  const fieldLabel = field.closest("label")?.querySelector(":scope > span")?.textContent?.trim()
+    ?? field.getAttribute("aria-label")
+    ?? "השדה המסומן";
+  if (field.validity.valueMissing) return `יש למלא את השדה „${fieldLabel}”.`;
+  if (field.validity.typeMismatch && field instanceof HTMLInputElement && field.type === "email") return `כתובת האימייל בשדה „${fieldLabel}” אינה תקינה. יש להזין כתובת מלאה, לדוגמה name@example.com.`;
+  if (field.validity.rangeUnderflow) return `הערך בשדה „${fieldLabel}” נמוך מהמינימום המותר (${field.getAttribute("min")}).`;
+  if (field.validity.rangeOverflow) return `הערך בשדה „${fieldLabel}” גבוה מהמקסימום המותר (${field.getAttribute("max")}).`;
+  if (field.validity.stepMismatch) return `הערך בשדה „${fieldLabel}” אינו בקפיצות המותרות (${field.getAttribute("step")}).`;
+  if (field.validity.tooLong) return `הטקסט בשדה „${fieldLabel}” ארוך מדי. מותר להזין עד ${field.getAttribute("maxlength")} תווים.`;
+  if (field.validity.patternMismatch) return `הערך בשדה „${fieldLabel}” אינו בפורמט הנדרש.`;
+  return `הערך בשדה „${fieldLabel}” אינו תקין.`;
+}
+
+function Modal({ title, close, children, setInviteNotice }: { title: string; close: () => void; children: React.ReactNode; setInviteNotice?: (notice: { kind: "success" | "error"; text: string } | null) => void }) {
   const panelRef = useRef<HTMLElement>(null);
   useEffect(() => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -3945,7 +4071,12 @@ function Modal({ title, close, children, inviteNotice, setInviteNotice }: { titl
       }}
       onKeyDown={handleKeyDown}
     >
-      <section ref={panelRef} className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabIndex={-1}>
+      <section ref={panelRef} className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabIndex={-1}
+        onInvalidCapture={(event) => {
+          const field = event.target;
+          if (!(field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement)) return;
+          setInviteNotice?.({ kind: "error", text: invalidFieldMessage(field) });
+        }}>
         <header>
           <div>
             <p>מנהל עבודה</p>
@@ -3955,15 +4086,6 @@ function Modal({ title, close, children, inviteNotice, setInviteNotice }: { titl
             ×
           </button>
         </header>
-        {inviteNotice && (
-          <div className={`invite-notice ${inviteNotice.kind}`} style={{ margin: "10px 18px", maxWidth: "none" }} role="status">
-            <span>{inviteNotice.kind === "success" ? "✓" : "!"}</span>
-            <strong>{inviteNotice.text}</strong>
-            <button onClick={() => setInviteNotice?.(null)} aria-label="סגירת ההודעה">
-              ×
-            </button>
-          </div>
-        )}
         <div className="modal-body">{children}</div>
       </section>
     </div>
@@ -3984,16 +4106,16 @@ function ClientForm({ initial, submit }: { initial?: Client; submit: (event: For
     <form className="entity-form" onSubmit={submit}>
       <div className="form-grid">
         <Field label="שם הלקוח" wide>
-          <input name="name" dir="auto" required defaultValue={initial?.name} placeholder="לדוגמה: Müller Bau GmbH" />
+          <input name="name" dir="auto" required maxLength={120} defaultValue={initial?.name} placeholder="לדוגמה: Müller Bau GmbH" />
         </Field>
         <Field label="כתובת" wide>
-          <input name="address" dir="auto" required defaultValue={initial?.address} placeholder="רחוב, מספר ועיר" />
+          <input name="address" dir="auto" required maxLength={300} defaultValue={initial?.address} placeholder="רחוב, מספר ועיר" />
         </Field>
         <Field label="טלפון">
-          <input name="phone" dir="ltr" defaultValue={initial?.phone} placeholder="+49..." />
+          <input name="phone" dir="ltr" maxLength={40} defaultValue={initial?.phone} placeholder="+49..." />
         </Field>
         <Field label="אימייל">
-          <input name="email" dir="ltr" type="email" defaultValue={initial?.email} placeholder="name@example.com" />
+          <input name="email" dir="ltr" type="email" maxLength={254} defaultValue={initial?.email} placeholder="name@example.com" />
         </Field>
       </div>
       <FormActions label={initial ? "שמירת שינויים" : "שמירת לקוח"} />
@@ -4006,13 +4128,13 @@ function EmployeeForm({ initial, submit }: { initial?: Employee; submit: (event:
     <form className="entity-form" onSubmit={submit}>
       <div className="form-grid">
         <Field label="שם העובד" wide>
-          <input name="name" dir="auto" required defaultValue={initial?.name} placeholder="שם בעברית, Deutsch or English" />
+          <input name="name" dir="auto" required maxLength={120} defaultValue={initial?.name} placeholder="שם בעברית, Deutsch or English" />
         </Field>
         <Field label="אימייל">
-          <input name="email" dir="ltr" type="email" required defaultValue={initial?.email} placeholder="name@example.com" />
+          <input name="email" dir="ltr" type="email" required maxLength={254} defaultValue={initial?.email} placeholder="name@example.com" />
         </Field>
         <Field label={`עלות לשעה (${activeCurrency})`}>
-          <input name="hourlyCost" dir="ltr" type="number" min="0" step="0.01" required defaultValue={initial?.hourlyCost} placeholder="0.00" />
+          <input name="hourlyCost" dir="ltr" type="number" min="0" max="1000000" step="0.01" required defaultValue={initial?.hourlyCost} placeholder="0.00" />
         </Field>
       </div>
       <p className="form-note">זהו הסכום שמגיע לעובד לשעה, ולא התעריף שבו מחייבים את הלקוח.</p>
@@ -4080,7 +4202,7 @@ function PaymentForm({ projects, initialProjectId, initial, submit }: { projects
           <input name="amount" dir="ltr" type="number" min="0.01" step="0.01" required defaultValue={initial?.amount} placeholder="0.00" />
         </Field>
         <Field label="תאריך התשלום">
-          <input name="paidAt" dir="ltr" type="date" required defaultValue={initial?.paidAt ?? new Date().toISOString().slice(0, 10)} />
+          <input name="paidAt" dir="ltr" type="date" required max={new Date().toISOString().slice(0, 10)} defaultValue={initial?.paidAt ?? new Date().toISOString().slice(0, 10)} />
         </Field>
         <Field label="אמצעי תשלום">
           <select name="method" required defaultValue={initial?.method ?? "transfer"}>
@@ -4092,7 +4214,7 @@ function PaymentForm({ projects, initialProjectId, initial, submit }: { projects
           </select>
         </Field>
         <Field label="הערה" wide>
-          <textarea name="note" dir="auto" rows={3} defaultValue={initial?.note} placeholder="מספר אסמכתא, פירוט או הערה בעברית, Deutsch or English" />
+          <textarea name="note" dir="auto" rows={3} maxLength={2000} defaultValue={initial?.note} placeholder="מספר אסמכתא, פירוט או הערה בעברית, Deutsch or English" />
         </Field>
       </div>
       <p className="form-note">התשלום יקוזז מהיתרה הפתוחה של הפרויקט ויישמר ביומן השינויים.</p>
@@ -4227,7 +4349,7 @@ function ExpenseForm({ projects, initialProjectId, initial, submit }: { projects
           <input name="amount" dir="ltr" type="number" min="0.01" step="0.01" required defaultValue={initial?.amount} placeholder="0.00" />
         </Field>
         <Field label="תאריך ההוצאה">
-          <input name="incurredAt" dir="ltr" type="date" required defaultValue={initial?.incurredAt ?? new Date().toISOString().slice(0, 10)} />
+          <input name="incurredAt" dir="ltr" type="date" required max={new Date().toISOString().slice(0, 10)} defaultValue={initial?.incurredAt ?? new Date().toISOString().slice(0, 10)} />
         </Field>
         <Field label="קטגוריה">
           <select name="category" required defaultValue={initial?.category ?? "materials"}>
@@ -4239,7 +4361,7 @@ function ExpenseForm({ projects, initialProjectId, initial, submit }: { projects
           </select>
         </Field>
         <Field label="פירוט" wide>
-          <textarea name="note" dir="auto" rows={3} defaultValue={initial?.note} placeholder="שם החומר, ספק או הערה בעברית, Deutsch or English" />
+          <textarea name="note" dir="auto" rows={3} maxLength={2000} defaultValue={initial?.note} placeholder="שם החומר, ספק או הערה בעברית, Deutsch or English" />
         </Field>
         <label className="billable-option" htmlFor="billableToClient" aria-label="לחייב את הלקוח בהוצאה">
           <input id="billableToClient" name="billableToClient" type="checkbox" defaultChecked={initial ? Boolean(initial.billableToClient) : true} />
@@ -4257,7 +4379,7 @@ function ExpenseForm({ projects, initialProjectId, initial, submit }: { projects
 
 function ProjectForm({ accountMode, clients, employees, billingType, setBillingType, initial, submit }: { accountMode: AccountMode; clients: Client[]; employees: Employee[]; billingType: BillingType; setBillingType: (type: BillingType) => void; initial?: Project; submit: (event: FormEvent<HTMLFormElement>) => void }) {
   const isSolo = accountMode === "solo";
-  const [clientChoice, setClientChoice] = useState(initial?.client ?? "");
+  const [clientChoice, setClientChoice] = useState(String(initial?.clientId ?? ""));
   const isNewClient = !initial && clientChoice === "__new__";
   return (
     <form className="entity-form project-form" onSubmit={submit}>
@@ -4271,7 +4393,7 @@ function ProjectForm({ accountMode, clients, employees, billingType, setBillingT
               בחירת לקוח
             </option>
             {clients.map((client) => (
-              <option key={client.id} value={client.name}>
+              <option key={client.id} value={String(client.id)}>
                 {client.name}
               </option>
             ))}

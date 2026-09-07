@@ -95,10 +95,11 @@ input, textarea, select { font: inherit; unicode-bidi: plaintext; text-align: st
   background: transparent; color: inherit; text-align: right; cursor: pointer;
 }
 .user-avatar {
-  width: 38px; height: 38px; display: grid; place-items: center; border-radius: 50%;
+  width: 38px; height: 38px; display: grid; place-items: center; border-radius: 50%; overflow: hidden;
   background: linear-gradient(135deg, #fcd34d 0%, #fbbf24 100%); color: #0c2018; font-weight: 800;
   box-shadow: 0 3px 8px rgba(251, 191, 36, 0.25);
 }
+.user-avatar img, .profile-button img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
 .sidebar-foot strong { font-size: 15px; color: #f1f5f9; font-weight: 600; display: block; }
 .sidebar-foot small { font-size: 12px; color: #94a3b8; margin-top: 3px; display: block; }
 .sidebar-foot > span { color: #94a3b8; transition: var(--transition); }
@@ -482,7 +483,6 @@ input, textarea, select { font: inherit; unicode-bidi: plaintext; text-align: st
 }
 
 @media (max-width: 760px) {
-  .record-list-filters { grid-template-columns:1fr 1fr; }
   .record-list-filters .search-box { grid-column:1 / -1; }
   .topbar { flex-direction: column; align-items: flex-start; gap: 12px; }
   .topbar h1 { font-size: 26px; }
@@ -576,6 +576,8 @@ input, textarea, select { font: inherit; unicode-bidi: plaintext; text-align: st
 .trash-row span { font-size: 13px; color: var(--muted); display: block; margin-top: 2px; }
 .trash-row small { font-size: 11px; color: var(--muted); display: block; margin-top: 4px; }
 .restore-actions { display: flex; gap: 8px; }
+.purge-button { height: 38px; padding: 0 16px; background: #fff5f5; color: #b91c1c; font-weight: 700; border-radius: var(--radius-md); border: 1px solid #fecaca; display: inline-flex; align-items: center; justify-content: center; }
+.purge-button:hover { background: #fee2e2; border-color: #ef4444; }
 
 /* AuditLogView (.history-card & .audit-list) */
 .audit-list { display: grid; gap: 10px; margin-top: 18px; }
@@ -587,7 +589,15 @@ input, textarea, select { font: inherit; unicode-bidi: plaintext; text-align: st
 .audit-row small { display:block; max-width:680px; margin-top:5px; color:var(--ink-soft); overflow-wrap:anywhere; }
 .record-list-filters { display:grid; grid-template-columns:minmax(220px,1fr) repeat(3,minmax(130px,auto)); gap:10px; align-items:end; margin:14px 0 18px; }
 .record-list-filters > label:not(.search-box) { display:grid; gap:5px; color:var(--muted); font-size:12px; font-weight:700; }
-.record-list-filters input,.record-list-filters select { min-height:44px; border:1px solid var(--line); border-radius:10px; padding:8px 10px; background:#fff; color:var(--ink); }
+.record-list-filters input,.record-list-filters select { width:100%; min-width:0; min-height:44px; border:1px solid var(--line); border-radius:10px; padding:8px 10px; background:#fff; color:var(--ink); }
+@media (max-width: 760px) {
+  /* This must come after the base rule above: same specificity, so source order decides the
+     winner, and a mobile override placed before its base rule is silently dead at every width.
+     minmax(0,1fr), not a bare 1fr: a plain 1fr track won't shrink below its content's intrinsic
+     width, and a native date input's intrinsic width is wide enough to push the row off-screen. */
+  .record-list-filters { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .record-list-filters > label { min-width: 0; }
+}
 .audit-row time { font-size: 12px; color: var(--muted); margin-right: auto; }
 
 
@@ -922,7 +932,7 @@ button:focus-visible, a:focus-visible, summary:focus-visible, input:focus-visibl
   border-radius: 999px; background: var(--green-light); color: #047857;
   border: 1px solid #a7f3d0; font-size: 12px; font-weight: 800; white-space: nowrap;
 }
-.profile-button { background: linear-gradient(135deg, #fcd34d, #f59e0b); color: #17221d; font-weight: 800; border: 0; }
+.profile-button { background: linear-gradient(135deg, #fcd34d, #f59e0b); color: #17221d; font-weight: 800; border: 0; overflow: hidden; }
 .sync-menu { position: relative; }
 .sync-icon-button {
   position: relative; width: 42px; height: 42px; display: grid; place-items: center;
@@ -955,6 +965,16 @@ button:focus-visible, a:focus-visible, summary:focus-visible, input:focus-visibl
 .invite-notice.success { border-color: #a7f3d0; background: var(--green-light); color: #065f46; }
 .invite-notice.error { border-color: #fecaca; background: #fff5f5; color: #991b1b; }
 .invite-notice button { background: transparent; color: currentColor; font-size: 20px; }
+
+/* Floating notice popup: fixed to the viewport (not the scrolling page/modal), so it is
+   always visible without scrolling - including on mobile while a modal form is open. */
+.notice-toast-layer { position: fixed; top: 0; inset-inline: 0; z-index: 400; display: flex; justify-content: center; padding: max(14px, env(safe-area-inset-top)) 16px 0; pointer-events: none; }
+.notice-toast-layer .invite-notice {
+  pointer-events: auto; width: min(92vw, 480px); margin: 0;
+  box-shadow: 0 20px 45px -12px rgba(15, 23, 42, 0.4);
+  animation: noticeToastIn 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes noticeToastIn { from { transform: translateY(-16px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 
 .dashboard-projects, .projects-section { max-width: 1280px; margin: 0 auto; }
 .dashboard-project-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); gap: 16px; }
@@ -1195,7 +1215,6 @@ img, svg, iframe { max-width: 100%; }
 .auth-upload { padding:12px; border:1px dashed #a9c8bb; border-radius:10px; background:#f8fbfa; }
 .auth-upload input { padding:8px; }
 .auth-upload small,.auth-form > small { margin:0; }
-.auth-error { padding:10px 12px; border:1px solid #fecaca; border-radius:9px; background:#fef2f2; color:#b91c1c; font-size:13px; font-weight:700; }
 .profile-avatar img { width:100%; height:100%; border-radius:inherit; object-fit:cover; }
 .account-loading-card { text-align:center; }
 .account-loading-bar { height:5px; margin-top:22px; overflow:hidden; border-radius:999px; background:#dcebe5; }
@@ -1213,7 +1232,6 @@ img, svg, iframe { max-width: 100%; }
 .profile-password-form h3 { margin:0; font-size:17px; color:var(--ink); }
 .profile-remove-image { display:flex!important; grid-template-columns:auto 1fr; align-items:center; justify-content:start; gap:8px!important; }
 .profile-remove-image input { width:auto; min-height:auto; }
-.profile-success { padding:10px 12px; border:1px solid #a7f3d0; border-radius:9px; background:#ecfdf5; color:#047857; font-size:13px; font-weight:700; }
 
 .employee-card, .client-record-card, .attachment-card, .project-row, .payment-list article, .time-entry-list article { min-width: 0; }
 .employee-card p, .invite-link input { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
