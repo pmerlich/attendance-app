@@ -20,6 +20,7 @@ test("server-renders a neutral account loading screen without demo data", async 
   assert.equal(response.headers.get("x-content-type-options"), "nosniff");
   assert.equal(response.headers.get("x-frame-options"), "DENY");
   assert.match(response.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
+  assert.match(response.headers.get("content-security-policy") ?? "", /script-src 'self' 'unsafe-inline' 'unsafe-eval'/);
   const html = await response.text();
   assert.match(html, /<html[^>]*lang="he"[^>]*dir="rtl"/i);
   assert.match(html, /<title>מנהל עבודה \| פרויקטים, שעות וכספים<\/title>/);
@@ -81,7 +82,7 @@ test("ships an offline shell and an idempotent operation migration", async () =>
   assert.match(serviceWorker, /CACHE_NAME/);
   assert.match(serviceWorker, /searchParams\.get\("v"\)/);
   assert.match(serviceWorker, /url\.pathname\.startsWith\("\/api\/"\)/);
-  assert.match(serviceWorker, /caches\.match\(request\)/);
+  assert.match(serviceWorker, /caches\.match\(request, \{ ignoreSearch:/);
   assert.match(serviceWorker, /matchAll/);
   assert.match(serviceWorker, /\\\/_next\\\//);
 
@@ -155,7 +156,8 @@ test("isolates offline data and validates critical mutations", async () => {
   assert.match(api, /function validCalendarDate/);
   assert.match(api, /WHERE te\.id = \? AND te\.user_id = \?/);
   assert.match(api, /p\.client_id AS clientId/);
-  assert.doesNotMatch(worker, /script-src 'self' 'unsafe-inline'/);
+  assert.match(worker, /script-src 'self' 'unsafe-inline'/);
+  assert.match(worker, /url\.hostname === "localhost".*unsafe-eval/);
   assert.match(api, /projectStatements\.push\(auditStatement/);
   assert.match(api, /if \(createsClient\) projectStatements\.push/);
   assert.doesNotMatch(api, /async function appendAudit/);
@@ -224,6 +226,11 @@ test("ships persistent isolated account authentication", async () => {
   assert.match(page, /className="profile-edit-button"/);
   assert.match(page, /editingProfile &&/);
   assert.match(page, /aria-controls="profile-account-editor"/);
+  assert.match(page, /updateViaCache: "none"/);
+  const serviceWorker = await readFile(new URL("../public/sw.js", import.meta.url), "utf8");
+  assert.match(serviceWorker, /url\.searchParams\.has\("_rsc"\)/);
+  assert.match(serviceWorker, /includes\("text\/x-component"\)/);
+  assert.match(serviceWorker, /url\.pathname\.startsWith\("\/_next\/"\)/);
   assert.match(state, /resolveSessionIdentity/);
   assert.match(migration, /CREATE TABLE `auth_sessions`/);
 });

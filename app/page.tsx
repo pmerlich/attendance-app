@@ -1151,7 +1151,11 @@ export default function Home() {
     };
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
-    if ("serviceWorker" in navigator) void navigator.serviceWorker.register("/sw.js?v=2026-09-03-audit-1").catch(() => undefined);
+    if ("serviceWorker" in navigator) {
+      void navigator.serviceWorker.register("/sw.js?v=2026-09-07-rsc-cache-fix", { updateViaCache: "none" })
+        .then((registration) => registration.update())
+        .catch(() => undefined);
+    }
 
     void (async () => {
       const cached = await readCachedState<StoredState>().catch(() => undefined);
