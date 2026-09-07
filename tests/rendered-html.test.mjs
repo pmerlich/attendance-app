@@ -372,6 +372,40 @@ test("P2-03/P2-04: docs match shipped offline-attachment behavior, and small bad
   assert.doesNotMatch(css, /\.sync-popover button \{[^}]*background: var\(--green\);/);
 });
 
+test("P2-11/P2-12/P2-13/P2-14/P2-16: low-severity hardening and polish findings", async () => {
+  const worker = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
+  const layout = await readFile(new URL("../app/layout.tsx", import.meta.url), "utf8");
+  const manifest = JSON.parse(await readFile(new URL("../public/manifest.webmanifest", import.meta.url), "utf8"));
+  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+  const authRoute = await readFile(new URL("../app/api/auth/route.ts", import.meta.url), "utf8");
+  const dependabot = await readFile(new URL("../.github/dependabot.yml", import.meta.url), "utf8");
+
+  // P2-16: defense-in-depth response headers, no functional impact expected for this app.
+  assert.match(worker, /headers\.set\("cross-origin-opener-policy", "same-origin"\)/);
+  assert.match(worker, /headers\.set\("cross-origin-resource-policy", "same-site"\)/);
+
+  // P2-11: the browser-chrome theme color (viewport.themeColor) must match the installed-PWA
+  // splash/status-bar color (manifest theme_color) - they used to disagree (blue vs green).
+  assert.match(layout, /themeColor: "#1e7a59"/);
+  assert.equal(manifest.theme_color, "#1e7a59");
+  // Dead CSS with zero usage in app/page.tsx (confirmed by grep before removal).
+  assert.doesNotMatch(css, /@keyframes pulseGreen/);
+  assert.doesNotMatch(css, /\.connection \{ color: var\(--muted\)/);
+
+  // P2-12: Dependabot PRs get the same npm run check gate as a human PR (see ci.yml).
+  assert.match(dependabot, /package-ecosystem: "npm"/);
+  assert.match(dependabot, /interval: "weekly"/);
+
+  // P2-13: a small fixed floor on the "account not found" branch of requestPasswordReset
+  // narrows (does not eliminate) the timing gap versus the "account exists" branch, which does
+  // strictly more work (a db.batch() write plus an outbound Resend call) before responding.
+  assert.match(authRoute, /\} else \{[\s\S]{0,800}setTimeout\(resolve, 200\)/);
+
+  // P2-14: auth_tokens must not grow unbounded like offline_operations would without its own
+  // prune - piggybacked on the same db.batch() the reset-request flow already writes to.
+  assert.match(authRoute, /DELETE FROM auth_tokens WHERE user_id = \? AND \(used_at IS NOT NULL OR expires_at < CURRENT_TIMESTAMP\)/);
+});
+
 test("P2-07: unhandled Worker errors are caught, logged, and answered with security headers", async () => {
   const worker = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
   // Before this fix there was no top-level catch at all - an exception from handler.fetch()

@@ -1,0 +1,9 @@
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # ci.yml already gates every PR with typecheck+lint+build+test (npm run check),
+    # so Dependabot's version-bump PRs get the same validation as a human's PR.
+    open-pull-requests-limit: 10

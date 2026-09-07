@@ -33,6 +33,12 @@ function secureResponse(response: Response, url: URL, request: Request) {
   headers.set("x-frame-options", "DENY");
   headers.set("referrer-policy", "strict-origin-when-cross-origin");
   headers.set("permissions-policy", "camera=(self), geolocation=(), microphone=()");
+  // Defense-in-depth, no expected functional impact: this app never embeds cross-origin
+  // resources itself, and no legitimate page embeds it either. Waze/Google Maps links use
+  // target="_blank" navigation to a different origin (unaffected by isolating our own
+  // browsing context group), and /_vinext/image is a same-origin request.
+  headers.set("cross-origin-opener-policy", "same-origin");
+  headers.set("cross-origin-resource-policy", "same-site");
   const developmentScripts = url.hostname === "localhost" || url.hostname === "127.0.0.1" ? " 'unsafe-eval'" : "";
   // script-src needs 'unsafe-inline': vinext/@vitejs/plugin-rsc streams Suspense boundary
   // data to the client via inline <script> tags (confirmed by rendering the built worker -

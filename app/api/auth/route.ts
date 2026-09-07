@@ -132,6 +132,10 @@ export async function POST(request: Request) {
         // reset the password after the user requested (and used) a newer one.
         authEnv.DB.prepare("UPDATE auth_tokens SET used_at = CURRENT_TIMESTAMP WHERE user_id = ? AND purpose = 'reset_password' AND used_at IS NULL").bind(user.id),
         authEnv.DB.prepare("INSERT INTO auth_tokens (id, user_id, token_hash, purpose, expires_at) VALUES (?, ?, ?, 'reset_password', datetime('now', '+1 hour'))").bind(crypto.randomUUID(), user.id, await sha256(rawToken)),
+        // Opportunistic cleanup, piggybacked on a write this table already gets (same pattern
+        // as offline_operations' 90-day prune below): used/expired tokens for this user are
+        // never needed again, otherwise this table only ever grows.
+        authEnv.DB.prepare("DELETE FROM auth_tokens WHERE user_id = ? AND (used_at IS NOT NULL OR expires_at < CURRENT_TIMESTAMP)").bind(user.id),
       ]);
       const resetUrl = `${new URL(request.url).origin}/?resetToken=${rawToken}`;
       try {
@@ -139,6 +143,13 @@ export async function POST(request: Request) {
       } catch (error) {
         console.error("[auth] failed to send password reset email", error);
       }
+    } else {
+      // The "account exists" branch above does strictly more work (a db.batch() write plus an
+      // outbound call to Resend) before reaching the same response below - a narrow timing side
+      // channel for exactly what the identical response body is meant to hide. A small fixed
+      // floor here isn't a perfect match for real-world network latency, but meaningfully closes
+      // the gap for negligible cost; already bounded by the rate limit above either way.
+      await new Promise((resolve) => setTimeout(resolve, 200));
     }
     // Same response whether or not the address belongs to a real account, so this endpoint
     // cannot be used to enumerate registered emails.
