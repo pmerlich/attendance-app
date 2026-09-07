@@ -1,7 +1,8 @@
 import { env } from "cloudflare:workers";
-import { clearSessionCookie, createSession, ensureAuthSchema, hashPassword, resolveSessionIdentity, sessionToken, sha256, verifyPassword } from "../../auth-core";
+import { clearSessionCookie, createSession, ensureAuthSchema, hashPassword, randomToken, resolveSessionIdentity, sessionToken, sha256, verifyPassword } from "../../auth-core";
+import { sendPasswordResetEmail } from "../../email";
 
-type AuthEnv = { DB: D1Database; FILES: R2Bucket };
+type AuthEnv = { DB: D1Database; FILES: R2Bucket; RESEND_API_KEY?: string; RESEND_FROM_EMAIL?: string };
 const authEnv = env as unknown as AuthEnv;
 
 function clean(value: FormDataEntryValue | null, max: number) { const text = String(value ?? "").trim(); return text && text.length <= max ? text : null; }
@@ -14,6 +15,11 @@ function validPassword(value: string) { return value.length >= 12 && value.lengt
 function sameOrigin(request: Request) { const origin = request.headers.get("origin"); return !origin || origin === new URL(request.url).origin; }
 function validImageSignature(type: string, bytes: Uint8Array) { const ascii = (start: number, length: number) => String.fromCharCode(...bytes.slice(start, start + length)); if (type === "image/jpeg") return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff; if (type === "image/png") return bytes.slice(0, 8).every((value, index) => value === [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a][index]); return type === "image/webp" && ascii(0, 4) === "RIFF" && ascii(8, 4) === "WEBP"; }
 async function loginKey(request: Request, email: string) { return sha256(`${request.headers.get("cf-connecting-ip") ?? "local"}:${email}`); }
+// Distinct hash namespaces from loginKey() so password-reset requests never inflate the
+// login lockout counter (that counter only filters by attempt_key, so an unrelated key
+// prefix is enough to keep the two rate limits from contaminating each other).
+async function resetRequestKey(request: Request, email: string) { return sha256(`reset-request:${request.headers.get("cf-connecting-ip") ?? "local"}:${email}`); }
+async function resetConsumeKey(request: Request) { return sha256(`reset-consume:${request.headers.get("cf-connecting-ip") ?? "local"}`); }
 function contactFieldError(firstName: string | null, lastName: string | null, phone: string | null, email: string | null) {
   if (!firstName) return "יש להזין שם פרטי (עד 80 תווים)";
   if (!lastName) return "יש להזין שם משפחה (עד 80 תווים)";
@@ -108,6 +114,64 @@ export async function POST(request: Request) {
     await authEnv.DB.prepare("INSERT INTO auth_login_attempts (id, attempt_key, succeeded) VALUES (?, ?, 1)").bind(crypto.randomUUID(), attemptKey).run();
     await authEnv.DB.prepare("UPDATE auth_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND expires_at <= CURRENT_TIMESTAMP AND revoked_at IS NULL").bind(user.id).run();
     return json({ authenticated: true }, 200, await createSession(authEnv.DB, user.id, request));
+  }
+
+  if (action === "requestPasswordReset") {
+    const email = String(form.get("email") ?? "").trim().toLocaleLowerCase();
+    if (!email || !validEmail(email)) return json({ error: "כתובת האימייל אינה תקינה" }, 400);
+    const attemptKey = await resetRequestKey(request, email);
+    const attempts = await authEnv.DB.prepare("SELECT COUNT(*) AS count FROM auth_login_attempts WHERE attempt_key = ? AND created_at > datetime('now', '-15 minutes')").bind(attemptKey).first<{ count: number }>();
+    if (Number(attempts?.count ?? 0) >= 5) return json({ error: "בוצעו יותר מדי בקשות לאיפוס סיסמה. יש להמתין 15 דקות ולנסות שוב" }, 429);
+    await authEnv.DB.prepare("INSERT INTO auth_login_attempts (id, attempt_key, succeeded) VALUES (?, ?, 0)").bind(crypto.randomUUID(), attemptKey).run();
+    const user = await authEnv.DB.prepare("SELECT id, email, first_name AS firstName FROM users WHERE lower(email) = ? AND password_hash IS NOT NULL AND deleted_at IS NULL AND is_active = 1 LIMIT 1").bind(email).first<{ id: string; email: string; firstName: string }>();
+    if (user) {
+      const rawToken = randomToken();
+      await authEnv.DB.batch([
+        // Invalidate any earlier unused reset link for this user so only the most recently
+        // requested one can be used - otherwise an older leaked/forwarded email could still
+        // reset the password after the user requested (and used) a newer one.
+        authEnv.DB.prepare("UPDATE auth_tokens SET used_at = CURRENT_TIMESTAMP WHERE user_id = ? AND purpose = 'reset_password' AND used_at IS NULL").bind(user.id),
+        authEnv.DB.prepare("INSERT INTO auth_tokens (id, user_id, token_hash, purpose, expires_at) VALUES (?, ?, ?, 'reset_password', datetime('now', '+1 hour'))").bind(crypto.randomUUID(), user.id, await sha256(rawToken)),
+      ]);
+      const resetUrl = `${new URL(request.url).origin}/?resetToken=${rawToken}`;
+      try {
+        await sendPasswordResetEmail(authEnv, { to: user.email, name: user.firstName || "", resetUrl });
+      } catch (error) {
+        console.error("[auth] failed to send password reset email", error);
+      }
+    }
+    // Same response whether or not the address belongs to a real account, so this endpoint
+    // cannot be used to enumerate registered emails.
+    return json({ requested: true });
+  }
+
+  if (action === "resetPassword") {
+    const token = String(form.get("token") ?? "");
+    const password = String(form.get("password") ?? "");
+    const confirmPassword = String(form.get("confirmPassword") ?? "");
+    if (!token) return json({ error: "קישור האיפוס אינו תקין" }, 400);
+    if (!validPassword(password)) return json({ error: "הסיסמה צריכה לכלול לפחות 12 תווים, אות אחת ומספר אחד לפחות" }, 400);
+    if (password !== confirmPassword) return json({ error: "אימות הסיסמה אינו תואם לסיסמה שהוזנה" }, 400);
+    const consumeKey = await resetConsumeKey(request);
+    const consumeAttempts = await authEnv.DB.prepare("SELECT COUNT(*) AS count FROM auth_login_attempts WHERE attempt_key = ? AND created_at > datetime('now', '-15 minutes')").bind(consumeKey).first<{ count: number }>();
+    if (Number(consumeAttempts?.count ?? 0) >= 20) return json({ error: "בוצעו יותר מדי ניסיונות. יש להמתין 15 דקות ולנסות שוב" }, 429);
+    const tokenHash = await sha256(token);
+    const record = await authEnv.DB.prepare(`SELECT t.id AS tokenId, u.id AS userId FROM auth_tokens t JOIN users u ON u.id = t.user_id
+      WHERE t.token_hash = ? AND t.purpose = 'reset_password' AND t.used_at IS NULL AND t.expires_at > CURRENT_TIMESTAMP
+        AND u.deleted_at IS NULL AND u.is_active = 1 LIMIT 1`).bind(tokenHash).first<{ tokenId: string; userId: string }>();
+    if (!record) {
+      await authEnv.DB.prepare("INSERT INTO auth_login_attempts (id, attempt_key, succeeded) VALUES (?, ?, 0)").bind(crypto.randomUUID(), consumeKey).run();
+      return json({ error: "קישור האיפוס אינו תקין או שפג תוקפו. ניתן לבקש קישור חדש" }, 400);
+    }
+    // Resetting the password revokes every existing session (not just "other" sessions like
+    // changePassword does) since, unlike changePassword, the requester never proved they hold
+    // the current session - only that they control the mailbox the reset link went to.
+    await authEnv.DB.batch([
+      authEnv.DB.prepare("UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(await hashPassword(password), record.userId),
+      authEnv.DB.prepare("UPDATE auth_tokens SET used_at = CURRENT_TIMESTAMP WHERE id = ?").bind(record.tokenId),
+      authEnv.DB.prepare("UPDATE auth_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND revoked_at IS NULL").bind(record.userId),
+    ]);
+    return json({ authenticated: true }, 200, await createSession(authEnv.DB, record.userId, request));
   }
 
   if (action === "logout") {

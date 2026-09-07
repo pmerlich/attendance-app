@@ -858,6 +858,10 @@ export default function Home() {
   });
   const [authRequired, setAuthRequired] = useState(false);
   const [accountReady, setAccountReady] = useState(false);
+  // Read once on first render (not in an effect): a person following a password-reset
+  // email link is never logged in, so this must short-circuit the normal
+  // account-loading/sign-in flow below rather than wait for it.
+  const [resetToken] = useState<string | null>(() => (typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("resetToken")));
   const [recentTimeEntries, setRecentTimeEntries] = useState<TimeEntry[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
@@ -1190,6 +1194,9 @@ export default function Home() {
     deleteLegacyUnscopedStore();
 
     void (async () => {
+      // A password-reset link is handled entirely by ResetPasswordView, unauthenticated;
+      // skip account loading so it doesn't race an identity fetch that would 401 anyway.
+      if (resetToken) return;
       const inviteToken = new URLSearchParams(window.location.search).get("invite");
 
       if (!navigator.onLine) {
@@ -1846,6 +1853,7 @@ export default function Home() {
     }
   }
 
+  if (resetToken) return <ResetPasswordView token={resetToken} />;
   if (!accountReady) return <AccountLoadingView />;
   if (offlineWithoutCache) return <OfflineUnavailableView />;
   if (authRequired) return <SignInView />;
@@ -3260,18 +3268,91 @@ function OfflineUnavailableView() {
 }
 
 function SignInView() {
-  const [mode, setMode] = useState<"login" | "register">("login");
+  const [mode, setMode] = useState<"login" | "register" | "forgot">("login");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  function switchMode(next: "login" | "register" | "forgot") { setMode(next); setError(""); setNotice(""); }
   async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setError(""); setSubmitting(true);
+    event.preventDefault(); setError(""); setNotice(""); setSubmitting(true);
     try {
-      const form = new FormData(event.currentTarget); form.set("action", mode);
+      const form = new FormData(event.currentTarget); form.set("action", mode === "forgot" ? "requestPasswordReset" : mode);
       const response = await fetch("/api/auth", { method: "POST", body: form });
       const payload = await response.json().catch(() => ({})) as { error?: string };
       if (!response.ok) throw new Error(payload.error ?? "הפעולה נכשלה");
+      if (mode === "forgot") {
+        setNotice("אם קיים חשבון עם כתובת המייל הזו, נשלח אליו מייל עם קישור לאיפוס הסיסמה. יש לבדוק גם בתיקיית הספאם.");
+        setSubmitting(false);
+        return;
+      }
       window.location.reload();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "הפעולה נכשלה"); setSubmitting(false); }
+  }
+  return (
+    <main className="sign-in-shell">
+      <NoticeToast notice={error ? { kind: "error", text: error } : notice ? { kind: "success", text: notice } : null} close={() => { setError(""); setNotice(""); }} />
+      <section className="sign-in-card auth-card">
+        <Image className="sign-in-logo" src="/app-icon.png" width={82} height={82} alt="מנהל עבודה" />
+        <p>מנהל עבודה</p>
+        <h1>{mode === "login" ? "כניסה לחשבון" : mode === "register" ? "יצירת חשבון חדש" : "איפוס סיסמה"}</h1>
+        {mode !== "forgot" && (
+          <div className="auth-tabs">
+            <button type="button" className={mode === "login" ? "active" : ""} onClick={() => switchMode("login")}>כניסה</button>
+            <button type="button" className={mode === "register" ? "active" : ""} onClick={() => switchMode("register")}>הרשמה</button>
+          </div>
+        )}
+        {mode === "forgot" && !notice && <p className="auth-forgot-hint">יש להזין את כתובת המייל של החשבון, ונשלח אליה קישור לקביעת סיסמה חדשה.</p>}
+        {!notice && (
+          <form className="auth-form" onSubmit={submit} encType="multipart/form-data" onInvalidCapture={(event) => {
+            const field = event.target;
+            if (!(field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement)) return;
+            setError(invalidFieldMessage(field));
+          }}>
+            {mode === "register" && <div className="auth-name-grid"><label><span>שם פרטי</span><input name="firstName" autoComplete="given-name" required /></label><label><span>שם משפחה</span><input name="lastName" autoComplete="family-name" required /></label></div>}
+            {mode === "register" && <label><span>טלפון</span><input name="phone" type="tel" dir="ltr" autoComplete="tel" required /></label>}
+            <label><span>כתובת מייל</span><input name="email" type="email" dir="ltr" autoComplete="email" required /></label>
+            {/* No minLength on login: existing accounts may have a shorter password already set
+                (the server-side minimum only ever applies going forward), and an HTML5
+                minLength here would block a valid login from submitting at all. */}
+            {mode !== "forgot" && <label><span>סיסמה</span><input name="password" type="password" dir="ltr" minLength={mode === "register" ? 12 : undefined} autoComplete={mode === "login" ? "current-password" : "new-password"} required /></label>}
+            {mode === "register" && <label><span>אימות סיסמה</span><input name="confirmPassword" type="password" dir="ltr" minLength={12} autoComplete="new-password" required /></label>}
+            {mode === "register" && <label className="auth-upload"><span>תמונת פרופיל (אופציונלי)</span><input name="profileImage" type="file" accept="image/jpeg,image/png,image/webp" /><small>JPG, PNG או WEBP עד 5MB</small></label>}
+            {mode === "register" && <small>הסיסמה צריכה לכלול לפחות 12 תווים, אות ומספר.</small>}
+            <button type="submit" className="primary-button" disabled={submitting}>{submitting ? "נא להמתין…" : mode === "login" ? "כניסה" : mode === "register" ? "יצירת חשבון" : "שליחת קישור לאיפוס"}</button>
+          </form>
+        )}
+        {mode === "login" && <button type="button" className="auth-forgot-link" onClick={() => switchMode("forgot")}>שכחתי סיסמה</button>}
+        {mode === "forgot" && <button type="button" className="auth-forgot-link" onClick={() => switchMode("login")}>חזרה לכניסה</button>}
+      </section>
+    </main>
+  );
+}
+
+function ResetPasswordView({ token }: { token: string }) {
+  const [error, setError] = useState("");
+  const [done, setDone] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  useEffect(() => {
+    // Scrub the one-time token out of the visible URL/browser history as soon as this view
+    // mounts, not only after a successful submit - it stays available to `submit()` via the
+    // `token` prop either way, so nothing about the flow depends on it remaining in the URL.
+    window.history.replaceState({}, "", window.location.pathname);
+  }, []);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setError(""); setSubmitting(true);
+    try {
+      const form = new FormData(event.currentTarget);
+      form.set("action", "resetPassword");
+      form.set("token", token);
+      const response = await fetch("/api/auth", { method: "POST", body: form });
+      const payload = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(payload.error ?? "איפוס הסיסמה נכשל");
+      // The server already logged the account in (fresh session cookie) as part of the
+      // reset; reloading now (URL already scrubbed on mount, above) hands off to the normal
+      // signed-in flow.
+      setDone(true);
+      window.location.reload();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "איפוס הסיסמה נכשל"); setSubmitting(false); }
   }
   return (
     <main className="sign-in-shell">
@@ -3279,25 +3360,18 @@ function SignInView() {
       <section className="sign-in-card auth-card">
         <Image className="sign-in-logo" src="/app-icon.png" width={82} height={82} alt="מנהל עבודה" />
         <p>מנהל עבודה</p>
-        <h1>{mode === "login" ? "כניסה לחשבון" : "יצירת חשבון חדש"}</h1>
-        <div className="auth-tabs"><button type="button" className={mode === "login" ? "active" : ""} onClick={() => { setMode("login"); setError(""); }}>כניסה</button><button type="button" className={mode === "register" ? "active" : ""} onClick={() => { setMode("register"); setError(""); }}>הרשמה</button></div>
-        <form className="auth-form" onSubmit={submit} encType="multipart/form-data" onInvalidCapture={(event) => {
+        <h1>קביעת סיסמה חדשה</h1>
+        <form className="auth-form" onSubmit={submit} onInvalidCapture={(event) => {
           const field = event.target;
           if (!(field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement)) return;
           setError(invalidFieldMessage(field));
         }}>
-          {mode === "register" && <div className="auth-name-grid"><label><span>שם פרטי</span><input name="firstName" autoComplete="given-name" required /></label><label><span>שם משפחה</span><input name="lastName" autoComplete="family-name" required /></label></div>}
-          {mode === "register" && <label><span>טלפון</span><input name="phone" type="tel" dir="ltr" autoComplete="tel" required /></label>}
-          <label><span>כתובת מייל</span><input name="email" type="email" dir="ltr" autoComplete="email" required /></label>
-          {/* No minLength on login: existing accounts may have a shorter password already set
-              (the server-side minimum only ever applies going forward), and an HTML5
-              minLength here would block a valid login from submitting at all. */}
-          <label><span>סיסמה</span><input name="password" type="password" dir="ltr" minLength={mode === "register" ? 12 : undefined} autoComplete={mode === "login" ? "current-password" : "new-password"} required /></label>
-          {mode === "register" && <label><span>אימות סיסמה</span><input name="confirmPassword" type="password" dir="ltr" minLength={12} autoComplete="new-password" required /></label>}
-          {mode === "register" && <label className="auth-upload"><span>תמונת פרופיל (אופציונלי)</span><input name="profileImage" type="file" accept="image/jpeg,image/png,image/webp" /><small>JPG, PNG או WEBP עד 5MB</small></label>}
-          {mode === "register" && <small>הסיסמה צריכה לכלול לפחות 12 תווים, אות ומספר.</small>}
-          <button type="submit" className="primary-button" disabled={submitting}>{submitting ? "נא להמתין…" : mode === "login" ? "כניסה" : "יצירת חשבון"}</button>
+          <label><span>סיסמה חדשה</span><input name="password" type="password" dir="ltr" minLength={12} autoComplete="new-password" required /></label>
+          <label><span>אימות סיסמה</span><input name="confirmPassword" type="password" dir="ltr" minLength={12} autoComplete="new-password" required /></label>
+          <small>הסיסמה צריכה לכלול לפחות 12 תווים, אות ומספר.</small>
+          <button type="submit" className="primary-button" disabled={submitting || done}>{done ? "הסיסמה עודכנה…" : submitting ? "נא להמתין…" : "שמירת הסיסמה החדשה"}</button>
         </form>
+        <button type="button" className="auth-forgot-link" onClick={() => { window.location.href = window.location.pathname; }}>חזרה לכניסה</button>
       </section>
     </main>
   );

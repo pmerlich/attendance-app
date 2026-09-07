@@ -1217,6 +1217,8 @@ img, svg, iframe { max-width: 100%; }
 .auth-upload { padding:12px; border:1px dashed #a9c8bb; border-radius:10px; background:#f8fbfa; }
 .auth-upload input { padding:8px; }
 .auth-upload small,.auth-form > small { margin:0; }
+.auth-forgot-link { display:block; width:100%; margin-top:14px; background:transparent; border:0; color:var(--green-dark); font-weight:700; font-size:13px; text-decoration:underline; text-underline-offset:2px; min-height:32px; }
+.auth-forgot-hint { margin:0 0 4px; color:var(--muted); font-size:13px; line-height:1.5; text-align:right; }
 .profile-avatar img { width:100%; height:100%; border-radius:inherit; object-fit:cover; }
 .account-loading-card { text-align:center; }
 .account-loading-bar { height:5px; margin-top:22px; overflow:hidden; border-radius:999px; background:#dcebe5; }

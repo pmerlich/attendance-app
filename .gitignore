@@ -30,6 +30,8 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# Wrangler's local secrets file (RESEND_API_KEY etc. for `npm run dev`) - never commit.
+.dev.vars*
 
 # vercel
 .vercel

@@ -1,647 +1,474 @@
-# Full Codex Audit — Menahel Avoda (מנהל עבודה)
+# Full Audit Report — מנהל עבודה (menahel-avoda) — Pass 2
 
-**Audit date:** 2026-09-07
-**Branch audited:** `fix/sync-replay-validation` (compared against `main`; the difference is `app/api/auth/route.ts`, `app/api/state/route.ts`, `app/auth-core.ts`, `app/globals.css`, `app/page.tsx`, `docs/AUTH_ACCOUNTS.md`, `tests/rendered-html.test.mjs`)
-**Scope:** `app/`, `worker/`, `db/`, `drizzle/`, `tests/`, `scripts/`, `public/`, root config files, and all project documentation under `docs/`.
-**Mode:** Phase 1, read-only, per `docs/codex-rules/EXISTING_PROJECT_AUDIT_PROMPT.md` and `CLAUDE.md`.
+**Date:** 2026-09-07 (this session) — **supersedes/updates** the same-day earlier audit in this file. That earlier audit's findings (IDs `C-01`, `H-01`, `H-02`, `M-01`–`M-05`, `L-01`–`L-07`) were tracked to closure in `docs/codex-rules/REMEDIATION_CHECKLIST.md` and are **not re-derived from scratch here** — this pass re-verifies the current code against them (§C) and adds a second, independent read-only pass covering categories the first audit weighted less heavily (accessibility, offline-conflict UX, testing methodology, operational logging, privacy, PWA polish), plus a self-review of the password-reset feature added earlier in this same session.
 
-This is a source-code and configuration review. It is not a penetration test, not a formal certification, and not proof of compliance with any external standard (OWASP, CASA, GDPR, or otherwise). Where a claim could not be verified safely in a read-only, non-production context, it is marked `NOT VERIFIED` or `REQUIRES RUNTIME VERIFICATION` rather than guessed.
+**Scope:** `app/`, `db/`, `worker/`, `public/`, `tests/`, `docs/`, config files, `.github/workflows/`. Read-only inspection; no destructive commands run; no dependencies installed/upgraded; no migrations executed; no deployment performed.
+
+**Baseline commit:** `b33cf87` (branch `fix/audit-remediation-2026-09`), plus this session's own commit-pending changes: `app/email.ts` (new), `app/api/auth/route.ts`, `app/page.tsx`, `app/globals.css`, `cloudflare-env.d.ts`, `.gitignore`, and doc updates to `docs/AUTH_ACCOUNTS.md`/`docs/DECISIONS.md` — all implementing the password-reset-by-email feature. **Line numbers below for `app/page.tsx` were re-verified against the current file (post password-reset changes); line numbers for files this session did not touch (`app/api/state/route.ts`, `app/auth-core.ts`, `app/globals.css` before line ~1219, `worker/index.ts`) are unaffected by that change.**
 
 ---
 
 ## A. Executive Summary
 
-**Overall health:** This is a substantially complete, carefully engineered MVP. The team's own internal audit trail (`docs/PROJECT_AUDIT_HE.md`, dated 2026-09-03, and its follow-up `docs/SOLO_WORKER_AUDIT.md`) already found and fixed a long list of real defects — money stored in floating point, unscoped IndexedDB, missing conflict detection, unbounded report queries, client selection by name instead of id, and more. Independent re-verification in this audit confirms nearly all of those fixes are genuinely in place and working (typecheck, lint, production build, and all 11 automated regression tests pass cleanly, with no tracked files modified during this review).
+- **No new CRITICAL findings.** The prior audit's one CRITICAL (`C-01`, spoofable identity headers) remains fixed and covered by a regression test.
+- **Two new HIGH findings**, both real but neither an exploitable security hole: a keyboard-accessibility trap on two required form controls (**P2-01**), and a data-integrity/UX gap where offline edits that conflict with a concurrent server-side change are silently discarded instead of surfaced to the user as documented (**P2-02**). The second is the more consequential of the two for a multi-device or multi-employee deployment.
+- **Several MEDIUM findings** cluster around operational readiness rather than correctness: the codebase has almost no server-side logging (**P2-07**), the new password-reset email path inherits that blind spot (**P2-08**), backups are automated but restore has never been tested (**P2-06**), the privacy policy still has a placeholder instead of a real contact channel (**P2-09**, already known from the prior audit's `M-02`), and the only test suite is source/HTML-text regression pinning rather than real integration tests against auth/permissions/sync (**P2-05**).
+- **Everything CRITICAL/HIGH from the prior audit (`C-01`, `H-01`, `H-02`) is still fixed** in the current code, verified by re-reading the relevant files and re-running the test suite (11/11 pass) plus `typecheck`/`lint`/`build`.
+- **This session's own new feature (password reset by email) was self-audited** as part of this pass: no CRITICAL/HIGH issues found; one LOW timing-side-channel note (**P2-13**) and one LOW cleanup note (**P2-14**).
+- **Two further LOW hardening gaps** surfaced by cross-checking against this project's own `38-audit-ready-code.mdc`/`39-ship-with-confidence.mdc` rule files: the session cookie doesn't use the `__Host-` prefix (**P2-15**, low practical impact since it's already host-only) and two response headers (`Cross-Origin-Opener-Policy`, `Cross-Origin-Resource-Policy`) are missing (**P2-16**).
+- **Release readiness:** appropriate for continued solo/single-device use. Before onboarding **multiple concurrent devices/employees editing the same records**, P2-02 should be closed first — it is the one finding that can silently lose a real user's data under a documented, expected scenario. Before the password-reset feature is useful to real users, the operator must complete the Resend setup (domain verification + Worker secrets) described in §J below — this is expected follow-up, not a defect.
 
-**Largest risks:** Two problems stand out as release blockers for any deployment reachable by untrusted clients:
+## B. Detected Project Stack (confirmed from repository evidence)
 
-1. **An authentication bypass is still present.** `app/api/state/route.ts` trusts the `oai-authenticated-user-id` / `oai-authenticated-user-email` HTTP headers as proof of identity whenever no session cookie is present, with no verification that these headers were set by a trusted upstream proxy rather than by the client itself. This is the exact CRITICAL finding the project's own `PROJECT_AUDIT_HE.md` already raised; the fix that shipped afterward removed the *automatic guest login for one specific hostname*, but did not close the underlying header-trust hole itself. On the current Cloudflare Workers deployment (a bare `workers.dev` URL, with no proxy layer visible anywhere in this repository that would strip or verify these headers), this looks like a way to obtain a fully working manager account, and potentially to take over a specific real account, without a password — see **C-01**.
-2. **A previously-fixed CSP hardening was silently reverted.** `worker/index.ts` currently ships `script-src 'self' 'unsafe-inline'` to production. Git history shows this exact directive was fixed (removed) once, documented as fixed in `docs/SOLO_WORKER_AUDIT.md` (item S-27), and then reintroduced by a later, unrelated commit (`d9c0e01`, "fix: prevent stale RSC suspense failures") — see **H-01**.
+- **Framework:** `vinext` (Next.js-compatible React Server Components framework) 1.0.0-beta.2, React 19.2.6, `@vitejs/plugin-rsc`.
+- **Runtime/hosting:** Cloudflare Workers (`wrangler` 4.92.0, `@cloudflare/vite-plugin`), no committed `wrangler.toml`/`.json` — config lives in `vite.config.ts`'s `localBindingConfig` and is materialized into `dist/server/wrangler.json` at build time.
+- **Database:** Cloudflare D1 (SQLite), schema defined with Drizzle ORM (`drizzle-orm` 0.45.2, `db/schema.ts`) for typing/migration-authoring, but the runtime tables are actually created/altered via idempotent `CREATE TABLE IF NOT EXISTS`/`ALTER TABLE ... ADD COLUMN` guards inside `app/auth-core.ts`/`app/api/*/route.ts` — a self-healing-schema pattern rather than migrate-then-deploy.
+- **File storage:** Cloudflare R2 (`FILES` binding), private objects (profile images, receipts/attachments).
+- **Styling:** Tailwind CSS v4 tooling is a devDependency but the actual UI (`app/globals.css`, ~1,220+ lines after this session) is hand-written CSS with custom properties, not Tailwind utility classes — confirmed no Tailwind class usage found in `app/page.tsx`.
+- **Auth:** first-party, cookie-session based (`app/auth-core.ts`), PBKDF2-SHA-256 (100,000 iterations - the Workers `crypto.subtle` hard cap) password hashing, SHA-256-hashed session tokens, `HttpOnly`/`SameSite=Lax`/`Secure`(on HTTPS) cookies, 365-day rolling expiry.
+- **Offline:** custom IndexedDB store (`app/offline-store.ts`), a hand-written service worker (`public/sw.js`, network-first shell caching, no API caching), `BroadcastChannel` for same-identity multi-tab sync.
+- **Email (new this session):** Resend (`https://api.resend.com`) via plain `fetch`, no SDK dependency added (`app/email.ts`).
+- **Testing:** `node:test` (built-in), one file (`tests/rendered-html.test.mjs`), driven by `npm test` = build + run.
+- **CI:** GitHub Actions — `.github/workflows/ci.yml` (typecheck+lint+build+test on push/PR) and `.github/workflows/backup.yml` (scheduled D1 export).
+- **Dependencies:** 3 runtime (`drizzle-orm`, `react`, `react-dom`), 24 dev; near-exact version pinning; lockfile committed.
 
-Beyond these two, the codebase is honestly built: no `dangerouslySetInnerHTML`, no string-concatenated SQL anywhere, consistent `business_id`/role scoping on every query, real bcrypt-class password hashing (PBKDF2-SHA-256, 100,000 rounds — the Cloudflare Workers `crypto.subtle` ceiling), sensible file-upload validation (magic-byte checks, size caps), and a genuinely working offline-first sync engine with idempotent-operation replay protection (with one atomicity gap found in this audit, **H-02**).
+## C. Status of the Prior Audit's Findings (re-verified this pass)
 
-**Findings by severity:** 1 CRITICAL, 2 HIGH, 5 MEDIUM, 7 LOW (15 total). See Section E for the full list.
-
-**Release readiness:** Not ready for deployment to any environment reachable by untrusted networks until C-01 is resolved. H-01 should be fixed in the same pass since it is a one-line regression of already-reviewed code. The product itself (project/time/payment/expense tracking, offline sync, reports, RTL Hebrew/German/English UI) is functionally mature and was extensively hand-tested by the team per `docs/STATUS.md`.
-
-This audit does not certify compliance with OWASP ASVS, CASA, GDPR, or any other external standard. It describes what the source code and configuration in this repository actually do, as of the commit audited.
-
----
-
-## B. Detected Project Stack
-
-Detected from `package.json`, `worker/index.ts`, `vite.config.ts`, `.openai/hosting.json`, and actual source files (not from documentation alone):
-
-- **Language:** TypeScript (strict mode), React 19 (Server Components + client components, `"use client"` used explicitly in `app/page.tsx`).
-- **Framework/build:** `vinext` (a Next.js-App-Router-compatible framework) on top of **Vite 8** with `@vitejs/plugin-rsc`; `@openai/sites-vite-plugin` is also wired in (leftover from the original "vinext-starter" / OpenAI Apps SDK template this project was bootstrapped from).
-- **Runtime/hosting:** **Cloudflare Workers** (via `@cloudflare/vite-plugin` and `wrangler` 4.92.0), deployed directly to a `*.workers.dev` subdomain (`menahel-avoda.er2829288.workers.dev`), no separate reverse proxy or API gateway found anywhere in this repository.
-- **Database:** **Cloudflare D1** (SQLite dialect), accessed through **drizzle-orm** 0.45.2 / **drizzle-kit** 0.31.10. Schema in `db/schema.ts`; forward-only SQL migrations in `drizzle/0000`–`0012`.
-- **File storage:** **Cloudflare R2** (bucket `site-creator-r2`, binding `FILES`), private, accessed only through authenticated server routes.
-- **Styling:** Plain CSS with custom properties (`app/globals.css`, 1,551 lines) plus Tailwind CSS 4.2.1 / `@tailwindcss/postcss` present as a dev dependency (not obviously used inside `app/globals.css` — no `@tailwind` directives found there).
-- **Auth:** Custom cookie-session auth (`app/auth-core.ts`, `app/api/auth/route.ts`) — PBKDF2-SHA-256 password hashing, `menahel_session` HttpOnly/SameSite=Lax cookie — plus a second, legacy trusted-header identity path (`oai-authenticated-user-*`) inherited from the starter template (`app/chatgpt-auth.ts`, unused dead code; the same header names are re-implemented inline in `app/api/state/route.ts`).
-- **Offline/PWA:** Hand-written IndexedDB queue (`app/offline-store.ts`), hand-written Service Worker (`public/sw.js`), Web App Manifest (`public/manifest.webmanifest`).
-- **Testing:** Node's built-in `node:test` runner, one file (`tests/rendered-html.test.mjs`, 307 lines, 11 tests) that renders the built Worker and asserts on HTML/source-string content — a regression-test suite tied to specific historical bugs, not a general unit/integration suite.
-- **Lint/type-check:** ESLint 9 (flat config) with `typescript-eslint`, `eslint-plugin-react`, `eslint-plugin-react-hooks`, and `eslint-plugin-jsx-a11y`; TypeScript 5.9.3 in `strict` mode.
-- **No Docker, no Kubernetes, no Terraform, no CI configuration** (no `.github/workflows`, no other CI platform config) — appropriate for a solo-maintained serverless project per this project's own scale, but a genuine gap against automated-quality-gate expectations (see M-03).
-- **i18n:** No formal i18n library; Hebrew is the only UI language, but every free-text field is designed to accept and display mixed Hebrew/German/English content (per `docs/PRODUCT_PLAN.md`); dates/currency go through `Intl.DateTimeFormat`/`Intl.NumberFormat`.
-- **Excel/CSV export:** Hand-rolled, dependency-free `.xlsx` writer (`app/xlsx-export.ts`, valid OOXML/ZIP construction, no third-party library).
-
----
-
-## C. Architecture Map
-
-```
-Browser (RTL Hebrew PWA, React 19 client component in app/page.tsx)
-   │  fetch("/api/state" | "/api/auth", credentials: cookie)
-   ▼
-Cloudflare Worker  (worker/index.ts — single fetch() entry point)
-   │  - adds security response headers (CSP, HSTS, X-Frame-Options, ...)
-   │  - routes /_vinext/image to image optimization, everything else to vinext's app-router-entry
-   ▼
-vinext App Router  (Next.js-App-Router-shaped routing over RSC)
-   ├── app/page.tsx           → the entire UI: dashboard, projects, clients, employees,
-   │                             time entries, payments, expenses, reports, trash, audit log,
-   │                             profile — one 4,517-line client component, local-first state
-   │                             machine, IndexedDB-backed offline queue, BroadcastChannel
-   │                             cross-tab sync.
-   ├── app/api/auth/route.ts  → register / login / logout / updateProfile / changePassword.
-   │                             PBKDF2-SHA-256 passwords, session cookie, login-attempt
-   │                             rate limiting, profile-picture upload with signature checks.
-   └── app/api/state/route.ts → everything else: identity resolution, on-demand schema
-                                 setup/migration-fallback, full CRUD for clients/projects/
-                                 employees/time entries/payments/expenses/attachments,
-                                 timer start/stop, soft-delete + recycle bin + permanent
-                                 purge, employee invitations, financial reports, health check.
-   │
-   ├── D1 database (SQLite)   — businesses, users, clients, projects, project_workers,
-   │                             time_entries, payments, expenses, attachments, audit_log,
-   │                             offline_operations (idempotency), auth_sessions,
-   │                             auth_tokens (unused — no email service wired up),
-   │                             auth_login_attempts, employee_invitations.
-   │                             Every table scoped by business_id (or joins to a table that is).
-   │
-   └── R2 bucket (site-creator-r2) — receipt/photo/PDF attachments and profile pictures,
-                                       private, served only via authenticated /api routes,
-                                       never a public URL.
-
-Offline path: IndexedDB (per business+user scope) holds the last-known state and a
-FIFO operation queue; the UI applies actions optimistically, then replays the queue to
-/api/state with a client-generated operationId that the server de-duplicates via the
-offline_operations table (D-027). A Service Worker caches only the static app shell —
-API responses are explicitly excluded from its cache.
-```
-
-**Identity flow (as implemented today):**
-
-```
-Every request to /api/state or /api/auth
-        │
-        ▼
-resolveSessionIdentity(request)  — looks up the menahel_session cookie against
-        │                          auth_sessions.token_hash (SHA-256 of a random token)
-        │
-   found? ──yes──► use it (real, password-authenticated account)
-        │
-        no
-        ▼
-read request headers "oai-authenticated-user-id" / "-user-email" directly
-        │                (no verification these came from a trusted proxy)
-   both present? ──yes──► synthesize an identity from them, look up/create a business
-        │
-        no
-        ▼
-   401 "requires login" (page shows AccountLoadingView / SignInView)
-```
-
-This is the exact shape flagged CRITICAL in the team's own `docs/PROJECT_AUDIT_HE.md`. See **C-01**.
-
-**Deployment model:** `npm run deploy` runs `npm test` (build + regression tests) then `wrangler deploy --config dist/server/wrangler.json` directly to the `menahel-avoda` Worker. There is no staging environment, no CI gate, and no separate proxy/gateway layer in front of the Worker.
-
----
+| ID | Severity | Title | Status now |
+|---|---|---|---|
+| C-01 | CRITICAL | Spoofable `oai-authenticated-*` identity headers | **Still fixed.** `app/api/state/route.ts` `resolveIdentity()` resolves exclusively via `resolveSessionIdentity()` (cookie); no header-based fallback found in current source. Test "requires a real account on every public host" passes. |
+| H-01 | HIGH | CSP `'unsafe-inline'` in `script-src` | **Deliberately kept**, with an in-code explanation (`worker/index.ts:36-47`) that removing it breaks RSC Suspense streaming in a real browser. This is a documented, tested trade-off, not an open defect — re-confirmed by reading the current header-building code. |
+| H-02 | HIGH | Non-atomic mutation + audit-log writes | **Still fixed.** Every `POST()` mutation branch in `app/api/state/route.ts` pushes onto one shared `writes` array committed via a single `db.batch(writes)` (confirmed via `db.batch(` occurrences and the final commit call). |
+| M-01 | MEDIUM | Missing CSRF same-origin check on `/api/state` | **Still fixed** — `sameOrigin(request)` check present at the top of `POST()`. |
+| M-02 | MEDIUM | No privacy policy | **Partially open** — `public/privacy.html` exists and is linked from the profile screen, but still contains the operator-contact placeholder noted in the original fix. Tracked again as **P2-09** below since it's still actionable. |
+| M-03 | MEDIUM | No CI | **Still fixed** — `.github/workflows/ci.yml` present. **NOT VERIFIED**: whether it is actually green on GitHub (no access to Actions runs from a local read-only checkout). |
+| M-04 | MEDIUM | Dependency vulnerabilities | **Still partially open by design** — `npm audit fix` (no `--force`) already run once (22→14), remaining 14 are devDependency-only major-version bumps deliberately deferred. Not re-run this pass (would touch the lockfile, out of scope for a read-only audit). |
+| M-05 | MEDIUM | No backup/restore automation | **Backup: fixed** (`backup.yml` scheduled + manual). **Restore: still open** — re-confirmed as **P2-06** below; no restore script exists and no restore has been performed. |
+| L-01 | LOW | No dark mode | **Deliberately deferred** (documented rationale: touches 60+ hardcoded colors, real regression risk, cosmetic). No change recommended unless requested. |
+| L-02 | LOW | Password minimum length | **Still fixed** (12 chars, letter+digit, login unaffected for existing shorter passwords). |
+| L-03 | LOW | 365-day session lifetime | **Deliberate product decision**, documented in `docs/AUTH_ACCOUNTS.md`. No change recommended. |
+| L-04 | LOW | Large single files (`app/page.tsx`, `app/api/state/route.ts`) | **Still open, deliberately deferred.** File sizes today: `app/page.tsx` ≈ 4,600+ lines (grew further this session), `app/api/state/route.ts` ≈ 1,144 lines. Re-flagged under **Project Organization** in the coverage matrix (§F) as a standing MEDIUM maintainability note, not a new finding. |
+| L-05 | LOW | Forward-only migrations | **Deliberate**, covered by backup instead. No change recommended. |
+| L-06 | LOW | Stale `docs/STATUS.md` guest-mode entries | **Still fixed** (dated addendum present). |
+| L-07 | LOW | Dead code (`app/chatgpt-auth.ts`) | **Still fixed** (file removed, confirmed absent). |
 
 ## D. Release Blockers
 
-**CRITICAL (must fix before any deployment reachable by an untrusted network):**
+**No CRITICAL findings this pass.** Two HIGH findings are flagged as **should reasonably block a specific usage pattern**, not the whole release:
 
-- **C-01 — Client-controlled identity headers are trusted as authentication** (`app/api/state/route.ts`). See finding below.
+- **P2-02** (offline conflict silently discarded) should be fixed **before** more than one device/employee is expected to edit the same records concurrently. For a genuinely solo, single-device user this is low-probability, but the app's own product plan explicitly supports an "employer with employees" mode where this is a realistic scenario.
+- **P2-01** (keyboard-inaccessible required controls) should be fixed before assuming the app is usable by keyboard-only/screen-reader/switch-device users — currently they cannot complete account setup or create a correctly-billed project at all.
 
-**HIGH findings that should reasonably block release alongside C-01:**
+Neither is a security vulnerability or a risk to data the app has already stored; both are risks to specific users' ability to use the app correctly.
 
-- **H-01 — CSP `script-src 'unsafe-inline'` regression in production** (`worker/index.ts`). A previously-fixed hardening measure was silently reverted.
-- **H-02 — Offline-operation idempotency record is not atomic with the mutation it guards** (`app/api/state/route.ts`). Under the exact "connection drops mid-request" scenario the offline-first architecture is designed to survive, a retried operation can double-apply.
+## E. New Findings (this pass)
 
-If there is no plan to expose this deployment to any network the team does not fully control (e.g., it stays behind a corporate VPN or a trusted reverse proxy that strips inbound `oai-authenticated-*` headers), C-01's practical severity would be lower — but no such proxy is visible anywhere in this repository, and the current public deployment (`menahel-avoda.er2829288.workers.dev`) is a bare Cloudflare Workers URL. Confirming or ruling this out requires infrastructure knowledge outside this repository — see Section H.
+### P2-01 — HIGH — Keyboard accessibility — billing-type and account-mode pickers are unreachable by keyboard
 
----
-
-## E. Findings
-
-### CRITICAL
-
----
-
-**Finding ID:** C-01
-**Severity:** CRITICAL
-**Category:** Security / Authentication / Access Control
-**Type:** Confirmed Defect (Security Issue) — previously identified internally, only partially remediated
-**Location:** `app/api/state/route.ts`, function `resolveIdentity()` (lines 11–23) and `prepareRequest()` (lines 384–400); the same header names are duplicated in the now-removed template file `app/chatgpt-auth.ts` (dead code, not imported from `resolveIdentity`).
-
-**Evidence:**
-```ts
-// app/api/state/route.ts
-async function resolveIdentity(request: Request): Promise<Identity | null> {
-  const sessionIdentity = await resolveSessionIdentity(env.DB, request);
-  if (sessionIdentity) return sessionIdentity;
-  const userId = request.headers.get("oai-authenticated-user-id");
-  const email = request.headers.get("oai-authenticated-user-email");
-  if (userId && email) {
-    ...
-    return { userId, email, displayName, businessId: `business-${key}`, ownerId: `owner-${key}`, role: "manager", isLocal: false, isGuest: false };
-  }
-  return null;
-}
-```
-`prepareRequest()` then looks up `users` by `auth_user_id = rawIdentity.userId` (the raw header value); if a matching row exists it grants that row's real `business_id`/role, and if none exists it silently creates a brand-new business and manager account for that header value via `ensureAccount()`. No signature, no shared secret, and no check that these headers originated from a trusted upstream component is performed anywhere in this repository. `worker/index.ts` (the single Cloudflare Worker entry point) passes the incoming `Request` straight through to `handler.fetch(request, env, ctx)` without stripping or re-validating any inbound header. `docs/PROJECT_AUDIT_HE.md` (dated 2026-09-03, written by the project's own prior audit pass) already names this exact function and recommends "delete client-supplied identity headers before passing them internally, and add an integration test proving a forged request gets 401" — neither has been done. `tests/rendered-html.test.mjs` has no test that sends these headers and expects rejection.
-
-**Problem:** Any client capable of sending arbitrary HTTP headers directly to the Worker's public URL (this is trivial with `curl`/Postman/a script — it does not require defeating CORS, since CORS is a browser-only same-origin protection and does not apply to non-browser HTTP clients, and this Worker sets no CORS headers to begin with) can supply `oai-authenticated-user-id` and `oai-authenticated-user-email` and be treated as an authenticated manager. If the attacker invents an unused id, they get their own free, fully-functional manager account with no password, completely bypassing the registration/login system documented in `docs/AUTH_ACCOUNTS.md`. If the attacker can obtain (guess, phish, or otherwise learn) the internal `id` of an existing real, password-registered user — which is exactly the value that user's own account was assigned as `auth_user_id` at registration time in `app/api/auth/route.ts` (`INSERT INTO users (..., auth_user_id, ...) VALUES (..., userId, ...)` where `userId = crypto.randomUUID()`), and which that same user's own browser receives back on every `/api/state` call as `user.id` in the JSON body — the attacker can fully impersonate that account: read and modify all of that business's clients, projects, employees, financial data, and files, with no password check at all.
-
-**Why It Matters:** This defeats the entire authentication model described in `docs/AUTH_ACCOUNTS.md` (PBKDF2 hashing, login-attempt rate limiting, session cookies) for anyone who does not go through the browser UI. It is a full authentication bypass / account-takeover primitive against a system that stores client PII (names, phone numbers, addresses, emails) and business financial data (project pricing, payments, expenses). It also allows unlimited free account creation (a resource-abuse vector against D1/R2 usage), though this audit does not treat that as the primary risk.
-
-**Recommended Fix:** Pick one of:
-1. If this deployment is only ever meant to be reached through a specific trusted gateway that itself authenticates the end user and injects these headers (the original design intent inherited from the "vinext-starter"/OpenAI Apps SDK template), then the Cloudflare Worker must **strip** any client-supplied `oai-authenticated-*` headers from the incoming `Request` before doing anything else (in `worker/index.ts`, before calling `handler.fetch`), and only re-trust them if a separate, verifiable signal (e.g., a shared secret header set exclusively by that gateway, or Cloudflare Access/mTLS at the edge) confirms the request actually came through that gateway.
-2. Since this project already ships a complete, working password-based account system (`app/auth-core.ts`, `app/api/auth/route.ts`), the simplest and lowest-risk fix compatible with "preserve existing behavior" is to **delete the `oai-authenticated-*` fallback branch in `resolveIdentity()` entirely** and require `resolveSessionIdentity()` (the cookie-based path) for every request. `tests/rendered-html.test.mjs` already asserts `requires a real account on every public host` in spirit; extend it to assert the header fallback branch does not exist.
-Either way, add an integration test that sends a request with only forged `oai-authenticated-*` headers (no session cookie) and asserts a `401`.
-
-**Compatibility Risk:** If any current legitimate traffic path actually relies on a trusted proxy setting these headers (impossible to confirm from source code alone — see Section H), removing the fallback would lock those users out until they register/log in through the password system. Given `docs/AUTH_ACCOUNTS.md` and the merged "real accounts" work (commits `6306c6d`, `4ccfc21`, `c4683bd`, `3523dbe`) describe the password system as the *current* intended path, and the automatic-guest-login shortcut for the public demo hostname was deliberately removed (`docs/SOLO_WORKER_AUDIT.md` S-24/S-26, verified present in `tests/rendered-html.test.mjs` as `requires a real account on every public host`), removing the header fallback looks low-risk and consistent with the project's own stated direction — but this should be confirmed with whoever controls the Cloudflare/DNS configuration before removal.
-
-**Verification After Fix:** (a) An automated test sending only forged `oai-authenticated-*` headers to `/api/state` receives `401`. (b) Manual confirmation that real login/registration via `/api/auth` still works end to end (register → session cookie set → `/api/state` returns data). (c) If a trusted-gateway design is kept instead, a manual test confirming that a request with a client-forged header (sent directly to the Worker, bypassing the gateway) is rejected.
-
----
-
-### HIGH
-
----
-
-**Finding ID:** H-01
-**Severity:** HIGH
-**Category:** Security / Security Headers — regression
-**Type:** Confirmed Defect (Security Issue), regression of previously-shipped fix
-**Location:** `worker/index.ts`, function `secureResponse()`, line 37.
-
-**Evidence:**
-```ts
-const developmentScripts = url.hostname === "localhost" || url.hostname === "127.0.0.1" ? " 'unsafe-eval'" : "";
-headers.set("content-security-policy", `default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'${developmentScripts}; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; frame-src 'self' blob:; connect-src 'self' ws: wss:`);
-```
-`git log -S"script-src 'self' 'unsafe-inline'\${developmentScripts}"` identifies the commit that introduced this exact line: `d9c0e01 fix: prevent stale RSC suspense failures`. The commit immediately prior had `script-src 'self';` (no `'unsafe-inline'`) — and `docs/SOLO_WORKER_AUDIT.md` explicitly records, under item **S-27**, "`unsafe-inline` הוסר מ־`script-src`" ("`unsafe-inline` was removed from `script-src`"), and `docs/PROJECT_AUDIT_HE.md` (the original finding, before the fix) explicitly called out `script-src 'self' 'unsafe-inline'` as a MEDIUM finding to remediate. The `d9c0e01` diff shows the developer adding `'unsafe-eval'` for localhost (a reasonable, scoped dev-only change) and `ws: wss:` to `connect-src` (also reasonable, for Vite HMR) in the same edit that reintroduced `'unsafe-inline'` into `script-src` for every environment, including production.
-
-**Problem:** The currently-deployed production Content-Security-Policy allows any inline `<script>` tag to execute. This is a real regression: the exact hardening step was implemented once, documented as done, and then undone by an unrelated later fix, with nothing in the codebase (no test, no lint rule) that would have caught the regression.
-
-**Why It Matters:** CSP's `script-src` directive is the primary browser-side defense against script injection (stored/reflected XSS). With `'unsafe-inline'` present, that defense is effectively disabled for inline scripts — an attacker who found any way to inject an inline `<script>` tag (this audit did not find such a path — no `dangerouslySetInnerHTML`, no `innerHTML` assignment, and no server-rendered HTML built from unescaped user input were found anywhere in `app/page.tsx`, `app/layout.tsx`, or the API routes) would have it execute. The immediate risk today is therefore a loss of defense-in-depth rather than a demonstrated exploit, but it directly contradicts the project's own documented security posture and rule 38's explicit requirement ("No `unsafe-inline` in `script-src`").
-
-**Recommended Fix:** Restore `script-src 'self'${developmentScripts}` (i.e., keep the `'unsafe-eval'` dev-only addition from `d9c0e01`, but drop `'unsafe-inline'` from the production directive) and re-run the production build to confirm the framework does not inject any inline `<script>` tag into the rendered HTML (the previous, working state before `d9c0e01` proves this is achievable with this exact stack). If a specific inline script genuinely needs to run (e.g., a hydration bootstrap emitted by `vinext`/`@vitejs/plugin-rsc`), prefer a nonce or hash-based CSP source over a blanket `'unsafe-inline'`.
-
-**Compatibility Risk:** Low — the directive was already running this way in production for a period between the original fix and `d9c0e01`, with no regression reported in `docs/STATUS.md` for that window. The change that reintroduced it was aimed at "stale RSC suspense failures," not at script execution, so it is plausible `'unsafe-inline'` was added defensively/experimentally rather than because it was proven necessary — this should be confirmed by testing the production build with it removed before shipping.
-
-**Verification After Fix:** `curl -sI` (or the existing `tests/rendered-html.test.mjs` header assertions, extended) against the built Worker confirms `content-security-policy` no longer contains `'unsafe-inline'` in `script-src`; a full manual click-through of the app (timer start/stop, all modals, navigation) in a real browser confirms nothing is silently broken by the stricter policy (the RSC suspense issue `d9c0e01` was fixing should be specifically re-tested).
-
-> **Correction (2026-09-07, during remediation):** the recommended fix above was applied and then **reverted**. Rendering the actual built Worker output shows the response HTML contains roughly 18 inline `<script>` tags with no `src` attribute — this is how `vinext`/`@vitejs/plugin-rsc` streams Suspense boundary data to the client. Removing `'unsafe-inline'` from `script-src` blocks every one of them and breaks RSC streaming outright (observed live as "The server could not finish this Suspense boundary... Switched to client rendering"), which is almost certainly exactly what commit `d9c0e01` was fixing when it reintroduced the directive. The "silent regression" framing above was therefore incomplete: `d9c0e01` was very likely a deliberate, necessary fix, not an accidental one, and this finding's original recommendation should not be re-attempted without first moving those specific framework-emitted scripts to a nonce/hash-based CSP source and verifying Suspense/streaming in an actual browser. `worker/index.ts` currently keeps `'unsafe-inline'` in `script-src` (with a comment explaining why) — this is correct, current behavior, not an outstanding defect.
-
----
-
-**Finding ID:** H-02
-**Severity:** HIGH
-**Category:** Data Integrity / Real-Time Synchronization
+**Category:** Accessibility / Keyboard accessibility
 **Type:** Confirmed Defect
-**Location:** `app/api/state/route.ts`, `POST()` handler, lines 1137–1143 (the `if (operationId) { await db.batch([...]) }` block that runs after the large `if/else if` chain that performs the actual mutation).
+**Location:** `app/globals.css:353` (`.billing-options input { display: none; }`), `app/globals.css:631` (`.account-mode-options label input { display: none; }`); used at `app/page.tsx:4025` (`<fieldset className="account-mode-options">`) and `app/page.tsx:4534` (`<fieldset className="billing-options">`).
+
+**Evidence:** The real `<input type="radio">` elements backing these two custom-styled pickers are hidden with `display: none`, which removes them from both the accessibility tree and the tab order (unlike `visibility:hidden`-with-focusable patterns). The wrapping `<label>` elements have no `tabIndex` or `onKeyDown` handler to compensate. By contrast, `.worker-checkbox` (employee-assignment checkboxes) uses `accent-color` styling and stays keyboard-operable — the trap is specific to these two radio-styled controls.
+
+**Problem:** A keyboard-only, switch-device, or screen-reader user cannot select an account mode (employee vs. employer, shown during registration/profile setup) or a project billing type (fixed/hourly/combined, required on every project create/edit) at all.
+
+**Why It Matters:** These are required fields on two of the application's most central forms (account setup and project creation/edit). WCAG 2.1.1 (Keyboard) failure on a required, unavoidable control is a hard blocker for the affected users, not a degraded experience.
+
+**Recommended Fix:** Replace `display: none` with a visually-hidden-but-focusable pattern (`position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap;`) so the native input stays in the tab order and responds to arrow keys/Space the way radio groups natively do, and add a visible `:focus-visible` outline on the associated `<label>`/custom control for sighted keyboard users. No JavaScript changes needed — this is a native `<input type="radio">` capability that the current CSS is actively suppressing.
+
+**Compatibility Risk:** Low. Purely a CSS technique swap on already-styled controls; visual appearance for mouse/touch users is unchanged if the visually-hidden pattern is used correctly (verify no 1px-square artifact appears).
+
+**Verification After Fix:** Tab through both forms with a keyboard only (no mouse) and confirm every radio option is reachable, shows a visible focus indicator, and is selectable with Space/arrow keys; run an automated check (axe-core or Lighthouse accessibility audit) against both forms.
+
+---
+
+### P2-02 — HIGH — Offline sync — rejected/conflicting queued operations are silently discarded, contradicting documented behavior
+
+**Category:** Data integrity / Conflict resolution / Offline behavior
+**Type:** Confirmed Defect
+**Location:** `app/page.tsx:1084-1099` (`syncQueuedOperations`), interacting with `app/api/state/route.ts`'s `versionConflict()` 409 responses (`expectedUpdatedAt` mechanism).
 
 **Evidence:**
-```ts
-// Each action's mutation + its own audit_log row is written together, e.g.:
-await db.batch([
-  db.prepare("INSERT INTO payments (...) VALUES (...)").bind(...),
-  db.prepare("INSERT INTO audit_log (...) VALUES (...)").bind(...),
-]);
-// ... falls through to the very end of POST():
-if (operationId) {
-  await db.batch([
-    db.prepare("INSERT OR IGNORE INTO offline_operations (id, business_id, user_id, operation_id) VALUES (?, ?, ?, ?)")
-      .bind(crypto.randomUUID(), businessId, identity.ownerId, operationId),
-    db.prepare("DELETE FROM offline_operations WHERE business_id = ? AND created_at < datetime('now', '-90 days')").bind(businessId),
-  ]);
-}
 ```
-The mutation itself and the idempotency-tracking row (`offline_operations`) are written in **two separate `D1Database.batch()` calls** (two separate transactions), not one. The de-duplication check at the top of `POST()` (`if (operationId) { const completed = await db.prepare(...).first(); if (completed) return ...}`) only works if the `offline_operations` row was actually committed.
+if (response.status >= 500 || response.status === 408 || response.status === 425 || response.status === 429) {
+  interrupted = true; setSyncState("error"); break;
+}
+// Retrying an unchanged 4xx payload cannot succeed. Remove legacy invalid data
+// instead of presenting it forever as a connectivity/sync failure.
+await removeQueuedOperation(operation.id);
+setSyncError("");
+rejected += 1;
+```
+This branch runs for **every** non-{408,425,429,5xx} 4xx response, including a `409` version conflict — the server's response body (which carries the Hebrew error message and a structured `conflict.server` object) is never read (`response.json()` is not called on this path). `lastError` — the field the "remove rejected operations" UI and `retryQueuedOperations()`/`discardRejectedOperations()` both key off — is never set for ordinary operations (only for rejected file attachments, at `app/page.tsx:1149`). `grep` for `.conflict` in `app/page.tsx` finds zero references — the conflict payload the server already computes is never consumed by the client, online or offline.
 
-**Problem:** If the Worker's execution is interrupted (network drop, `waitUntil` timeout, isolate eviction, or any uncaught error) after the first `db.batch()` (the real mutation) commits but before the second `db.batch()` (the idempotency record) runs, the operation is applied but not recorded as completed. The offline-first client architecture this project deliberately built (`app/offline-store.ts`, the retry loop in `syncQueuedOperations()` in `app/page.tsx`) is specifically designed to retry exactly this scenario: the client did not get a clean response, so it keeps the operation in its local queue and resends it — with the same `operationId` — the next time it is online. On resend, the de-duplication check finds no matching row and the mutation runs a second time.
+**Problem:** If a user edits a record while offline (e.g. a time entry, payment, or project), and someone else changes the same record before the device reconnects, the queued edit is deleted with no toast, no banner, and no way to see what was attempted or why it failed — the user's change is simply gone. This directly contradicts the documented behavior in `docs/SOLO_WORKER_AUDIT.md` (S-05: "the rejection is stored on the operation with the server's reason... the user can retry or remove rejected operations"; S-29: "the change is kept in the queue with an explanation and retry/removal actions").
 
-**Why It Matters:** This directly contradicts a specific, explicit product decision: `docs/DECISIONS.md` D-027 states "לכל פעולה מזהה חד־פעמי. השרת שומר מזהי פעולות שהושלמו... ומתעלם משליחה חוזרת, כדי למנוע תשלומים, דיווחים או רשומות כפולים לאחר ניתוק באמצע תשובה" ("every operation has a unique id. The server keeps completed operation ids ... and ignores repeated submission, to prevent duplicate payments, time entries, or records after a disconnect mid-response"). The gap described here is exactly the "disconnect mid-response" scenario the decision says is handled — for actions like `addPayment`, `addExpense`, `addManualTime`, `addClient`, `addProject`, `addEmployee`, this could create a duplicate payment, expense, or time entry, silently inflating a client's balance or a project's cost.
+**Why It Matters:** This is silent data loss for exactly the scenario — an offline edit conflicting with a concurrent server-side change — that the `expectedUpdatedAt`/409 mechanism exists to protect against. The server-side half of conflict detection is solid (confirmed: `expectedUpdatedAt` is sent on every edit type and the server returns a structured 409); it is the client's handling of that response that discards the information instead of acting on it.
 
-**Recommended Fix:** Combine the idempotency-record write into the *same* `db.batch()` call as the mutation for every action, rather than appending it afterward. Concretely: build one array of `D1PreparedStatement`s per action (most branches already build one, e.g. `projectStatements` for `addProject`/`updateProject`), push the `offline_operations` INSERT (and, if desired, the 90-day cleanup DELETE, though that one is not correctness-critical and could remain separate or be moved to a scheduled job) onto that same array, and issue a single `db.batch(...)` per request.
+**Recommended Fix:** On a non-retryable 4xx during replay, read `response.json()`, set `operation.lastError` to the server's message instead of deleting the operation outright (so the existing "remove rejected operations" / retry UI can find it), and surface a visible notice (reusing the existing `NoticeToast`/sync-details popover pattern already used elsewhere) rather than silently clearing `syncError`. Genuinely permanent 4xx cases (e.g. a record deleted server-side, entity no longer exists) may still warrant auto-removal, but should say so to the user rather than vanish unexplained.
 
-**Compatibility Risk:** Low. This changes only the internal batching of already-executing statements; the external API contract (request/response shape, `operationId` semantics) is unchanged. The 90-day cleanup `DELETE` could be pulled out of the hot path entirely (into a scheduled Cron Trigger) as a further improvement, but that is optional.
+**Compatibility Risk:** Low-medium. Touches the sync replay loop's error path; needs a test to confirm (a) a conflicting operation now stays visible and actionable, and (b) genuinely malformed/legacy queued data doesn't pile up forever with no way to clear it (the existing "discard rejected operations" action already provides that escape hatch once `lastError` is set correctly).
 
-**Verification After Fix:** Add a test (or a manual repro) that calls `addPayment` with a fixed `operationId`, forces a failure between "mutation committed" and "idempotency row committed" (e.g., by temporarily throwing after the mutation in a local test harness), replays the same request, and confirms only one payment row exists. At minimum, confirm by code review that the idempotency INSERT is now inside the same `db.batch()` array as the mutation for every action that accepts an `operationId`.
-
----
-
-### MEDIUM
-
----
-
-**Finding ID:** M-01
-**Severity:** MEDIUM
-**Category:** Security / CSRF
-**Type:** Maintainability / Recommendation (defense-in-depth gap, not a demonstrated exploit)
-**Location:** `app/api/state/route.ts`, `POST()` (no origin check); compare `app/api/auth/route.ts` line 51, `if (!sameOrigin(request)) return json({ error: "..." }, 403);`.
-
-**Evidence:** `app/api/auth/route.ts` defines and uses `sameOrigin(request)` to reject cross-origin POSTs before doing any work. `app/api/state/route.ts`, which handles all data-mutating actions (payments, expenses, projects, clients, employees, timers, attachments, invitations), has no equivalent check anywhere in its `POST()` function.
-
-**Problem:** `/api/state` relies solely on the `menahel_session` cookie's `SameSite=Lax` attribute for CSRF protection. `SameSite=Lax` does meaningfully mitigate CSRF for state-changing `POST` requests (modern browsers do not attach `Lax` cookies to cross-site sub-requests, including `fetch`/XHR and cross-site `<form method="POST">` submissions — only top-level cross-site *navigations*, which are always `GET` in this app, receive the cookie), so this is not a demonstrated, exploitable CSRF vulnerability against current mainstream browsers. It is, however, an inconsistency: the same codebase already has a `sameOrigin()` helper and applies it to the smaller, arguably less sensitive `/api/auth` endpoint, but not to the larger, financially-sensitive `/api/state` endpoint.
-
-**Why It Matters:** Defense-in-depth: relying on a single cookie attribute for CSRF protection, with no explicit origin check as a second layer, is inconsistent with this project's own pattern elsewhere and with rule 01/38's explicit CSRF-protection requirements. It would also matter more if `SameSite` were ever accidentally weakened (e.g., during a future refactor) or if a legacy browser without full `SameSite` enforcement were ever in the supported matrix.
-
-**Recommended Fix:** Add the same `sameOrigin(request)` check (or an equivalent shared helper, since the logic is currently duplicated per-file) to the top of `app/api/state/route.ts`'s `POST()`, mirroring `app/api/auth/route.ts`.
-
-**Compatibility Risk:** Very low — this only rejects requests whose `Origin` header does not match the deployment's own origin, which no legitimate same-origin browser request would trigger.
-
-**Verification After Fix:** A test posting to `/api/state` with a mismatched `Origin` header receives `403`; the existing regression tests continue to pass (same-origin requests from the app itself are unaffected).
+**Verification After Fix:** An integration test that queues an operation, changes the same record via a second "session," lets the queue replay, and asserts the operation remains in the queue with a non-empty `lastError` and is visible in the UI; manual verification with two browser tabs/devices editing the same time entry.
 
 ---
 
-**Finding ID:** M-02
-**Severity:** MEDIUM
-**Category:** Privacy / Data Handling
-**Type:** Recommendation
-**Location:** Whole application — no privacy policy page, no data-export or data-erasure self-service flow.
+### P2-03 — MEDIUM — Documentation drift — `docs/DECISIONS.md` D-027 no longer matches shipped offline-attachment behavior
 
-**Evidence:** `db/schema.ts` stores client PII (`clients.name`, `.address`, `.phone`, `.email`) and employee PII (`users.email`, `.displayName`, `.firstName`, `.lastName`, `.phone`, `.hourlyCost`). Sample/demo data in `app/api/state/route.ts`'s `ensureAccount()` uses Paris and Berlin addresses, and `docs/PRODUCT_PLAN.md` explicitly targets German-language users, suggesting real EU-resident client data is plausible. `grep -rli "privacy"` across `app/`, `docs/`, and `public/` returns no hits outside the rule files themselves — there is no privacy policy document, no in-app link to one, and no documented process for a data subject to request export or deletion of their data (the only deletion mechanism is manager-triggered soft-delete / permanent purge of business records, not a self-service "export/delete my data" flow for the data subjects — clients and employees — themselves).
-
-**Problem:** For a tool that stores third-party (client and employee) personal data, there is no privacy notice and no documented data-subject-rights process.
-
-**Why It Matters:** If this system is ever used with real EU clients or employees, GDPR-style expectations (a privacy notice, a way to honor access/erasure requests) become relevant. This audit does not evaluate legal applicability or make a compliance claim — it only notes the absence, which is a real gap against rule 25's "every project handling user data must classify that data ... and honor data subject rights."
-
-**Recommended Fix:** At minimum, add a short privacy notice describing what is collected and why, and document (even if manual, given the current single-business-per-account scale) the process for honoring an access/erasure request. This is a documentation and process gap, not something requiring architectural change today.
-
-**Compatibility Risk:** None — purely additive.
-
-**Verification After Fix:** A privacy notice exists and is reachable from the app; a written procedure exists for handling a data-subject request.
-
----
-
-**Finding ID:** M-03
-**Severity:** MEDIUM
-**Category:** CI/CD
-**Type:** Confirmed Defect (process gap)
-**Location:** Repository root — no `.github/workflows/`, no other CI configuration found anywhere in the repository.
-
-**Evidence:** `find .github -type f` and a repository-wide search for CI configuration (GitLab CI, CircleCI, etc.) returned nothing. `package.json` defines `lint`, `typecheck`, `test`, and `check` scripts, but nothing in the repository invokes them automatically on push or pull request.
-
-**Problem:** There is no automated gate preventing a broken commit (failing lint, failing typecheck, failing tests, or a build that no longer succeeds) from being pushed to any branch, including `main`.
-
-**Why It Matters:** All quality verification currently depends on the developer (or an AI assistant) remembering to run `npm run check` locally before pushing. This audit found the current code to be clean (typecheck, lint, and all 11 tests pass — see Section G), so this is not evidence of an active problem today, but it is a structural gap: nothing stops a future regression like H-01 (the CSP revert) from happening again silently.
-
-**Recommended Fix:** Add a minimal CI workflow (e.g., GitHub Actions, since the repository is hosted on GitHub per the `pmerlich/...` branch references in `git log`) that runs `npm ci && npm run check` on every push and pull request. This is additive and does not touch application code.
-
-**Compatibility Risk:** None to the application; only affects the development workflow.
-
-**Verification After Fix:** A CI run is visible on the next push/PR and fails when `npm run check` fails (can be confirmed by intentionally breaking a test in a throwaway branch).
-
----
-
-**Finding ID:** M-04
-**Severity:** MEDIUM
-**Category:** Supply-Chain / Dependency Security
-**Type:** Recommendation (dev-tooling only — no evidence of production runtime exposure)
-**Location:** `package-lock.json` / `node_modules` (devDependencies transitive tree).
-
-**Evidence:** `npm audit --audit-level=low`, run during this audit, reports **22 vulnerabilities (1 low, 5 moderate, 16 high)**, all inside the transitive dependency tree of devDependencies: `vite`, `wrangler`, `@cloudflare/vite-plugin`, `drizzle-kit` (via `esbuild`/`@esbuild-kit`), `browserslist`, `postcss`, `js-yaml`, `nanoid`, `fast-uri`, `image-size` (via `vinext`), `brace-expansion`, `@babel/core`, `ws`, `undici`. `package.json`'s actual `dependencies` (not `devDependencies`) are only `drizzle-orm`, `react`, and `react-dom` — none of the flagged packages are runtime/production dependencies of the deployed Worker bundle.
-
-**Problem:** These are unpatched known vulnerabilities in the build toolchain (local dev server, Wrangler CLI, Vite dev server, drizzle-kit migration generator). Several (`esbuild`'s dev-server CORS/file-read issue, `vite`'s `server.fs.deny` bypass) are specifically about the **local development server**, not the deployed artifact.
-
-**Why It Matters:** While the production Worker bundle itself is not directly affected (these packages do not ship inside `dist/`), an attacker with network access to a developer's machine while `npm run dev` is running could potentially exploit some of these (e.g., the esbuild dev-server issue allows arbitrary requests/file reads from a malicious webpage open in the same browser). There is also no automated recurring scan (see M-03) to catch newly-disclosed vulnerabilities going forward.
-
-**Recommended Fix:** `npm audit fix` resolves several of these without breaking changes; the remainder require major version bumps (`drizzle-kit`, `vite`, `wrangler`, `vinext`) that should be evaluated and tested deliberately rather than applied blindly — this is explicitly **not done as part of this Phase 1 read-only audit** (dependency/lockfile changes are out of scope here; see Section H). Track this as a scheduled maintenance item and re-run `npm audit` regularly (ideally in the CI workflow from M-03).
-
-**Compatibility Risk:** Low for `npm audit fix` (patch/minor bumps only); the `--force` path (major bumps to `vite`, `wrangler`, `drizzle-kit`, `vinext`) carries real compatibility risk given this project's specific, somewhat unusual `vinext`/RSC/Cloudflare toolchain and should be tested end-to-end (build + full manual click-through) before adoption.
-
-**Verification After Fix:** `npm audit --audit-level=low` reports 0 high/critical vulnerabilities; `npm run check` still passes; a manual smoke test of the app after any dependency bump.
-
----
-
-**Finding ID:** M-05
-**Severity:** MEDIUM
-**Category:** Backup / Disaster Recovery
-**Type:** Recommendation
-**Location:** `scripts/backup.ps1`, `docs/OPERATIONS.md`.
-
-**Evidence:** `scripts/backup.ps1` runs `npx wrangler d1 export $DatabaseName --remote --output $outputFile`, checks the exit code, and checks the output file exists — a reasonable, correctly-error-checked *manual* backup script, invoked via `npm run backup`. `docs/OPERATIONS.md` itself says: "יש להעתיק גיבוי תקופתי לאחסון מוצפן ונפרד מהמחשב ומהחשבון שמארח את היישום" ("a periodic backup should be copied to encrypted storage separate from the machine and the account hosting the app") — i.e., the project's own documentation already identifies this as a manual, not-yet-automated step. There is no scheduled/cron invocation of this script found anywhere in the repository, and no evidence of a tested restore.
-
-**Problem:** Backups exist only when a human remembers to run `npm run backup`, are not verified encrypted-at-rest beyond a manual instruction, and restore has never been tested (per rule 22, "an untested backup is not a backup").
-
-**Why It Matters:** If the D1 database were corrupted or accidentally modified in a way `deleted_at` soft-deletes don't cover (e.g., a bad `UPDATE`/`DELETE` run directly against production), recovery time and confidence both depend entirely on whether a recent backup happens to exist and whether the documented restore steps in `docs/OPERATIONS.md` actually work — neither is currently automated or verified.
-
-**Recommended Fix:** At minimum, schedule `scripts/backup.ps1` (or an equivalent Cloudflare-native mechanism) to run automatically on a fixed cadence, and perform (and document the result of) at least one test restore into a non-production D1 database. This is an operational change, not a code change, and carries no risk to the running application.
-
-**Compatibility Risk:** None to the application.
-
-**Verification After Fix:** A scheduled backup log shows successful runs on the expected cadence; a documented, dated test-restore record exists.
-
----
-
-### LOW
-
----
-
-**Finding ID:** L-01
-**Severity:** LOW
-**Category:** Design System / Accessibility
-**Type:** Recommendation
-**Location:** `app/globals.css` (1,551 lines) — no `prefers-color-scheme` or `[data-theme]` rules found.
-
-**Evidence:** `grep -c "prefers-color-scheme\|data-theme" app/globals.css` returns `0`.
-
-**Problem/Why It Matters:** Rule 09 (`design-system.mdc`) recommends structuring CSS variables to support a dark theme from the start. This app has none. For an internal business tool used mostly indoors/at a desk, this is a polish item, not a functional gap.
-
-**Recommended Fix:** Optional — add a dark palette using the existing CSS custom properties in `app/globals.css` if user demand justifies the effort.
-
-**Compatibility Risk:** None if added additively.
-
-**Verification After Fix:** Manual visual check in both light and dark OS preference.
-
----
-
-**Finding ID:** L-02
-**Severity:** LOW
-**Category:** Authentication / Password Policy
-**Type:** Recommendation
-**Location:** `app/api/auth/route.ts`, function `validPassword()`: `value.length >= 10 && value.length <= 128`.
-
-**Evidence:** Minimum password length is 10 characters; rule 38 recommends a 12-character minimum aligned with CASA, plus a breached-password check (HaveIBeenPwned or equivalent), neither of which is present. The existing policy does correctly avoid composition rules (no forced uppercase/number/symbol beyond "at least one letter and one digit" — `/[A-Za-z\p{L}]/u.test(value) && /\d/.test(value)`) and correctly allows the full Unicode range and pasting.
-
-**Problem/Why It Matters:** A 10-character floor is weaker than the commonly-recommended 12-character baseline; there is no protection against a user choosing a password already known to be breached.
-
-**Recommended Fix:** Raise the minimum to 12 characters in `validPassword()` (both `app/api/auth/route.ts` register/login/changePassword paths); optionally add a HaveIBeenPwned range-query check on registration/password-change.
-
-**Compatibility Risk:** Existing users with 10–11 character passwords would not be forced to change retroactively (their password hash is unaffected), but new registrations/password changes would require the new minimum — a one-line, low-risk change.
-
-**Verification After Fix:** Registration/change-password rejects a well-formed 11-character password with the updated minimum message; existing users can still log in.
-
----
-
-**Finding ID:** L-03
-**Severity:** LOW
-**Category:** Session Management
-**Type:** Recommendation (documented, deliberate product choice)
-**Location:** `app/auth-core.ts`, `SESSION_DAYS = 365`; `resolveSessionIdentity()` renews `expires_at` to `+365 days` on every successful use.
-
-**Evidence:** `docs/AUTH_ACCOUNTS.md` explicitly documents this as intentional: "תוקפו מתחדש לשנה בכל שימוש מוצלח... session לא פעיל פג לאחר שנה" ("validity renews to a year on every successful use ... an inactive session expires after a year"). Rule 38 recommends a 30-minute idle timeout and a 12-hour absolute timeout for standard/sensitive applications.
-
-**Problem/Why It Matters:** A rolling one-year session with no idle timeout means a stolen device or leaked cookie remains usable indefinitely as long as it is used at least once a year. This is a deliberate UX trade-off (favoring "stay logged in" convenience for a daily-use field tool) already documented and decided, not an oversight, but it is a real deviation from hardened-session guidance for an app that holds client PII and financial data.
-
-**Recommended Fix:** Optional — consider a shorter idle timeout with a "remember me" opt-in for the long-lived behavior, if the product direction changes. No action required if the current trade-off remains an accepted product decision.
-
-**Compatibility Risk:** Changing this would affect all currently logged-in users' session lifetime; should be a deliberate product decision, not a silent change.
-
-**Verification After Fix:** N/A unless changed.
-
----
-
-**Finding ID:** L-04
-**Severity:** LOW
-**Category:** Code Quality / Maintainability
+**Category:** Architecture documentation / ADRs
 **Type:** Maintainability
-**Location:** `app/page.tsx` (4,517 lines, one file, one default-exported `Home()` component plus ~40 helper components in the same file); `app/api/state/route.ts` (1,145 lines, one file).
+**Location:** `docs/DECISIONS.md:188` ("העלאת או מחיקת קבצים ... דורשות חיבור לאינטרנט" — uploading or deleting files requires an internet connection) vs. `app/page.tsx:1566-1577` (`uploadAttachment` queues the file as a `Blob` in IndexedDB via `enqueueAttachment()` when offline, with the user-facing message "הקבלה נשמרה במכשיר ותועלה אוטומטית כשיחזור החיבור" — saved on the device, uploads automatically on reconnect).
 
-**Evidence:** `wc -l app/page.tsx` → 4,517; rule 19 recommends a 300–400 line/file guideline and a 30–40 line/function guideline.
+**Problem:** `docs/DECISIONS.md` is one of the three files this project's own `README.md` instructs any session to read first before making changes ("לפני שינוי משמעותי יש לקרוא לפי הסדר..."). Its D-027 entry is stale relative to both the current code and the newer, correct `docs/SOLO_WORKER_AUDIT.md` (S-15: "receipts offline: files are saved as a Blob in IndexedDB... and uploaded automatically on reconnection").
 
-**Problem/Why It Matters:** This is a large deviation from the generic guideline. However, per `CLAUDE.md`'s explicit "Existing Project Protection" instructions, this is **not automatically a defect** — the file is coherent (grouped by UI section, with clearly named helper components), passes strict TypeScript and ESLint (including `react-hooks` rules) cleanly, and is covered by the project's own regression tests. Splitting it is a legitimate future readability investment, not a correctness issue, and an unrequested large refactor of a working, tested file carries real regression risk of its own.
+**Why It Matters:** A future session (human or AI) trusting D-027 at face value could "fix" the working offline-attachment-queueing code to match the stale doc, which would be a real regression.
 
-**Recommended Fix:** If and when further features are added to `app/page.tsx`, consider extracting some of the ~40 already-separated helper components (e.g., `ProjectForm`, `ReportsView`, `ProfileView`) into their own files under a `components/` directory, as a low-risk, incremental refactor rather than a single large rewrite.
+**Recommended Fix:** Update the D-027 bullet to say only deletion, invite-link creation, and permanent purge require connectivity; file upload/attachment queueing does not.
 
-**Compatibility Risk:** Any refactor of this file carries risk purely from its size and central role; should be done incrementally with the existing test suite run after each extraction.
+**Compatibility Risk:** None — documentation-only change.
 
-**Verification After Fix:** N/A unless undertaken; if undertaken, `npm run check` must pass after each incremental extraction.
+**Verification After Fix:** Re-read `docs/DECISIONS.md` and confirm D-027 matches `app/page.tsx`'s actual `onlineOnlyActions` set (`app/page.tsx:444`).
 
 ---
 
-**Finding ID:** L-05
-**Severity:** LOW
-**Category:** Database Migrations
+### P2-04 — MEDIUM — Accessibility/contrast — several small bold UI elements fail WCAG AA
+
+**Category:** Accessibility
+**Type:** Confirmed Defect
+**Location:** `app/globals.css` — `.connection-pill.pending` (line 366: `#d97706` text on `#fef3c7` background, computed ≈2.86:1), `.account-badge` (line 363: `#d97706` on `#fffbeb`, ≈3.07:1), `.invite-button` (line 308: white text on `#059669` at 11px/700 weight, ≈3.77:1), `.sync-popover button` (line 957: white on green at 12px/800 weight, ≈3.77:1).
+
+**Problem:** WCAG 2.1 AA requires ≥4.5:1 contrast for text this small/weight (the "large text" 3:1 exception needs ≥18.66px bold or ≥24px regular, which none of these meet). All four measured combinations fall short.
+
+**Why It Matters:** Low-vision users may not reliably read connection/account-status badges or these buttons' labels.
+
+**Recommended Fix:** For the two status indicators, darken the amber text and/or lighten the background further (or switch to the existing `--amber`/`--amber-light` custom properties instead of the raw hex values currently used, which would make future contrast fixes easier to apply consistently). For the two green buttons, either enlarge/bold the text past the AA "large text" threshold or darken the green background enough to reach 4.5:1 at the current size.
+
+**Compatibility Risk:** Low — color/size-only changes to existing classes.
+
+**Verification After Fix:** Recompute contrast ratios (e.g. via a contrast-checker tool) for all four combinations post-change; visual regression check that badges/buttons still read clearly.
+
+---
+
+### P2-05 — MEDIUM — Testing — the only test suite is source/HTML-text regression pinning, not integration testing
+
+**Category:** Unit / Integration / E2E testing
+**Type:** Release Risk
+**Location:** `tests/rendered-html.test.mjs` (the only file under `tests/`), driven by `npm test`.
+
+**Evidence:** 11 `node:test` cases. Most assert against the built source text or a single unauthenticated-landing-page HTTP response (e.g. `assert.match(api, /db\.batch\(writes\)/)`, `assert.match(page, /function formatMoney/)`). Exactly one test makes a real HTTP request through the built Worker, and it only exercises the unauthenticated landing page.
+
+**Problem:** No test actually logs in, creates two separate business accounts, attempts cross-business access, exercises the manager/employee permission split at the HTTP layer, or replays an offline operation queue against a live D1 instance with a genuine version conflict (the exact scenario in **P2-02** above). This matches the gap the very first audit (`docs/PROJECT_AUDIT_HE.md`, 2026-09-03) already called out, and the gap the project's own `docs/AUTH_ACCOUNTS.md` explicitly flags as still needing a manual two-real-account test before production use.
+
+**Why It Matters:** Regression pinning is valuable (it did catch the shape of the `H-02` atomicity fix, for instance) but cannot detect behavioral defects like P2-02 — a test asserting `expectedUpdatedAt` appears in the source code cannot tell you whether the client actually *acts correctly* when the server returns a 409 because of it.
+
+**Recommended Fix:** Add a second, smaller test file that spins up a real request/response cycle against the built Worker with two distinct authenticated sessions (the `wrangler`/Miniflare tooling this project already depends on for `npm run dev` supports this locally) and asserts: (a) cross-business access is rejected, (b) a manager-only action is rejected for an employee session, (c) a 409 conflict response is correctly reflected back through to a queued operation's `lastError`. This is additive — the existing fast regression tests do not need to be replaced.
+
+**Compatibility Risk:** None if additive. The cost is engineering effort to build the test harness, not application risk.
+
+**Verification After Fix:** New tests pass locally (`npm test`) and in CI (`ci.yml`).
+
+---
+
+### P2-06 — MEDIUM — Backup exists, but restore has never been scripted or tested
+
+**Category:** Backup / Restore / Disaster recovery
+**Type:** Release Risk
+**Location:** `scripts/backup.ps1` (export-only — full file read, no restore logic), `docs/OPERATIONS.md:18-25` (documents a restore drill as something that still needs to be done, in the operator's own words: "גיבוי שלא נבדק בשחזור אינו גיבוי אמין" — a backup that has never been restore-tested is not a reliable backup), `docs/codex-rules/REMEDIATION_CHECKLIST.md` M-05 ("A test restore into a non-production D1 is still not done").
+
+**Problem:** Disaster recovery today depends entirely on a human correctly hand-typing a `wrangler d1 execute --remote --file=...` (or equivalent) command under pressure, with no scripted procedure and no evidence a restore has ever actually succeeded.
+
+**Why It Matters:** An untested backup/restore path is a documented risk the project's own operations doc already calls out — this audit simply reconfirms it is still open.
+
+**Recommended Fix:** Add a `scripts/restore.ps1` mirroring `backup.ps1`'s structure (validation, exit-code checking, clear output), and run it once against a throwaway/staging D1 database (never production) to confirm it actually works end-to-end; record the result and the row-count/spot-check used to confirm success in `docs/OPERATIONS.md`.
+
+**Compatibility Risk:** None if tested against a non-production database first, exactly as the existing documentation already instructs.
+
+**Verification After Fix:** A scripted restore into a staging D1 database succeeds and a spot-check (e.g. row counts per table) matches the source backup.
+
+---
+
+### P2-07 — MEDIUM — Almost no server-side logging inside the Worker
+
+**Category:** Logging / Monitoring
+**Type:** Release Risk
+**Location:** `worker/index.ts`, `app/api/auth/route.ts`, `app/api/state/route.ts` — zero `console.*` calls found in any of them. The only `console.*` call in the entire `app/` tree is `app/error.tsx:6`, a **client-side** React error boundary.
+
+**Problem:** An unhandled exception, a database error, or a failing external call (including the new Resend integration, see **P2-08**) inside the Worker leaves no application-level record — only whatever Cloudflare's own runtime logs capture, and this project has no committed `wrangler.toml` to confirm `observability.enabled` is explicitly set rather than inherited from a build-tool default (`vite.config.ts`'s `localBindingConfig` does not set it).
+
+**Why It Matters:** For an app that stores real names, phone numbers, and wage data, a production error today is effectively invisible to the operator unless they are actively tailing Cloudflare's dashboard logs at the moment it happens. The documented external health-check monitoring (`docs/OPERATIONS.md:35`, hitting `/api/state?health=1` every 5 minutes) can catch total outages but not, e.g., an intermittent email-send failure or a permission-check bug that returns a wrong-but-200 response.
+
+**Recommended Fix:** Add minimal `console.error`/`console.warn` calls at the top-level catch boundaries in `worker/index.ts` and both API route handlers — status code, request path, and a truncated error message; **never log request bodies, cookies, tokens, or passwords**. Confirm `observability.enabled: true` explicitly in the build configuration rather than relying on a default.
+
+**Compatibility Risk:** None — purely additive, no behavior change for users.
+
+**Verification After Fix:** Trigger a deliberate error in a local/preview deployment and confirm it appears in `wrangler tail` or the Cloudflare dashboard's Worker logs.
+
+---
+
+### P2-08 — MEDIUM — Password-reset email failures inherit the P2-07 logging blind spot
+
+**Category:** Monitoring / New-feature self-review
+**Type:** Recommendation (self-identified during this session's own feature work)
+**Location:** `app/api/auth/route.ts` `requestPasswordReset` action (the `catch (error) { console.error(...) }` wrapped around `sendPasswordResetEmail`), `app/email.ts`.
+
+**Problem:** By deliberate design (see D-036 in `docs/DECISIONS.md`), a Resend failure — a bad API key, an unverified sending domain, a provider outage — never surfaces to the end user and never blocks the generic success response (this is *correct*, not a bug: doing otherwise would leak account existence and configuration state to an anonymous caller). But combined with P2-07's near-total absence of visible logging, if the operator misconfigures Resend, **nobody will notice until a real user reports that "forgot password" silently does nothing.**
+
+**Why It Matters:** This is the one operational gap that could make the very feature built this session non-functional in production without any signal to the operator.
+
+**Recommended Fix:** Once P2-07's logging is addressed, this failure mode becomes visible via `wrangler tail`/dashboard logs. As an additional, optional safeguard: have the account owner send themselves one real test reset email as part of the deployment checklist (see §J) rather than relying on logs alone for the very first verification.
+
+**Compatibility Risk:** None.
+
+**Verification After Fix:** Deliberately misconfigure `RESEND_API_KEY` in a preview environment, request a reset, and confirm the failure is now visible in logs.
+
+---
+
+### P2-09 — MEDIUM — Privacy policy still has a placeholder instead of a real contact channel
+
+**Category:** Privacy / Data handling
+**Type:** Release Risk (re-confirmed from the prior audit's `M-02`)
+**Location:** `public/privacy.html:48` — "הערה למנהל המערכת: יש להוסיף כאן כתובת מייל או דרך התקשרות ישירה של העסק לצורך פניות בנושא פרטיות" (note to the system operator: add a real contact email/method here for privacy inquiries).
+
+**Problem:** The deployed privacy policy currently promises a way to exercise data-subject rights (access/correction/deletion requests) that does not actually exist yet — the placeholder is live in production-facing HTML.
+
+**Why It Matters:** The app stores real employee names, phone numbers, emails, and wage data (per its own privacy notice); a policy that names a contact channel it doesn't actually provide is worse than no policy for anyone who tries to use it.
+
+**Recommended Fix:** This is an **operator action**, not a code change Claude should make unilaterally — the account owner needs to supply a real contact email or phone number to insert into `public/privacy.html`.
+
+**Compatibility Risk:** None once a real contact is supplied.
+
+**Verification After Fix:** Re-read `public/privacy.html` after the operator's edit and confirm the placeholder text is gone.
+
+---
+
+### P2-10 — LOW — PWA manifest has only one undifferentiated icon entry
+
+**Category:** Asset organization
 **Type:** Recommendation
-**Location:** `drizzle/0000_last_korg.sql` through `drizzle/0012_real_accounts.sql` — all forward-only (no `DOWN`/rollback script per migration).
+**Location:** `public/manifest.webmanifest:11-13` — a single icon entry (`sizes: "any"`, `purpose: "any"`); `public/app-icon.png` is 579×559px.
 
-**Evidence:** Inspected migration file contents (e.g., `drizzle/0012_real_accounts.sql`) contain only `ALTER TABLE`/`CREATE TABLE`/`CREATE INDEX` statements, generated by `drizzle-kit generate`, with no accompanying rollback SQL. `docs/OPERATIONS.md` documents the actual rollback strategy for this project as Cloudflare Worker Version rollback plus a D1 backup restore, not a per-migration `DOWN` script.
+**Recommended Fix:** Add an explicit `"sizes": "512x512"` entry and a `purpose: "maskable"` variant (padded to the safe zone so Android's adaptive-icon mask doesn't crop it) alongside the existing `any` icon.
 
-**Problem/Why It Matters:** Rule 14 recommends every migration include a tested rollback. This project instead relies on whole-database backups and Worker version rollback for recovery, which is a coherent and pragmatic strategy for a single-tenant-per-business D1 project at this scale, but is a deviation from the per-migration-rollback ideal, and (per M-05) the backup half of that strategy is not yet automated or restore-tested.
-
-**Recommended Fix:** No architectural change needed; ensure the backup/restore half of the actual rollback strategy (M-05) is solid, since that is what this project relies on instead of per-migration `DOWN` scripts.
-
-**Compatibility Risk:** None — informational.
-
-**Verification After Fix:** N/A (tracked via M-05's verification instead).
+**Compatibility Risk:** None.
 
 ---
 
-**Finding ID:** L-06
-**Severity:** LOW
-**Category:** Project Continuity / Documentation
-**Type:** Maintainability
-**Location:** `docs/STATUS.md` (dated entries end around 2026-09-02/03) vs. the newer real-accounts work merged afterward (commits `6306c6d` "feat: add persistent isolated user accounts" through `77ff998`, and `docs/AUTH_ACCOUNTS.md` which is current).
+### P2-11 — LOW — Theme-color mismatch and dead CSS
 
-**Evidence:** `docs/STATUS.md`'s most recent dated entries describe the "guest mode" public demo as the final, accepted state ("מסירה סופית ללא התחברות" — "final delivery without login"). The real password-based account system, and the removal of automatic guest login, were built and documented afterward in `docs/AUTH_ACCOUNTS.md` and `docs/SOLO_WORKER_AUDIT.md`, but `docs/STATUS.md` itself was not updated to reflect this shift.
+**Category:** Design-system consistency
+**Type:** Recommendation
+**Location:** `app/layout.tsx:16` (`viewport.themeColor: "#2457d6"`, blue) vs. `public/manifest.webmanifest` (`theme_color: "#1e7a59"`, green) — the browser chrome/task-switcher color and the installed-PWA splash/status-bar color will differ. Also: `app/globals.css:115-121` (`.connection`, `.connection i`, `@keyframes pulseGreen`) has zero corresponding usage anywhere in `app/page.tsx`.
 
-**Problem/Why It Matters:** Rule 31 (`project-continuity.mdc`) and this project's own README point to `docs/STATUS.md` as one of the three source-of-truth documents to read before continuing work; a reader following only that file would get an outdated picture of the authentication model.
+**Recommended Fix:** Pick one theme color and use it in both places. Remove the dead CSS block, or confirm it's intentionally kept for a near-term planned feature.
 
-**Recommended Fix:** Add a short, dated addendum to `docs/STATUS.md` pointing to `docs/AUTH_ACCOUNTS.md` as superseding the guest-mode description, consistent with how `docs/DECISIONS.md` already handles superseded decisions (e.g., D-006 explicitly says "הוחלף בהחלטה D-034").
-
-**Compatibility Risk:** None — documentation only.
-
-**Verification After Fix:** `docs/STATUS.md` no longer reads as if guest mode is the final, current state.
+**Compatibility Risk:** None.
 
 ---
 
-**Finding ID:** L-07
-**Severity:** LOW
-**Category:** Code Quality / Dead Code
-**Type:** Maintainability
-**Location:** `app/chatgpt-auth.ts` (90 lines) — not imported by any other file in the repository.
+### P2-12 — LOW — No automated dependency-update workflow; one inconsistent version-range style
 
-**Evidence:** `grep -r "chatgpt-auth"` across the repository matches only `app/chatgpt-auth.ts` itself and `docs/PROJECT_AUDIT_HE.md` (a documentation reference, not an import). The actual identity-header logic used at runtime is re-implemented inline inside `app/api/state/route.ts`'s `resolveIdentity()` (see C-01), duplicating the header names (`oai-authenticated-user-id`, etc.) rather than importing this module.
+**Category:** Dependency security / Supply-chain security
+**Type:** Recommendation
+**Location:** No `.github/dependabot.yml` found anywhere in the repo. `package.json:27` — `"@cloudflare/workers-types": "^4.20260702.1"` is the only caret-range dependency; every other dependency (including all 24 devDependencies) is pinned to an exact version.
 
-**Problem/Why It Matters:** This file is inert leftover scaffolding from the original "vinext-starter"/OpenAI Apps SDK template this project was bootstrapped from. It is not itself a security risk (it is never called), but its presence — and the fact that the *same header names* were independently re-implemented elsewhere rather than consolidated — is a small signal of exactly how the C-01 code path came to exist in the first place.
+**Recommended Fix:** Add a `.github/dependabot.yml` (weekly, npm ecosystem) — CI (`ci.yml`) already gates merges with `npm run check`, so Dependabot PRs would be automatically validated. Optionally pin the one caret range to match the project's otherwise-consistent exact-pinning convention (low priority — it's a types-only package with no runtime effect).
 
-**Recommended Fix:** Once C-01 is resolved (whichever direction is chosen), remove `app/chatgpt-auth.ts` if it remains unused, or consolidate the header-reading logic into it (and import it) if the trusted-gateway design is kept instead.
-
-**Compatibility Risk:** None — the file has no imports today; deleting it changes nothing at runtime.
-
-**Verification After Fix:** `npm run typecheck` and `npm run build` succeed after removal (already effectively provable, since nothing currently references it).
+**Compatibility Risk:** None — purely additive tooling.
 
 ---
 
-## F. Complete Coverage Matrix
+### P2-13 — LOW — Timing side-channel on the new password-reset-request endpoint (self-identified)
 
-Every category from `docs/codex-rules/EXISTING_PROJECT_AUDIT_PROMPT.md` Section 5 is listed. Status values: `PASS`, `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `N/A`, `NOT VERIFIED`.
+**Category:** Security / New-feature self-review
+**Type:** Recommendation
+**Location:** `app/api/auth/route.ts` `requestPasswordReset` action.
+
+**Evidence:** The "account exists" code path does strictly more work than the "account doesn't exist" path before returning: a `db.batch` of two statements (invalidate old token, insert new token) plus an outbound HTTPS call to the Resend API, versus nothing further after the rate-limit bookkeeping insert.
+
+**Problem:** This response-time difference is a narrow-bandwidth side channel for the exact thing the identical response body was specifically designed to prevent — confirming whether an email address has a registered account.
+
+**Why It Matters:** Low practical severity: exploiting it requires timing-measurement infrastructure and is already bounded by the existing rate limit (5 requests per 15 minutes per IP+email combination), which sharply limits how many timing samples an attacker can collect against any single address.
+
+**Recommended Fix (optional hardening, not urgent):** Add a small fixed minimum delay (or an equivalent dummy async operation) on the "account not found" path so both branches take comparable wall-clock time.
+
+**Compatibility Risk:** None if implemented as a small constant delay.
+
+---
+
+### P2-14 — LOW — `auth_tokens` rows are never pruned (self-identified)
+
+**Category:** Database performance / Data retention
+**Type:** Recommendation
+**Location:** `db/schema.ts` `authTokens` table; no cleanup logic anywhere, unlike `offline_operations`' explicit 90-day prune in `app/api/state/route.ts`.
+
+**Recommended Fix:** Prune used/expired `auth_tokens` rows opportunistically (e.g. alongside the existing `offline_operations` prune, or via a scheduled Worker Cron Trigger) — this is unbounded but slow row growth, not an urgent issue at this app's scale.
+
+**Compatibility Risk:** None.
+
+---
+
+### P2-15 — LOW — Session cookie doesn't use the `__Host-` prefix
+
+**Category:** Authentication / Session management
+**Type:** Recommendation
+**Location:** `app/auth-core.ts` — `SESSION_COOKIE = "menahel_session"`, built in `sessionCookie()` as `${SESSION_COOKIE}=...; Path=/; HttpOnly; SameSite=Lax; Max-Age=...` (+`Secure` on HTTPS).
+
+**Problem:** The cookie already never sets a `Domain` attribute (so it's already host-only by default per RFC 6265 - the practical gap is smaller than it looks), sets `Path=/`, and sets `Secure` on HTTPS - i.e. it already satisfies everything `__Host-` requires except the name itself. Renaming it to `__Host-menahel_session` would have the browser *enforce* those properties (Secure, no Domain, Path=/) rather than relying on the server always setting them correctly, at effectively zero cost.
+
+**Why It Matters:** Low practical severity given the app is already host-only in practice, but it's a well-known, free hardening step that removes any future risk of an accidental `Domain=` addition silently widening the cookie's scope.
+
+**Recommended Fix:** Rename the cookie to `__Host-menahel_session` in `SESSION_COOKIE`, `sessionCookie()`, and `clearSessionCookie()`; keep a short migration window where the server also accepts (but no longer sets) the old cookie name so already-logged-in users aren't force-logged-out on deploy, or accept a one-time re-login as part of the change.
+
+**Compatibility Risk:** Low-medium if not handled carefully — a naive rename would log every currently-authenticated user out simultaneously on deploy. Plan the cutover (e.g. accept both names for reading during a transition period) or explicitly warn the user this deploy will require everyone to log in again.
+
+**Verification After Fix:** Confirm the browser rejects the cookie if `Secure`/`Path=/`/no-`Domain` are ever accidentally violated (that's the point of the prefix - it becomes a browser-enforced contract), and that login/logout/session-renewal still work end to end.
+
+---
+
+### P2-16 — LOW — Missing `Cross-Origin-Opener-Policy` and `Cross-Origin-Resource-Policy` response headers
+
+**Category:** Security / HTTP headers
+**Type:** Recommendation
+**Location:** `worker/index.ts` `secureResponse()` (lines ~30-52) — sets `x-content-type-options`, `x-frame-options`, `referrer-policy`, `permissions-policy`, `content-security-policy` (whose `frame-ancestors 'none'` already substitutes for `x-frame-options`), and `strict-transport-security` on HTTPS, but no `Cross-Origin-Opener-Policy` or `Cross-Origin-Resource-Policy`.
+
+**Problem:** Neither header is currently set on any response.
+
+**Why It Matters:** `Cross-Origin-Opener-Policy: same-origin` isolates the app's browsing context from cross-origin popups/windows it opens or that open it (defense-in-depth against certain cross-window timing/Spectre-class attacks); `Cross-Origin-Resource-Policy: same-site` blocks other origins from embedding this app's responses (images, JSON) in their own pages. Neither is expected to have any functional impact on this app (it doesn't embed cross-origin resources itself, nor does other sites' embedding it serve any legitimate purpose), so this is close to a free hardening win.
+
+**Recommended Fix:** Add `headers.set("cross-origin-opener-policy", "same-origin")` and `headers.set("cross-origin-resource-policy", "same-site")` alongside the other security headers in `secureResponse()`.
+
+**Compatibility Risk:** Low. Worth verifying the `/_vinext/image` optimization endpoint and the Waze/Google Maps external-link flow (which opens a new tab via `target="_blank"`, not `window.open()`, so COOP shouldn't affect it) still work as expected after adding COOP, since COOP can occasionally interact with `window.open()`-based flows if any exist.
+
+**Verification After Fix:** Confirm both headers appear on responses (`curl -I`), and manually re-verify the image-optimization path and any window-opening interaction (map navigation) still work.
+
+---
+
+## F. Complete Coverage Matrix (all 70 categories)
 
 | # | Category | Status | Evidence / Location | Note |
-|---|----------|--------|----------------------|------|
-| 1 | Architecture | PASS | `worker/index.ts`, `vite.config.ts`, `db/schema.ts` | Coherent Cloudflare Workers + D1 + R2 serverless design, documented in `docs/DECISIONS.md` D-009/D-010. |
-| 2 | Project organization | PASS | Repo tree (`app/`, `db/`, `drizzle/`, `worker/`, `tests/`, `docs/`) | Clear, conventional layout for this framework; see L-04 for a file-size note. |
-| 3 | Security | CRITICAL | `app/api/state/route.ts` | Blocked by C-01; see also H-01, M-01. |
-| 4 | Secrets and configuration | PASS | `.gitignore` (`.env*`), `.openai/hosting.json`, `dist/server/wrangler.json` | No secrets or credentials found committed anywhere; D1/R2 bindings are non-secret identifiers. |
-| 5 | Authentication | CRITICAL | `app/api/state/route.ts` `resolveIdentity()` | The password-based system itself (`app/auth-core.ts`) is well-built (PBKDF2, rate limiting), but is bypassable via C-01. |
-| 6 | Authorization and permissions | PASS | `app/api/state/route.ts` (every query scoped by `business_id`/role) | Consistent server-side enforcement once an identity is established; identity establishment itself is C-01's concern, not this one's. |
-| 7 | Input validation | PASS | `app/api/state/route.ts` (`validRecordId`, `boundedText`, `validCalendarDate`, `normalizedMoney`, allow-listed enums throughout) | Extensive, consistent server-side allow-list validation. |
-| 8 | Output encoding/handling | PASS | No `dangerouslySetInnerHTML`/`innerHTML` found; `app/xlsx-export.ts` XML-escapes cell content | React JSX auto-escapes by default; verified no bypass. |
-| 9 | API design | LOW | `app/api/state/route.ts`, `app/api/auth/route.ts` | No `/api/v1/` versioning, ad hoc `{error}`/raw-data JSON shape rather than the `{success,data,error}` envelope in rule 13's example — acceptable per `CLAUDE.md` (examples are not mandatory), not a defect for a single first-party client. |
-| 10 | Database design | PASS | `db/schema.ts` | Consistent naming, soft-delete pattern, minor-unit money columns added via expand-contract. |
-| 11 | Database constraints | PASS | `db/schema.ts` (`users_business_email_unique`, `offline_operations_owner_operation_unique`, FK references) | |
-| 12 | Database indexes | PASS | `drizzle/0006`, `0009`; `db/schema.ts` `index(...)` declarations | Hot-path indexes present for projects/clients/time_entries/audit_log. |
-| 13 | Database migrations | LOW | `drizzle/0000`–`0012` | Forward-only, no `DOWN` scripts; see L-05. |
-| 14 | Data integrity | HIGH | `app/api/state/route.ts` POST handler | H-02 (offline-operation atomicity gap); otherwise strong (version-conflict checks, active-timer guards before destructive edits). |
-| 15 | Error handling | PASS | Every API branch returns a specific Hebrew error message and status code; no stack traces exposed | |
-| 16 | User-facing error UX | PASS | `NoticeToast`, `role="alert"`/`aria-live` in `app/page.tsx` | |
-| 17 | Loading and empty states | PASS | `AccountLoadingView`, `OfflineUnavailableView`, `NoProjectsView`, per-button "שומר..." disabled states | |
-| 18 | Accessibility | PASS | `eslint-plugin-jsx-a11y` enabled and passing; 44px touch targets, `:focus-visible` rules in `app/globals.css` | Static/lint-level verification only; NOT VERIFIED at runtime (no screen reader/Lighthouse run — see Section H). |
-| 19 | Keyboard accessibility | PASS | `event.key === "Escape"` modal close, `className="skip-link"`, focus-visible outlines (test-asserted in `tests/rendered-html.test.mjs`) | |
-| 20 | Responsive design | PASS | `app/globals.css` breakpoints, safe-area insets; manual 360–390px testing recorded in `docs/STATUS.md` | |
-| 21 | Mobile web behavior | PASS | `public/manifest.webmanifest`, `public/sw.js`, bottom-bar timer control pattern | |
-| 22 | Design-system consistency | PASS | CSS custom properties throughout `app/globals.css`; zero inline `style={{...}}` in `app/page.tsx` | See L-01 for missing dark mode. |
-| 23 | Asset organization | PASS | Single `app/globals.css`, `public/` for static assets | |
-| 24 | SEO where applicable | N/A | `app/layout.tsx`: `robots: { index: false, follow: false }` | Deliberately non-indexed internal business tool; SEO rules correctly not applied. |
-| 25 | Internationalization | PASS | `Intl.NumberFormat`/currency handling, mixed Hebrew/German/English free-text fields per `docs/PRODUCT_PLAN.md` | No formal i18n library, but not needed — UI is single-language by design (D-013). |
-| 26 | RTL where applicable | PASS | `app/layout.tsx`: `<html lang="he" dir="rtl">`, test-asserted | |
-| 27 | Unit testing | MEDIUM | `tests/rendered-html.test.mjs` | The 11 tests are structural/regression assertions against built output and source strings, not isolated unit tests of pure functions (e.g. `formatTime`, `parseDurationInput`). |
-| 28 | Integration testing | MEDIUM | `docs/SOLO_WORKER_AUDIT.md` S-23 | Project's own docs state cross-account/live-R2/real-proxy integration tests are deferred to a later closing stage — an acknowledged, not hidden, gap. |
-| 29 | End-to-end testing | NOT VERIFIED | — | No Playwright/Cypress/etc.; manual E2E walkthroughs are recorded in `docs/STATUS.md` but not automated or reproducible by this audit. |
-| 30 | Regression protection | PASS | `tests/rendered-html.test.mjs` | 11/11 pass, actually executed during this audit (Section G); tests are explicitly tied to named historical bugs. |
-| 31 | Performance | NOT VERIFIED | — | No Lighthouse/RUM data available in this text-only, read-only audit; see Section H. |
-| 32 | Frontend performance | NOT VERIFIED | — | Same as above; static review shows no obvious anti-patterns (no unbounded client-side loops over huge datasets, no large third-party JS). |
-| 33 | Backend performance | LOW | `app/api/state/route.ts` `loadState()`/report queries | No pagination on list endpoints (deliberate, per D-026's "reports must use full data"); fine at current scale, worth revisiting if data volume grows substantially. |
-| 34 | Database performance | PASS | Indexes present (see #12); `PRAGMA optimize` called in `ensureCoreSchema()` | |
-| 35 | Caching | PASS | `public/sw.js` explicitly excludes `/api/` from cache; API responses sent with `cache-control: no-store, max-age=0` (`worker/index.ts`) | |
-| 36 | Code quality | PASS | `npm run lint` (ESLint + jsx-a11y + react-hooks + typescript-eslint) passes clean; `npm run typecheck` (strict TS) passes clean | See L-04 for file-size note. |
-| 37 | Maintainability | LOW | `app/page.tsx`, `app/api/state/route.ts` size | L-04, L-07 (dead code). |
-| 38 | Logging | MEDIUM | `audit_log` table covers business-action history well; no structured application-error logging beyond `console.error` in `app/error.tsx` and Cloudflare's built-in Worker observability (`"observability":{"enabled":true}` in `dist/server/wrangler.json`) | |
-| 39 | Monitoring | MEDIUM | `GET /api/state?health=1` health endpoint exists and is tested; `docs/OPERATIONS.md` documents an expected 5-minute external monitoring cadence | No evidence an actual external monitor/alerting service is configured (outside this repo's visibility — see Section H). |
-| 40 | Health checks | PASS | `app/api/state/route.ts` `searchParams.get("health") === "1"` branch, test-asserted | |
-| 41 | Git hygiene | PASS | `git status` clean of tracked changes throughout this audit; small, conventionally-styled commits; feature branches + PRs (`git log`) | |
-| 42 | CI | MEDIUM | No `.github/workflows` found | M-03. |
-| 43 | CD/deployment safety | PASS | `npm run deploy` = `npm test && wrangler deploy ...`; Cloudflare Worker Versions enable rollback (`docs/OPERATIONS.md`) | Manual but disciplined; no staging environment (acceptable at this scale). |
-| 44 | Backup | MEDIUM | `scripts/backup.ps1`, `docs/OPERATIONS.md` | M-05 (manual-only, unscheduled). |
-| 45 | Restore capability | NOT VERIFIED | `docs/OPERATIONS.md` documents a restore procedure | No evidence of an actual tested restore; testing one would be a destructive/production-adjacent operation out of scope for this read-only audit. |
-| 46 | Disaster recovery | LOW | `docs/OPERATIONS.md` (Worker Version rollback, D1 backup restore) | Reasonable for this scale; no formal RTO/RPO targets defined, which is acceptable given the project's size. |
-| 47 | Privacy/data handling | MEDIUM | No privacy policy found | M-02. |
-| 48 | Data retention/deletion | LOW | Soft-delete + manager-triggered permanent purge only (`purgeProjectCascade`, `purgeClient`, `purgeEmployee`) | No time-based auto-purge policy, no data-subject self-service export/delete; acceptable for current MVP scope, a gap if GDPR-style obligations become relevant (see M-02). |
-| 49 | Dependency security | MEDIUM | `npm audit` (Section G) | M-04, devDependencies only. |
-| 50 | Supply-chain security | MEDIUM | Same as #49 | No SBOM, no automated recurring scan; lockfile (`package-lock.json`) is committed and used correctly. |
-| 51 | Infrastructure | PASS | Cloudflare Workers/D1/R2 via `wrangler`/`@cloudflare/vite-plugin` | Appropriate, right-sized serverless choice; no unnecessary Docker/K8s/VM infrastructure introduced. |
-| 52 | Infrastructure as Code where applicable | PASS | `vite.config.ts` (`localBindingConfig`), `dist/server/wrangler.json` | Bindings declared in code/config, not manually clicked in a dashboard; Docker/Terraform/Kubernetes correctly not used for a Workers-native app. |
-| 53 | Threat modeling | NOT VERIFIED | No dedicated STRIDE/threat-model document found | `docs/PROJECT_AUDIT_HE.md`/`docs/SOLO_WORKER_AUDIT.md` cover much of the same ground informally, but there is no formal threat model artifact. |
-| 54 | Architecture documentation | PASS | `docs/PRODUCT_PLAN.md`, `docs/DECISIONS.md`, `docs/STATUS.md`, `docs/OPERATIONS.md`, `docs/AUTH_ACCOUNTS.md` | Thorough and mostly current; see L-06 for one staleness note. |
-| 55 | Important technical decisions/ADRs | PASS | `docs/DECISIONS.md` (D-001 through D-035) | Functions as a genuine, well-maintained ADR log, including explicit supersession notes. |
-| 56 | Technical debt | PASS | `docs/SOLO_WORKER_AUDIT.md` | Functions as an explicit, prioritized technical-debt register with a status legend; unusually disciplined for a project this size. |
-| 57 | Scalability | PASS | Cloudflare Workers/D1 edge architecture | Enterprise-scale patterns (queues, read replicas, sharding) correctly not introduced; not justified at this scale per `CLAUDE.md`. |
-| 58 | Reliability | HIGH | `app/api/state/route.ts` | Mostly strong (idempotent replay design, health checks); H-02 is the one confirmed gap. |
-| 59 | Concurrency where applicable | PASS | `db.batch()` used for most multi-statement writes; single-active-timer-per-user enforced server-side (`startTimer` auto-closes any other open timer) | |
-| 60 | Cross-platform behavior where applicable | N/A | No React Native/Expo/native code in the repository | This is a responsive web PWA, not a compiled cross-platform app; rules 32/35/36 do not apply. |
-| 61 | Mobile architecture where applicable | N/A | Same as #60 | Mobile support is via responsive web + PWA (see #20/21), not a native mobile architecture. |
-| 62 | Native device APIs where applicable | N/A | Camera/file access uses standard HTML `<input type="file">`, not a native camera API | |
-| 63 | Mobile permissions where applicable | N/A | No native OS permission model involved | Browser-level file-picker permission only. |
-| 64 | App-store readiness where applicable | N/A | Not distributed via any app store; explicitly a web PWA per `docs/DECISIONS.md` D-007 | |
-| 65 | Real-time synchronization where applicable | HIGH | `app/offline-store.ts`, `syncQueuedOperations()` in `app/page.tsx` | A genuinely thorough local-first sync design (BroadcastChannel cross-tab sync, `expectedUpdatedAt`/409 conflict detection); H-02 is the one confirmed correctness gap. |
-| 66 | Reconnection behavior where applicable | PASS | `window.addEventListener("online"/"offline", ...)` in `app/page.tsx`; manual reconnect test recorded in `docs/STATUS.md` | |
-| 67 | Offline behavior where applicable | PASS | IndexedDB queue (`app/offline-store.ts`), `public/sw.js` app-shell caching, manual full-offline walkthrough recorded in `docs/STATUS.md` | |
-| 68 | Conflict resolution where applicable | PASS | `versionConflict()` (`expectedUpdatedAt` vs `updated_at`, HTTP 409) in `app/api/state/route.ts` | Last-write-wins-with-warning, not automatic merge — a reasonable, explicit design choice per D-027, not a defect. |
-| 69 | Audit/security-review readiness | CRITICAL | This report | Blocked by C-01 and H-01 until resolved; otherwise the project's own audit trail (`docs/PROJECT_AUDIT_HE.md`, `docs/SOLO_WORKER_AUDIT.md`) shows a mature, evidence-based internal review culture. |
-| 70 | End-to-end ship readiness | CRITICAL | This report | Blocked by C-01 for any deployment reachable by an untrusted network; the product itself is functionally mature per extensive team-recorded manual testing in `docs/STATUS.md`. |
-
----
+|---|---|---|---|---|
+| 1 | Architecture | PASS | §B above | vinext/RSC on Cloudflare Workers, D1, R2; clear and consistently applied |
+| 2 | Project organization | MEDIUM | `app/page.tsx` (~4,600 lines), `app/api/state/route.ts` (~1,144 lines) | Deliberately deferred (`L-04`); real maintainability cost, not a correctness bug |
+| 3 | Security | LOW | §C, §E (P2-13, P2-16) | Prior CRITICAL/HIGH fixed; new LOW timing side-channel and missing COOP/CORP headers |
+| 4 | Secrets and configuration | MEDIUM | `cloudflare-env.d.ts`, `app/email.ts`, no committed `wrangler.toml` | `RESEND_API_KEY`/`RESEND_FROM_EMAIL` need to be set as Worker secrets (operator action, §J); D1 database ID is hardcoded in `vite.config.ts` (non-secret identifier, but worth a conscious note) |
+| 5 | Authentication | LOW | `app/auth-core.ts`, `app/api/auth/route.ts`, **P2-15** | PBKDF2-SHA-256, hashed session tokens, rate-limited login; reset-password flow added and reviewed this session; cookie name lacks `__Host-` prefix (low-impact hardening gap) |
+| 6 | Authorization and permissions | PASS | `app/api/state/route.ts` role checks | No contrary evidence found this pass; not re-derived from first principles (relies on prior audit's verification + P2-05's noted testing gap) |
+| 7 | Input validation | PASS | `validEmail`/`validPassword`/`clean()` in `app/api/auth/route.ts`, file-signature checks | Consistent length caps and format checks |
+| 8 | Output encoding/handling | PASS | React auto-escaping; `app/email.ts` `escapeHtml()` on interpolated name/URL in the HTML email | New email template explicitly escapes user-controlled values |
+| 9 | API design | PASS | `app/api/auth/route.ts`, `app/api/state/route.ts` | Consistent action-based POST convention |
+| 10 | Database design | PASS | `db/schema.ts` | Normalized, FK references via Drizzle |
+| 11 | Database constraints | PASS | unique indexes (e.g. `users_login_email_unique`) | — |
+| 12 | Database indexes | PASS | multiple `index(...)` definitions in `db/schema.ts` | Per prior audit's S-04 remediation |
+| 13 | Database migrations | MEDIUM | `drizzle/` directory + idempotent runtime DDL | Forward-only, no DOWN scripts (`L-05`, deliberate); dual migration model (Drizzle-authored + runtime self-healing DDL) is unusual but functional |
+| 14 | Data integrity | HIGH | **P2-02** | Server-side conflict detection is solid; client discards the result |
+| 15 | Error handling | MEDIUM | **P2-07** | Errors handled (try/catch present throughout) but not logged |
+| 16 | User-facing error UX | MEDIUM | **P2-02** (offline path); online path is PASS | Online submit errors shown inline and clearly; offline replay errors are not |
+| 17 | Loading and empty states | PASS | `app/loading.tsx`, `app/error.tsx`, 9 empty-state instances in `app/page.tsx` | Consistent, localized |
+| 18 | Accessibility | HIGH | **P2-01**, **P2-04** | Strong baseline (modal focus-trap, ARIA on custom controls) undermined by the two specific gaps found |
+| 19 | Keyboard accessibility | HIGH | **P2-01** | Modal/row keyboard handling is otherwise good |
+| 20 | Responsive design | PASS | `app/globals.css` breakpoints at 1024px/760px | Deliberate mobile redesign, not just scaling |
+| 21 | Mobile web behavior | PASS | `viewportFit: "cover"`, safe-area insets, 44px+ touch targets | — |
+| 22 | Design-system consistency | LOW | **P2-11** | Otherwise consistent (zero inline `style={{}}` in `app/page.tsx`) |
+| 23 | Asset organization | LOW | **P2-10** | — |
+| 24 | SEO | N/A | `app/layout.tsx:9` `robots: {index:false, follow:false}`, `public/privacy.html` `noindex` | Correctly absent for an authenticated internal tool |
+| 25 | Internationalization | PASS | `unicode-bidi: plaintext` on inputs, `dir="auto"` fields | Single-locale UI (Hebrew) by design; mixed HE/DE/EN free text explicitly supported |
+| 26 | RTL | PASS | `app/layout.tsx:20` `dir="rtl"` | — |
+| 27 | Unit testing | MEDIUM | **P2-05** | — |
+| 28 | Integration testing | MEDIUM | **P2-05** | — |
+| 29 | End-to-end testing | MEDIUM | **P2-05** | No e2e coverage exists |
+| 30 | Regression protection | PASS (for what exists) | `tests/rendered-html.test.mjs`, 11/11 passing | Good at pinning known-fixed shapes; see P2-05 for its limits |
+| 31 | Performance | NOT VERIFIED | — | No load testing performed or available from static inspection |
+| 32 | Frontend performance | PASS | no anti-patterns found by inspection | Large single file is a maintainability concern (#2), not a demonstrated perf problem |
+| 33 | Backend performance | PASS | batched D1 writes, memoized schema-setup (`schemaReady` promise) | — |
+| 34 | Database performance | PASS | indexes present per prior audit | — |
+| 35 | Caching | PASS | `public/sw.js` network-first shell cache, explicit API-response cache exclusion | Correct for this app's consistency requirements |
+| 36 | Code quality | MEDIUM | `eslint.config.mjs`, `tsconfig.json` (`strict: true`) | Solid baseline (a11y+hooks+core-web-vitals lint rules); no type-aware lint rules active; large files (#2) |
+| 37 | Maintainability | MEDIUM | same as #2/#36 | — |
+| 38 | Logging | MEDIUM | **P2-07** | — |
+| 39 | Monitoring | MEDIUM | **P2-07**, **P2-08** | Health check exists (#40) but doesn't substitute for error logging |
+| 40 | Health checks | PASS | `GET /api/state?health=1` (`app/api/state/route.ts`) | Real `SELECT 1` against D1; documented for external polling |
+| 41 | Git hygiene | PASS | `git log`, secret-pattern scan (zero matches), `.gitignore` | Strong, detailed commit messages; no tracked secrets |
+| 42 | CI | PASS | `.github/workflows/ci.yml` | **NOT VERIFIED**: whether it is passing on GitHub (no Actions access from this checkout) |
+| 43 | CD/deployment safety | MEDIUM | `package.json` `deploy` script (`npm test && wrangler deploy`) | Manual, human-run deploy; no staging environment or approval gate beyond a human choosing to run the command — acceptable at current scale, worth revisiting if the team grows |
+| 44 | Backup | PASS | `.github/workflows/backup.yml`, `scripts/backup.ps1` | **NOT VERIFIED**: whether `CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID` repo secrets are actually configured on GitHub |
+| 45 | Restore capability | MEDIUM | **P2-06** | — |
+| 46 | Disaster recovery | MEDIUM | **P2-06** | — |
+| 47 | Privacy/data handling | MEDIUM | **P2-09** | Policy exists but contact placeholder unfilled |
+| 48 | Data retention/deletion | LOW-MEDIUM | `public/privacy.html:41-45` | Manual, owner-mediated deletion only; reasonable for MVP scale, no formal retention schedule |
+| 49 | Dependency security | LOW-MEDIUM | `M-04` (14 devDep vulns deliberately deferred), **P2-12** | — |
+| 50 | Supply-chain security | LOW | exact pinning, committed lockfile | **P2-12** for the one caret-range exception |
+| 51 | Infrastructure | PASS | Cloudflare Workers/D1/R2, described in §B | — |
+| 52 | Infrastructure as Code | LOW | `vite.config.ts` `localBindingConfig`, no committed `wrangler.toml` | Config is source-controlled but the pattern is unusual; D1 database ID hardcoded (non-secret) |
+| 53 | Threat modeling | NOT VERIFIED / GAP | no formal threat-model document found | Informal reasoning is present throughout code comments (e.g. the identity-header removal rationale in `app/api/state/route.ts`), but no consolidated document exists; worth a short STRIDE-style pass given the app handles real PII/wage data |
+| 54 | Architecture documentation | PASS | `docs/PRODUCT_PLAN.md`, `docs/DECISIONS.md`, `docs/AUTH_ACCOUNTS.md`, `docs/OPERATIONS.md` | Thorough and current (with the one drift noted in P2-03) |
+| 55 | ADRs / technical decisions | PASS | `docs/DECISIONS.md` (D-001 through D-036) | Unusually complete for this project's size |
+| 56 | Technical debt | MEDIUM | `docs/codex-rules/REMEDIATION_CHECKLIST.md` `L-01`/`L-03`/`L-04`/`L-05` | Explicitly tracked and reasoned about, not hidden — a genuine strength even though the debt itself remains |
+| 57 | Scalability | LOW | — | No evidence of scale problems at this app's intended size; D1/Workers scale within Cloudflare's own limits |
+| 58 | Reliability | MEDIUM | **P2-02** | Atomic writes, rate limiting, and CSRF checks are all in place; the sync-replay gap is the main open reliability concern |
+| 59 | Concurrency | NOT VERIFIED | `expectedUpdatedAt`/409 mechanism exists in code | No test exercises real concurrent load; code shape confirmed statically only |
+| 60 | Cross-platform behavior | PASS | responsive breakpoints, PWA install | — |
+| 61 | Mobile architecture | N/A | no native/hybrid wrapper found | Pure PWA |
+| 62 | Native device APIs | N/A | — | — |
+| 63 | Mobile permissions | N/A | — | — |
+| 64 | App-store readiness | N/A | — | — |
+| 65 | Real-time synchronization | PASS | `BroadcastChannel` cross-tab sync | Server remains authoritative |
+| 66 | Reconnection behavior | PASS | `online`/`offline` events, 30s + visibility-based catch-up poll | **NOT VERIFIED**: no exponential backoff confirmed under sustained server 5xx |
+| 67 | Offline behavior | HIGH | **P2-02**; otherwise PASS | Queueing, idempotency (90-day dedup), per-identity IndexedDB scope isolation all verified correct |
+| 68 | Conflict resolution | HIGH | **P2-02** | Server mechanism is PASS; client wiring is the gap |
+| 69 | Audit/security-review readiness | MEDIUM | this report | Good docs/tests/CI foundation; P2-05 (testing depth) and P2-07 (logging) are the main remaining gaps |
+| 70 | End-to-end ship readiness | MEDIUM | §A, §D | No CRITICAL open; two HIGH items plus pending operator actions (Resend setup, GitHub Action secrets, privacy contact) should be closed before onboarding real multi-device/multi-employee usage |
 
 ## G. Verification Actually Performed
 
-All commands below were executed during this audit, in the working tree at `c:\Users\JBH\Desktop\attendance-app`, on branch `fix/sync-replay-validation`. No tracked file was modified by any of them.
+| Check | Result |
+|---|---|
+| `npm run typecheck` (`tsc --noEmit`) | Pass, no errors (both before and after this session's password-reset changes) |
+| `npm run lint` (`eslint .`) | Pass, no warnings/errors |
+| `npm run build` (`vinext build`) | Pass, production build completes |
+| `node --test tests/rendered-html.test.mjs` | 11/11 pass |
+| `git log`, `git status`, `git diff` inspection | Reviewed; commit history quality confirmed; working tree changes match intent |
+| Secret-pattern scan across tracked files (`sk-`, `AIza`, `postgres://`, PEM headers, `AKIA`) | Zero matches |
+| `.gitignore` review | Covers `node_modules`, `.env*`, `.dev.vars*` (added this session), `dist/`, `.wrangler/`, `backups/` |
+| Full read of `app/auth-core.ts`, `app/api/auth/route.ts`, `db/schema.ts`, `worker/index.ts`, `cloudflare-env.d.ts`, `vite.config.ts`, `README.md`, `docs/AUTH_ACCOUNTS.md`, `docs/DECISIONS.md`, `docs/PRODUCT_PLAN.md`, `docs/STATUS.md` (tail), `docs/codex-rules/EXISTING_PROJECT_AUDIT_PROMPT.md`, `docs/codex-rules/REMEDIATION_CHECKLIST.md` | Direct review by this session |
+| Structured read-only sub-agent pass #1 (frontend/accessibility/i18n/offline/mobile) | 61 tool calls, cross-referenced against source; findings incorporated above |
+| Structured read-only sub-agent pass #2 (testing/CI/backup/logging/deps/code-quality/IaC/privacy/scalability) | 38 tool calls, cross-referenced against source; findings incorporated above |
+| Self-review of this session's own new code (`app/email.ts`, the two new `/api/auth` actions, `ResetPasswordView`/`SignInView` changes) | Performed; P2-13/P2-14 are its findings |
+| Line-number spot-verification for `app/page.tsx` findings after this session's edits shifted line numbers | Re-grepped and confirmed for P2-01, P2-02; other `app/page.tsx` citations from the sub-agent passes may be approximate by a small number of lines — search by the quoted code/class name if a line number doesn't match exactly |
 
-| Command / Check | Result | Pass/Fail |
-|---|---|---|
-| `npm run typecheck` (`tsc --noEmit`, strict mode) | No errors | PASS |
-| `npm run lint` (ESLint 9, flat config, incl. `jsx-a11y`, `react-hooks`, `typescript-eslint`) | No errors, no warnings | PASS |
-| `npm test` = `npm run build && node --test tests/rendered-html.test.mjs` | `vinext build` completed all 5 build stages successfully; all 11 tests passed (`ℹ pass 11`, `ℹ fail 0`) | PASS |
-| `git status --porcelain` (before and after all work) | Only the pre-existing untracked `.claude/`, `AGENTS.codex-backup.md`, `CLAUDE.md`, `docs/codex-rules/` (present before this audit began, per the session's initial git status) remained; no tracked file changed; no other new files created except the two authorized report files | PASS (no unauthorized changes) |
-| `git diff main...HEAD --stat` | Confirmed the actual code delta of the audited branch vs `main`: `app/api/auth/route.ts`, `app/api/state/route.ts`, `app/auth-core.ts`, `app/globals.css`, `app/page.tsx`, `docs/AUTH_ACCOUNTS.md`, `tests/rendered-html.test.mjs` | Informational |
-| `npm outdated` | Listed current vs. latest versions for all direct dependencies (informational; no upgrade performed) | Informational |
-| `npm audit --audit-level=low` | 22 vulnerabilities (1 low, 5 moderate, 16 high), all in devDependencies' transitive tree; 0 in the 3 actual runtime dependencies | Informational (see M-04) |
-| `git log -S"script-src 'self' 'unsafe-inline'\${developmentScripts}" -- worker/index.ts` and `git show d9c0e01 -- worker/index.ts` | Identified the exact commit (`d9c0e01`) and diff that reintroduced `'unsafe-inline'` into `script-src` after it had previously been removed | Used as evidence for H-01 |
-| `git log --oneline --follow -p -- worker/index.ts \| grep script-src` | Traced the full history of the CSP directive across all commits touching `worker/index.ts` | Used as evidence for H-01 |
-| Full manual read of `app/api/state/route.ts` (1,145 lines), `app/api/auth/route.ts` (167 lines), `app/auth-core.ts` (78 lines), `app/chatgpt-auth.ts` (90 lines), `db/schema.ts`, `db/index.ts`, `worker/index.ts`, `app/offline-store.ts`, `app/xlsx-export.ts`, `app/layout.tsx`, `app/error.tsx`, `tests/rendered-html.test.mjs` (307 lines) | Reviewed line-by-line | Used throughout Section E |
-| Targeted read of `app/page.tsx` (first ~1,300 lines in full: types, formatters, `applyOptimisticOperation`, `presentProjects`, the `Home()` bootstrap/sync effect) plus a structural `grep` pass over the remaining ~3,200 lines (component list, `fetch(` call sites, `aria-*`/`role=` usage, `dangerouslySetInnerHTML`/`innerHTML`/`eval(`/`localStorage`/`window.location` usage) | No unsafe DOM-injection pattern found anywhere in the file; identity/sync logic fully reviewed | Used throughout Section E |
-| Targeted `grep` review of `app/globals.css` (focus-visible, touch-target sizes, `prefers-reduced-motion`, `prefers-color-scheme`/`data-theme`) | Confirmed accessibility hardening present; confirmed dark-mode support absent | Evidence for #18/#19/#22, L-01 |
-| Full read of `public/sw.js` (41 lines) | Confirmed network-first strategy, `/api/` explicitly excluded from cache | Evidence for #21/#35 |
-| Full read of `scripts/backup.ps1` | Confirmed manual, error-checked D1 export script; no scheduling found | Evidence for M-05 |
-| Full read of all `docs/*.md` project documentation (`README.md`, `PRODUCT_PLAN.md`, `DECISIONS.md`, `STATUS.md`, `OPERATIONS.md`, `AUTH_ACCOUNTS.md`, `PROJECT_AUDIT_HE.md`, `SOLO_WORKER_AUDIT.md`) and `CLAUDE.md`/`AGENTS.codex-backup.md` | Used to build the architecture map, cross-check which prior findings were actually fixed in code vs. only documented as fixed, and identify L-06 | Extensively cited throughout |
-| Full read of all 42 rule files under `docs/codex-rules/source-rules/` (`00-project-info.mdc` through `39-ship-with-confidence.mdc`, `master-protocol.mdc`, `master-web-design-prompt.mdc`) | Every rule file read in full and considered against actual repository evidence | Basis for Section F |
-| Review of `package.json`, `tsconfig.json`, `eslint.config.mjs`, `next.config.ts`, `vite.config.ts`, `drizzle.config.ts`, `cloudflare-env.d.ts`, `.gitignore`, `.openai/hosting.json`, `dist/server/wrangler.json` (build output) | Confirmed stack, confirmed no secrets committed, confirmed no CI config exists | Evidence for Section B, M-03 |
+## H. Verification Not Performed (and why)
 
----
+- **`npm audit`** — not run; would not modify tracked files but does make a network call and is explicitly out of scope for a strictly read-only pass per this session's audit instructions. Last known state (from `M-04`): 14 devDependency-only vulnerabilities, deliberately deferred.
+- **Actual restore-from-backup test** — would require running `wrangler d1 execute` against a real (even if staging) D1 database; explicitly a Phase-1 no-go (DO NOT change database state). See P2-06's recommendation to do this as a follow-up with explicit approval.
+- **GitHub Actions run history / repo secrets configuration** — this is a local, read-only checkout with no access to GitHub's Actions UI or Settings; cannot confirm `ci.yml` is actually green or that `CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID` are configured for `backup.yml`.
+- **Real concurrent-load / race-condition testing** — would require a live environment and deliberately concurrent requests; not safely performable as a static read-only check.
+- **Actual email delivery via Resend** — `RESEND_API_KEY`/`RESEND_FROM_EMAIL` are not configured in this environment (by design, pending the operator's domain setup); the code path that skips sending and logs the link instead was exercised only by inspection, not by an actual send.
+- **Live-browser accessibility audit (axe/Lighthouse)** — findings P2-01/P2-04 are based on static code/CSS inspection (contrast math, `display:none` semantics) rather than a running-browser tool; recommended as part of each fix's verification step.
 
-## H. Verification Not Performed
+## I. Remediation Plan (proposed sequence — not started; awaiting approval)
 
-The following were not performed because they require actions this Phase 1, read-only audit is explicitly prohibited from taking (modifying production/database/dependency state) or because the tooling to perform them safely is not available in this environment:
+1. **HIGH — P2-01** (keyboard-inaccessible pickers): CSS-only fix, low risk, high user-impact; do first.
+2. **HIGH — P2-02** (silent offline-conflict data loss): the most consequential open finding; requires care in the sync-replay error path plus a new test.
+3. **MEDIUM — P2-07 then P2-08**: add minimal server-side logging first (P2-07), which then also closes the observability half of P2-08's concern.
+4. **MEDIUM — P2-05**: add the two-account integration test harness; naturally reinforces confidence in the P2-02 fix once both land.
+5. **MEDIUM — P2-06**: write and test a restore script against a staging D1 database.
+6. **MEDIUM — P2-04**: contrast fixes, low risk.
+7. **MEDIUM — P2-03**: documentation-only fix, no risk, do any time.
+8. **MEDIUM — P2-09**: operator action (not Claude) — supply a real privacy contact.
+9. **LOW — P2-10, P2-11, P2-12, P2-13, P2-14, P2-16**: batch together as low-risk polish once the above are done (P2-16 is a two-line header addition).
+10. **LOW — P2-15** (`__Host-` cookie prefix): do this one on its own, deliberately, since — unlike the others in this batch — it will force-log-out every currently-authenticated user on deploy unless a transition period is implemented; schedule and communicate it rather than bundling it silently into a polish batch.
 
-- **Live exploitation test of C-01 against the public production URL** (`https://menahel-avoda.er2829288.workers.dev/`). Sending a request with forged `oai-authenticated-*` headers to the live Worker would, per the code in `app/api/state/route.ts`, create a real new business/user row in the production D1 database — this is exactly the kind of production-state-modifying action Phase 1 rules prohibit. C-01 is therefore a code-level confirmed defect, but its live exploitability against the current production deployment specifically is `REQUIRES RUNTIME VERIFICATION` rather than demonstrated end-to-end in this audit.
-- **Confirming or ruling out a trusted reverse-proxy/gateway in front of the Cloudflare Worker** that might strip or verify `oai-authenticated-*` headers before they reach `worker/index.ts`. This is infrastructure/DNS/Cloudflare-dashboard configuration outside this Git repository and could not be inspected from source code alone. If such a proxy exists and is provably the only path to the Worker, C-01's practical exploitability would be lower (though the code-level defect and its violation of defense-in-depth would remain).
-- **`npm audit fix` / any dependency or lockfile upgrade.** Explicitly out of scope for Phase 1 (`package-lock.json` must not be modified during this audit).
-- **A test restore of a D1 backup.** Performing one would require creating or overwriting a database, which Phase 1 rules prohibit; the existing restore procedure in `docs/OPERATIONS.md` is therefore `NOT VERIFIED` as actually working.
-- **Lighthouse / Core Web Vitals / real browser performance measurement.** No browser automation tooling is available in this text-only environment; performance conclusions in Section F are based on static code review only (e.g., absence of obvious anti-patterns), not measured metrics.
-- **Screen-reader walkthrough, keyboard-only navigation walkthrough, and measured color-contrast ratios.** No browser/assistive-technology tooling available; accessibility conclusions are based on ESLint (`jsx-a11y`) results and static CSS/markup review only.
-- **`securityheaders.com` / `ssllabs.com` scans against the public deployment.** These would constitute outbound probing of a live, third-party-adjacent production system, and were not judged to be "safe read-only verification" clearly within this repository's control for a Phase 1 pass; the security headers were instead verified by reading `worker/index.ts` directly (ground truth for what the Worker sets) and cross-checked against `tests/rendered-html.test.mjs`'s existing header assertions.
-- **Two-real-account cross-tenant isolation test in a live deployed environment.** `docs/SOLO_WORKER_AUDIT.md` itself lists this as still pending ("בדיקות end-to-end של proxy מאומת, שני חשבונות אמיתיים, R2 חי ומכשירים פיזיים יבוצעו בשלב הסגירה"); this audit did not perform it either, for the same reason (requires a live deployment and real accounts, which is outside a static/local read-only review).
-- **A full manual click-through of the running application in a real browser** (timer start/stop against a live D1 instance, file upload against live R2, multi-device offline/online transition). This audit's functional-correctness confidence instead rests on (a) the automated regression suite actually passing (Section G) and (b) the extensive, specific manual-test log the team already recorded in `docs/STATUS.md` for these exact flows.
+Each group should follow the project's own Definition of Done: `npm run typecheck && npm run lint && npm test`, a `git diff` review, and manual exercise of the affected flow before being marked resolved.
 
----
+## J. Operator Action Required — Password-Reset Email Setup (not a defect, a deployment step)
 
-## I. Remediation Plan
+The password-reset feature added this session is fully implemented and tested (typecheck/lint/build/tests all pass) but **will not actually deliver email until the operator completes this one-time setup**, because no email provider can legitimately deliver to arbitrary third-party inboxes from an unverified domain — this is an anti-spam requirement common to every provider, not a limitation specific to this implementation:
 
-Proposed order, smallest safe change first within each severity band, preserving architecture and backward compatibility throughout. **No remediation has been performed as part of this audit — this is a plan only, pending explicit approval.**
+1. Add your domain to Resend (https://resend.com, free tier: 100 emails/day / 3,000/month) and verify it by adding the SPF/DKIM DNS records Resend provides — this can be the same domain you plan to connect to Cloudflare for the app itself, or a subdomain of it (e.g. `mail.yourdomain.com`).
+2. Create a Resend API key.
+3. Set it on the deployed Worker as a secret (never commit it): `wrangler secret put RESEND_API_KEY --name menahel-avoda`, then paste the key when prompted.
+4. Set the sender address the same way: `wrangler secret put RESEND_FROM_EMAIL --name menahel-avoda` (e.g. `מנהל עבודה <no-reply@yourdomain.com>`) — must be an address on the verified domain.
+5. For local development, create a `.dev.vars` file (already gitignored) at the repo root with `RESEND_API_KEY=...` and `RESEND_FROM_EMAIL=...` if you want to test real email sends locally; without it, `npm run dev` will log the reset link to the terminal instead of sending an email, which is enough to exercise the flow end-to-end.
+6. Once configured, send yourself one real test reset email as a final check (per P2-08's recommendation) rather than relying on logs alone.
 
-**1. CRITICAL**
-   - **C-01**: Decide the intended trust model (trusted-gateway vs. password-only), then either strip inbound `oai-authenticated-*` headers at the Worker edge or delete the fallback branch in `resolveIdentity()` entirely. Add the automated "forged header → 401" test the project's own prior audit already recommended. This is the highest-priority item and should ship alone or bundled only with H-01 (same file family, trivial to review together).
-
-**2. HIGH**
-   - **H-01**: One-line revert of `'unsafe-inline'` in `script-src` (`worker/index.ts`), re-test the RSC-suspense scenario `d9c0e01` was originally fixing to confirm no regression. Depends on nothing; can ship immediately, ideally in the same PR as C-01 since both touch security-critical, low-line-count code that benefits from being reviewed together.
-   - **H-02**: Move the `offline_operations` INSERT into the same `db.batch()` array as each action's own mutation, for every branch in `POST()` that currently appends it afterward. Mechanical, low-risk change; independent of C-01/H-01 and can ship separately.
-
-**3. MEDIUM**
-   - **M-01**: Add `sameOrigin()` check to `/api/state`'s `POST()`. Trivial, independent.
-   - **M-03**: Add a minimal CI workflow running `npm run check` on push/PR. Purely additive; do this early since it would have caught H-01.
-   - **M-04**: Run `npm audit fix` for the non-breaking subset; schedule the major-version subset (`vite`, `wrangler`, `drizzle-kit`, `vinext`) as a separate, deliberately-tested piece of work, ideally exercised through the new CI workflow from M-03 first.
-   - **M-05**: Automate `scripts/backup.ps1` on a schedule; perform and document one test restore.
-   - **M-02**: Draft and publish a short privacy notice; document the data-subject-request process.
-
-**4. LOW** (where useful/requested — no urgency, can be batched with unrelated feature work)
-   - **L-02**: Raise minimum password length to 12 in `validPassword()`.
-   - **L-06**: Add a superseding note to `docs/STATUS.md` pointing at `docs/AUTH_ACCOUNTS.md`.
-   - **L-07**: Remove `app/chatgpt-auth.ts` once C-01's direction is settled.
-   - **L-01, L-03, L-04, L-05**: Optional, product-direction-dependent; no action required unless the team chooses to invest in them.
-
-**Dependencies between fixes:** C-01 and L-07 are linked (resolving C-01 determines whether `app/chatgpt-auth.ts` should be deleted or consolidated into). H-01 and C-01 touch adjacent but independent code and can be reviewed together for efficiency without being technically coupled. M-03 (CI) should ideally land before M-04's dependency bumps, so the bumps are validated automatically rather than manually.
-
-After each group is applied: re-run `npm run check`, re-verify the specific finding per its "Verification After Fix" instructions above, and check `git status`/`git diff` to confirm only the intended files changed.
-
----
-
-## Final Verification Checklist (per audit protocol)
-
-- [x] All 42 source `.mdc` rule files under `docs/codex-rules/source-rules/` were read in full and considered (00 through 39, `master-protocol.mdc`, `master-web-design-prompt.mdc`).
-- [x] Every applicable audit category from `EXISTING_PROJECT_AUDIT_PROMPT.md` Section 5 (70 categories) was evaluated in Section F.
-- [x] Non-applicable categories (#24, #60–64) are explicitly marked `N/A` with a stated reason.
-- [x] Everything that could not actually be verified in a safe, read-only, non-production way is marked `NOT VERIFIED` or `REQUIRES RUNTIME VERIFICATION` (Section H).
-- [x] Both report files (`AUDIT_REPORT_EN.md`, `AUDIT_REPORT_HE.md`) were created under `docs/codex-rules/` as the only files written during this audit.
-- [x] `git status` was checked before and after this audit; no existing project file was modified. Only the two authorized report files were created.
-- [x] No files other than these two reports were created or changed during this audit.
-
-**Findings: 1 CRITICAL, 2 HIGH, 5 MEDIUM, 7 LOW.**
-
-This audit does not constitute and must not be represented as OWASP, CASA, SOC 2, GDPR, Apple, Google, or Meta certification or approval. It is a source-code and configuration review performed on 2026-09-07 against the state of branch `fix/sync-replay-validation` at that time.
-
-**STOP. No remediation has been performed. Waiting for explicit approval before making any project changes.**
+No code changes are required for any of this — it is entirely account/DNS/secret configuration on your existing Cloudflare + new Resend accounts, and it is free at this app's expected volume.
