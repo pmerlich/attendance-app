@@ -372,6 +372,23 @@ test("P2-03/P2-04: docs match shipped offline-attachment behavior, and small bad
   assert.doesNotMatch(css, /\.sync-popover button \{[^}]*background: var\(--green\);/);
 });
 
+test("P2-06: restore script exists and refuses a remote restore without explicit double confirmation", async () => {
+  const restore = await readFile(new URL("../scripts/restore.ps1", import.meta.url), "utf8");
+  assert.match(restore, /\[switch\]\$Remote/);
+  assert.match(restore, /\[switch\]\$Confirm/);
+  // A single mistyped/forgotten flag must not be enough to restore into production - both
+  // -Remote and -Confirm are required together (verified in this session by actually running
+  // the script: -Remote alone was rejected before any network call, and a full restore into an
+  // isolated scratch D1 - never production, never the developer's own local dev database -
+  // succeeded and was spot-checked by reading the restored row back; see docs/OPERATIONS.md).
+  assert.match(restore, /if \(\$Remote -and -not \$Confirm\) \{\s*throw "Refusing to restore into the REMOTE/);
+  assert.match(restore, /if \(-not \(Test-Path -LiteralPath \$resolvedBackup\)\) \{ throw "Backup file not found/);
+  assert.match(restore, /if \(\$item\.Length -eq 0\) \{ throw "Backup file is empty/);
+  const operations = await readFile(new URL("../docs/OPERATIONS.md", import.meta.url), "utf8");
+  assert.match(operations, /scripts\/restore\.ps1/);
+  assert.match(operations, /תרגיל שחזור שבוצע/);
+});
+
 test("P2-11/P2-12/P2-13/P2-14/P2-16: low-severity hardening and polish findings", async () => {
   const worker = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
   const layout = await readFile(new URL("../app/layout.tsx", import.meta.url), "utf8");
