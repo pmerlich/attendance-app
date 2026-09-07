@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
-import { enqueueAttachment, enqueueOperation, readCachedState, readQueuedAttachments, readQueuedOperations, removeQueuedAttachment, removeQueuedOperation, setOfflineScope, writeCachedState, type QueuedAttachment, type QueuedOperation } from "./offline-store";
+import { clearOfflineScope, deleteLegacyUnscopedStore, enqueueAttachment, enqueueOperation, readCachedState, readQueuedAttachments, readQueuedOperations, removeQueuedAttachment, removeQueuedOperation, setOfflineScope, writeCachedState, type QueuedAttachment, type QueuedOperation } from "./offline-store";
 import { createXlsx, type WorkbookCell } from "./xlsx-export";
 
 type View = "dashboard" | "projects" | "time" | "payments" | "expenses" | "clients" | "employees" | "trash" | "history" | "reports" | "profile";
@@ -877,6 +877,7 @@ export default function Home() {
   } | null>(null);
   const stateRef = useRef<StoredState | null>(null);
   const syncingRef = useRef(false);
+  const syncRequestedRef = useRef(false);
   const stateChannelRef = useRef<BroadcastChannel | null>(null);
 
   function applyStoredState(data: StoredState, broadcast = true) {
@@ -993,8 +994,12 @@ export default function Home() {
     return optimistic;
   }
   async function syncQueuedOperations() {
-    if (syncingRef.current || !navigator.onLine) {
-      if (!navigator.onLine) setSyncState("offline");
+    if (syncingRef.current) {
+      syncRequestedRef.current = true;
+      return;
+    }
+    if (!navigator.onLine) {
+      setSyncState("offline");
       return;
     }
     syncingRef.current = true;
@@ -1092,7 +1097,9 @@ export default function Home() {
       setSyncState(navigator.onLine ? "error" : "offline");
     } finally {
       syncingRef.current = false;
-      if (continueSync && !interrupted) queueMicrotask(() => void syncQueuedOperations());
+      const rerunRequested = syncRequestedRef.current;
+      syncRequestedRef.current = false;
+      if ((rerunRequested || (continueSync && !interrupted)) && navigator.onLine) queueMicrotask(() => void syncQueuedOperations());
     }
   }
 
@@ -1156,15 +1163,16 @@ export default function Home() {
         .then((registration) => registration.update())
         .catch(() => undefined);
     }
+    deleteLegacyUnscopedStore();
 
     void (async () => {
-      const cached = await readCachedState<StoredState>().catch(() => undefined);
-      const queued = await readQueuedOperations().catch(() => []);
-      if (!active) return;
-      setPendingCount(queued.length);
       const inviteToken = new URLSearchParams(window.location.search).get("invite");
 
       if (!navigator.onLine) {
+        const cached = await readCachedState<StoredState>().catch(() => undefined);
+        const queued = await readQueuedOperations().catch(() => []);
+        if (!active) return;
+        setPendingCount(queued.length);
         if (cached) applyStoredState(queued.reduce((current, operation) => applyOptimisticOperation(current, operation), cached));
         else { setOfflineWithoutCache(true); setAccountReady(true); }
         setSyncState("offline");
@@ -1182,6 +1190,7 @@ export default function Home() {
             }),
           });
           if (response.status === 401) {
+            clearOfflineScope();
             setAuthRequired(true);
             return;
           }
@@ -1196,6 +1205,7 @@ export default function Home() {
           });
           window.history.replaceState({}, "", window.location.pathname);
         } catch (error) {
+          const cached = await readCachedState<StoredState>().catch(() => undefined);
           if (cached) applyStoredState(cached);
           setInviteNotice({
             kind: "error",
@@ -1205,6 +1215,7 @@ export default function Home() {
       } else {
         const identityResponse = await fetch("/api/state");
         if (identityResponse.status === 401) {
+          clearOfflineScope();
           setAuthRequired(true);
           setAccountReady(true);
           return;
@@ -3723,7 +3734,7 @@ function ProfileView({ user, accountMode, setAccountMode, openReports, openHisto
       setProfileSaving(false); setPasswordSaving(false);
     }
   }
-  async function signOut() { const form = new FormData(); form.set("action", "logout"); await fetch("/api/auth", { method: "POST", body: form }); window.location.assign("/"); }
+  async function signOut() { const form = new FormData(); form.set("action", "logout"); await fetch("/api/auth", { method: "POST", body: form }); clearOfflineScope(); window.location.assign("/"); }
   const intro = (
     <div className="profile-intro">
       <div className="profile-avatar">{user.profileImageUrl ? <Image src={user.profileImageUrl} width={72} height={72} alt={`תמונת הפרופיל של ${user.displayName}`} unoptimized /> : user.displayName.charAt(0)}</div>

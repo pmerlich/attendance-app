@@ -28,6 +28,16 @@ export function setOfflineScope(scope: string) {
   window.localStorage.setItem(SCOPE_KEY, normalized);
 }
 
+export function clearOfflineScope() {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(SCOPE_KEY);
+}
+
+export function deleteLegacyUnscopedStore() {
+  if (typeof indexedDB === "undefined") return;
+  indexedDB.deleteDatabase(`${DATABASE_PREFIX}:unscoped`);
+}
+
 function openDatabase() {
   return new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(`${DATABASE_PREFIX}:${currentScope()}`, DATABASE_VERSION);

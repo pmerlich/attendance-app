@@ -151,6 +151,11 @@ test("isolates offline data and validates critical mutations", async () => {
   const worker = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
   assert.match(offline, /setOfflineScope/);
   assert.match(offline, /DATABASE_PREFIX.*currentScope/s);
+  assert.match(offline, /deleteLegacyUnscopedStore/);
+  assert.match(page, /clearOfflineScope\(\)/);
+  assert.ok(page.indexOf('const identityResponse = await fetch("/api/state")') < page.indexOf("const [scopedQueue, scopedAttachments]"), "account identity must select the offline scope before its queue is read");
+  assert.match(page, /syncRequestedRef\.current = true/);
+  assert.match(page, /rerunRequested.*queueMicrotask/s);
   assert.match(page, /storageScope/);
   assert.match(page, /saveAction\("stopTimer", \{ id:/);
   assert.match(api, /function validCalendarDate/);
