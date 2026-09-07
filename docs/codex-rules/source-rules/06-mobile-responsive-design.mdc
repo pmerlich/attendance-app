@@ -1,0 +1,152 @@
+---
+alwaysApply: false
+---
+
+# MOBILE-RESPONSIVE DESIGN - MOBILE-FIRST EXCELLENCE
+
+## MANDATORY
+Every page MUST be perfect on mobile AND desktop. Mobile-first approach is non-negotiable.
+
+## 1. VIEWPORT & META TAGS (CRITICAL)
+```html
+<!-- MANDATORY on every page -->
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#000000">
+<meta name="mobile-web-app-capable" content="yes">
+```
+
+## 2. RESPONSIVE BREAKPOINTS
+```css
+/* Mobile First - Base styles for 320px+ */
+.container { width: 100%; padding: 1rem; }
+
+/* Small devices (576px+) */
+@media (min-width: 576px) { .container { max-width: 540px; margin: 0 auto; } }
+
+/* Medium devices / Tablets (768px+) */
+@media (min-width: 768px) { .container { max-width: 720px; } }
+
+/* Large devices / Desktops (992px+) */
+@media (min-width: 992px) { .container { max-width: 960px; } }
+
+/* Extra large (1200px+) */
+@media (min-width: 1200px) { .container { max-width: 1140px; } }
+
+/* Ultra-wide (1536px+) */
+@media (min-width: 1536px) { .container { max-width: 1440px; } }
+```
+
+## 3. TOUCH-FRIENDLY DESIGN (CRITICAL)
+```css
+/* Minimum touch target size: 44px (Apple HIG / WCAG) */
+button, .btn, input[type="submit"], a.nav-link {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 12px 16px;
+}
+```
+
+## 4. FLEXIBLE LAYOUTS
+```css
+/* Flexbox for responsive rows */
+.flex-container {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+}
+.flex-item {
+    flex: 1 1 300px; /* grow, shrink, minimum width */
+}
+
+/* Grid for responsive grids */
+.grid-container {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 1rem;
+}
+```
+
+## 5. RESPONSIVE IMAGES (CRITICAL)
+```html
+<img src="image-800.webp"
+     srcset="image-400.webp 400w,
+             image-800.webp 800w,
+             image-1200.webp 1200w"
+     sizes="(max-width: 768px) 100vw,
+            (max-width: 1200px) 50vw,
+            33vw"
+     alt="Descriptive text"
+     loading="lazy">
+```
+```css
+img { max-width: 100%; height: auto; }
+```
+
+## 6. MOBILE NAVIGATION
+```css
+/* Hamburger menu for mobile */
+.mobile-menu-toggle { display: none; }
+
+@media (max-width: 768px) {
+    .mobile-menu-toggle { display: block; }
+    .nav-menu {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100vh;
+        background: var(--bg-surface);
+        z-index: 1000;
+    }
+    .nav-menu.active { display: flex; flex-direction: column; }
+    .nav-link { display: block; padding: 1rem; border-bottom: 1px solid var(--border-color); }
+}
+```
+
+## 7. PWA CONSIDERATIONS
+```json
+{
+    "name": "Your App Name",
+    "short_name": "AppName",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#ffffff",
+    "theme_color": "#000000",
+    "icons": [
+        { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+        { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+    ]
+}
+```
+
+## 8. TOUCH GESTURE SUPPORT
+- Swipe navigation for carousels and galleries
+- Pull-to-refresh where applicable
+- Long-press for context menus
+- Prevent gesture conflicts with native scrolling
+- Safe area insets for modern phones with notches:
+```css
+padding-top: env(safe-area-inset-top);
+padding-bottom: env(safe-area-inset-bottom);
+padding-left: env(safe-area-inset-left);
+padding-right: env(safe-area-inset-right);
+```
+
+## 9. RESPONSIVE TYPOGRAPHY
+```css
+/* Fluid typography using clamp() */
+h1 { font-size: clamp(1.75rem, 4vw, 3rem); }
+h2 { font-size: clamp(1.25rem, 3vw, 2rem); }
+body { font-size: clamp(0.875rem, 1.5vw, 1rem); }
+```
+
+## TESTING CHECKLIST
+- [ ] Test on real mobile devices (not just browser DevTools)
+- [ ] Test on iOS Safari and Android Chrome
+- [ ] Verify all touch targets are at least 44x44px
+- [ ] Test at 320px width (smallest common screen)
+- [ ] Test landscape orientation
+- [ ] Verify no horizontal overflow at any breakpoint
+- [ ] Test with slow network (3G throttle)
+- [ ] Verify images load lazily and are appropriately sized

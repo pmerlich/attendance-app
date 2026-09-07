@@ -1,0 +1,130 @@
+---
+alwaysApply: false
+---
+
+# PERFORMANCE OPTIMIZATION - SPEED IS A FEATURE
+
+## PHILOSOPHY
+Every millisecond matters. A fast site converts better, ranks higher, and feels more professional. Performance is not an afterthought. It is designed in from the start.
+
+## 1. PERFORMANCE BUDGETS (TARGETS)
+
+| Metric | Target | Unacceptable |
+|--------|--------|-------------|
+| Time to First Byte (TTFB) | < 200ms | > 600ms |
+| Largest Contentful Paint (LCP) | < 2.5s | > 4.0s |
+| Interaction to Next Paint (INP) | < 200ms | > 500ms |
+| Cumulative Layout Shift (CLS) | < 0.1 | > 0.25 |
+| Total Page Weight | < 1.5MB | > 3MB |
+| JavaScript Bundle | < 200KB gzipped | > 500KB |
+| API Response Time | < 200ms (p95) | > 1s |
+
+## 2. FRONTEND PERFORMANCE
+
+### Critical Rendering Path
+- Inline critical CSS in `<head>` (above-the-fold styles)
+- Defer non-critical CSS: `<link rel="stylesheet" href="main.css" media="print" onload="this.media='all'">`
+- Defer all JavaScript: `<script defer src="app.js">`
+- Preload key resources: `<link rel="preload" href="font.woff2" as="font" type="font/woff2" crossorigin>`
+- Preconnect to external origins: `<link rel="preconnect" href="https://fonts.googleapis.com">`
+
+### Images
+- Use WebP (or AVIF) format with fallbacks
+- Responsive images via `srcset` and `sizes` attributes
+- Lazy load all below-the-fold images: `loading="lazy"`
+- Always set `width` and `height` attributes (prevents CLS)
+- Compress: target < 100KB per image for web display
+- Use CSS for decorative graphics instead of images when possible
+
+### JavaScript
+- Code split by route (dynamic imports)
+- Tree-shake unused code (modern bundlers do this automatically)
+- Avoid blocking the main thread (use Web Workers for heavy computation)
+- Debounce scroll/resize handlers (minimum 16ms / 60fps)
+- Use `requestAnimationFrame` for visual updates
+- Remove unused dependencies regularly
+
+### CSS
+- Minify in production
+- Remove unused CSS (PurgeCSS, Tailwind JIT)
+- Avoid deeply nested selectors (3 levels max)
+- Use CSS containment for complex layouts: `contain: layout style paint`
+- Prefer `transform` and `opacity` for animations (GPU-accelerated)
+
+### Fonts
+- Self-host when possible (avoid external network requests)
+- Use `font-display: swap` to prevent invisible text
+- Subset fonts to only needed characters
+- Preload the primary font file
+- Limit to 2-3 font files maximum
+
+## 3. BACKEND PERFORMANCE
+
+### Database
+- Index all frequently queried columns
+- Use EXPLAIN/ANALYZE on slow queries
+- Avoid N+1 queries (use eager loading / joins)
+- Paginate large result sets (never SELECT * without LIMIT)
+- Use connection pooling
+- Cache expensive queries (see caching section)
+- Use read replicas for read-heavy workloads
+
+### API
+- Paginate all list endpoints
+- Use field selection (only return needed fields)
+- Compress responses (gzip/brotli)
+- Set appropriate Cache-Control headers
+- Use ETags for conditional requests
+- Implement request batching for multiple related calls
+
+### Server
+- Enable HTTP/2 or HTTP/3
+- Enable gzip/brotli compression for text-based responses
+- Set Keep-Alive connections
+- Use a reverse proxy (Nginx) in front of application servers
+- Configure appropriate worker/thread counts
+
+## 4. CACHING STRATEGY
+
+### Browser Caching
+```
+# Static assets (images, CSS, JS with hashed filenames)
+Cache-Control: public, max-age=31536000, immutable
+
+# HTML pages
+Cache-Control: no-cache (or: public, max-age=0, must-revalidate)
+
+# API responses (when appropriate)
+Cache-Control: private, max-age=60
+```
+
+### Application Caching
+- Cache database query results (Redis, Memcached, or in-memory)
+- Cache API responses from external services
+- Cache computed/aggregated data
+- Set TTL (time to live) appropriate to data freshness needs
+- Implement cache invalidation when source data changes
+
+### CDN (Content Delivery Network)
+- Serve static assets from CDN edge nodes
+- Cache HTML at edge for public pages
+- Use CDN for image optimization and format conversion
+- Geographic distribution reduces latency globally
+
+## 5. MONITORING & MEASUREMENT
+- Use browser DevTools Lighthouse for lab testing
+- Use Real User Monitoring (RUM) for field data
+- Monitor Core Web Vitals in production
+- Set up alerts for performance regressions
+- Profile server-side performance (APM tools)
+- Track database query performance
+
+## 6. MOBILE PERFORMANCE
+- Test on real mid-range devices (not just high-end)
+- Test on 3G/4G network throttling
+- Reduce JavaScript for mobile (code split aggressively)
+- Use responsive images (smaller sizes for smaller screens)
+- Consider offline capabilities (service worker, cache-first strategy)
+
+## IMPLEMENTATION REQUIREMENT
+Performance must be measured, not guessed. Every page scores 90+ on Lighthouse. Every API responds in under 200ms (p95). Every image is optimized. Every script is deferred. No exceptions.

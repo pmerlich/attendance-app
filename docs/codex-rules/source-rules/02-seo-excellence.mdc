@@ -1,0 +1,170 @@
+---
+alwaysApply: false
+---
+# SEO EXCELLENCE - SEARCH ENGINE OPTIMIZATION
+
+## MANDATORY SEO IMPLEMENTATION
+Every public-facing page MUST be optimized for search engines. These rules are NON-NEGOTIABLE for any web project.
+
+## 1. META TAGS & STRUCTURE (CRITICAL)
+```html
+<!-- MANDATORY for EVERY page -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <!-- Title: 50-60 characters, unique per page -->
+    <title>Specific Page Title | Brand Name</title>
+
+    <!-- Meta Description: 150-160 characters, compelling -->
+    <meta name="description" content="Compelling description that makes users want to click">
+
+    <!-- Open Graph for social sharing -->
+    <meta property="og:title" content="Page Title">
+    <meta property="og:description" content="Page description">
+    <meta property="og:image" content="https://yourdomain.com/image.jpg">
+    <meta property="og:url" content="https://yourdomain.com/page">
+    <meta property="og:type" content="website">
+
+    <!-- Twitter Cards -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Page Title">
+    <meta name="twitter:description" content="Page description">
+    <meta name="twitter:image" content="https://yourdomain.com/image.jpg">
+
+    <!-- Canonical URL -->
+    <link rel="canonical" href="https://yourdomain.com/current-page">
+
+    <!-- Structured Data - JSON-LD -->
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "Organization",
+        "name": "Your Organization Name",
+        "url": "https://yourdomain.com"
+    }
+    </script>
+</head>
+```
+
+## 2. CONTENT OPTIMIZATION (CRITICAL)
+```html
+<!-- Semantic HTML structure -->
+<header>
+    <h1>Main Page Heading (H1 - Only ONE per page)</h1>
+</header>
+<main>
+    <section>
+        <h2>Section Heading</h2>
+        <h3>Subsection Heading</h3>
+        <p>Content with <strong>important keywords</strong> naturally integrated</p>
+    </section>
+</main>
+<footer><!-- Footer content --></footer>
+```
+
+## 3. PERFORMANCE OPTIMIZATION (CRITICAL)
+```html
+<!-- Image optimization -->
+<img src="image.webp"
+     alt="Descriptive alt text with keywords"
+     loading="lazy"
+     width="800"
+     height="600">
+
+<!-- CSS optimization -->
+<link rel="preload" href="critical.css" as="style">
+
+<!-- JavaScript optimization -->
+<script defer src="main.js"></script>
+```
+
+## 4. SITEMAP & ROBOTS
+```xml
+<!-- sitemap.xml - UPDATE after EVERY page addition -->
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+        <loc>https://yourdomain.com/</loc>
+        <lastmod>2026-01-01</lastmod>
+        <changefreq>weekly</changefreq>
+        <priority>1.0</priority>
+    </url>
+</urlset>
+```
+
+```txt
+# robots.txt
+User-agent: *
+Allow: /
+Disallow: /admin/
+Disallow: /api/
+Disallow: /config/
+Disallow: /includes/
+
+Sitemap: https://yourdomain.com/sitemap.xml
+```
+
+## 5. CORE WEB VITALS (CRITICAL)
+- **Largest Contentful Paint (LCP)**: < 2.5 seconds
+- **Interaction to Next Paint (INP)**: < 200 milliseconds
+- **Cumulative Layout Shift (CLS)**: < 0.1
+
+```css
+/* Prevent layout shift */
+img, video { width: 100%; height: auto; aspect-ratio: 16/9; }
+```
+
+## 6. MOBILE SEO (CRITICAL)
+```html
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="/favicon-32x32.png">
+```
+
+## 7. INTERNAL LINKING
+```html
+<nav aria-label="Main navigation">
+    <a href="/services" title="Our Services">Services</a>
+    <a href="/about" title="About Us">About</a>
+</nav>
+<!-- Contextual internal links in content -->
+<p>Learn more about our <a href="/advanced-services">advanced services</a>.</p>
+```
+
+## 8. SCHEMA MARKUP (JSON-LD)
+Use appropriate schema types per page:
+- **Organization**: Company/brand pages
+- **BreadcrumbList**: All pages with breadcrumb navigation
+- **FAQPage**: FAQ sections
+- **Product**: Product pages
+- **Article**: Blog posts
+- **LocalBusiness**: Local business sites
+- **SoftwareApplication**: SaaS/app sites
+- **VideoObject**: Pages with video content
+
+## 9. CONTENT GUIDELINES
+- **Keyword Density**: 1-2% natural integration
+- **Content Length**: Minimum 300 words per page
+- **Readability**: Flesch Reading Ease score > 60
+- **Unique Content**: 100% original, no duplicate content
+- **Heading Hierarchy**: H1 > H2 > H3 (never skip levels)
+
+## 10. TECHNICAL SEO CHECKLIST
+- [ ] SSL certificate (HTTPS)
+- [ ] Clean URL structure (no file extensions)
+- [ ] Fast loading speed (< 3 seconds)
+- [ ] Mobile-responsive design
+- [ ] XML sitemap submitted to Google Search Console
+- [ ] Google Analytics and Search Console configured
+- [ ] Custom 404 error page
+- [ ] 301 redirects for changed URLs
+- [ ] No broken links
+- [ ] Images optimized (WebP, lazy-loaded, with alt text)
+
+## IMPLEMENTATION REQUIREMENT
+Every public page MUST score 90+ on Google PageSpeed Insights. SEO is built into every line of code, not bolted on afterward.

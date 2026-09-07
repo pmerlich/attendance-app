@@ -1,0 +1,71 @@
+---
+alwaysApply: false
+---
+# UNIVERSAL PROJECT MASTER PROTOCOL
+
+## 1. ARCHITECTURE & OPS
+- **STRUCTURE**: Organize by concern: /src (or /app), /api, /assets (css/, js/, images/, fonts/), /config, /docs, /database, /tests, /uploads, /logs, /cache. Adapt to your framework's conventions (e.g., Next.js /app, Django /apps, Spring /src/main).
+- **NAMING**: Use consistent conventions per language:
+  - Files: `kebab-case` for web assets, follow language convention for source (camelCase.js, snake_case.py, PascalCase.java)
+  - Folders: lowercase, descriptive
+  - Functions: camelCase (JS/PHP/Java), snake_case (Python/Ruby)
+  - Classes: PascalCase (all languages)
+  - Variables: camelCase (JS/Java), snake_case (Python/PHP)
+  - Constants: UPPER_SNAKE_CASE (all languages)
+- **CLEAN URLs**: NO file extensions (.php/.html/.jsp) in links, forms, or redirects. Use framework routing or server-level URL rewriting.
+- **SECRETS**: ZERO hardcoding. Use environment variables (.env files), secret managers, or config files outside the project root. Provide an example config template (e.g., .env.example) that is safe for version control.
+
+## 2. SECURITY FORTRESS
+- **INPUTS**: Sanitize and validate ALL user data. Never trust client-side input.
+- **DATABASE**: Use parameterized queries / prepared statements ONLY. Never concatenate user input into queries.
+- **WEB**: Implement CSP headers, CSRF tokens on ALL forms, secure cookie flags (HttpOnly, Secure, SameSite).
+- **AUTH**: Hash passwords with bcrypt/Argon2id (never MD5/SHA1). Support MFA. Implement role-based access control on every protected route.
+- **FILES**: Strict whitelist validation for uploads (type, size, content). Store outside web root when possible.
+- **HEADERS**: Set X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Permissions-Policy on every response.
+- **RATE LIMITING**: Implement on all auth endpoints, API routes, and form submissions.
+
+## 3. DESIGN & UX SYSTEM
+- **SKILL FIRST**: For ANY design or UI work (web, mobile, app), ALWAYS invoke the /frontend-design skill FIRST. It leads all visual decisions. Then apply the technical constraints from the .mdc standards files.
+- **PHILOSOPHY**: Define a clear design direction per project. Prioritize clarity, consistency, and intentionality over decoration.
+- **CSS**: All design tokens via CSS custom properties (variables). Maintain a single source of truth for colors, typography, spacing, shadows, and border-radius.
+- **TYPOGRAPHY**: Choose distinctive, characterful fonts. Create clear hierarchy with scale contrast. Mix weights deliberately.
+- **COLORS**: Apply the 60-30-10 rule. One dominant mood color, one secondary, one accent. Define status colors (success/error/warning/info).
+- **LAYOUT**: Use CSS Grid and Flexbox. Vary section rhythms. Generous whitespace. Mobile-first responsive design.
+- **ICONS**: Pick ONE icon system per project and use it consistently (Material Symbols, Lucide, Heroicons, Font Awesome, etc.).
+- **RESPONSIVE**: Mobile-first approach (320px+). Test at all breakpoints (480, 768, 1024, 1200+). Viewport meta tag required.
+- **ANIMATIONS**: Purposeful and restrained. Respect prefers-reduced-motion. Use CSS transitions/keyframes for simple effects, GSAP for complex scroll-driven experiences.
+- **FAVICON**: Include on EVERY page.
+
+## 4. SEO & PERFORMANCE
+- **TAGS**: Unique Title (50-60 chars) + Description (150-160 chars) + Canonical URL + OG/Twitter cards per page.
+- **CONTENT**: Semantic HTML (one H1). JSON-LD schema markup where applicable. Alt text + lazy-load on all images (WebP format).
+- **TECHNICAL**: XML Sitemap + Robots.txt. Target: INP < 200ms, LCP < 2.5s, CLS < 0.1.
+- **ASSETS**: Minify CSS/JS in production. Preload critical resources. Defer non-critical scripts.
+
+## 5. AI COMMUNICATION
+- **STYLE**: Direct, step-by-step. No rambling or over-explaining.
+- **FORMAT**: Done > Current Status > Next Step.
+- **DB CHANGES**: For EVERY database schema change, write a migration file with timestamp naming. Include both UP (apply) and DOWN (rollback) sections.
+- **DOCS**: For complex features, write concise explanation files in a /docs directory.
+
+## 6. LOCAL DEVELOPMENT
+- **PRINCIPLE**: Every developer should be able to clone the repo and run the project with minimal setup.
+- **CONFIG**: Provide a setup script or clear README with step-by-step instructions.
+- **DATABASE**: All schema changes MUST produce migration files. Never make DB changes without a written record.
+- **TESTING**: Include instructions for running the project locally. Document required dependencies and environment variables.
+
+## 7. CROSS-PLATFORM & MOBILE (when building apps)
+- **SHARED CODEBASE**: One codebase for Android, iOS, Web. Platform-specific code only when absolutely necessary.
+- **EXPO FIRST**: Use Expo SDK APIs before reaching for raw native modules. Expo has camera, location, auth, notifications, file system, haptics, and more.
+- **NAVIGATION**: File-based routing with Expo Router. Stack, tabs, drawer, modal patterns.
+- **OFFLINE-FIRST**: Design for intermittent connectivity. Local DB + sync layer. Optimistic updates.
+- **SYNC**: All platforms hit the same API. Real-time sync for live data. Feature flags for coordinated rollouts.
+- **STORE COMPLIANCE**: Follow Google Play and Apple App Store guidelines. Privacy declarations, data safety forms, content ratings.
+- **OTA UPDATES**: Use EAS Update for JS bundle updates without store review. Feature flags for instant kill switches.
+- **TESTING**: Test on both iOS and Android. Test offline scenarios. Test RTL layout on mobile.
+
+## 8. GIT WORKFLOW (MANDATORY)
+- **EVERY SESSION**: At the END of every chat, remind and offer to backup changes to Git.
+- **COMMITS**: Small, focused, meaningful commit messages using conventional format: type(scope): description
+- **NO EXCEPTIONS**: Code changes without Git backup = incomplete work.
+- **NEVER COMMIT**: Secrets, API keys, .env files, node_modules, vendor directories, build artifacts, or logs.

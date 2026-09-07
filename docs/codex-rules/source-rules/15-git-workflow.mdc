@@ -1,0 +1,133 @@
+---
+alwaysApply: false
+---
+
+# GIT WORKFLOW & VERSION CONTROL
+
+## 1. BRANCH NAMING
+- **main** (or master): Production-ready code (always stable)
+- **develop**: Integration branch for features in progress
+- **feature/feature-name**: New features (e.g., `feature/user-registration`)
+- **fix/bug-description**: Bug fixes (e.g., `fix/login-redirect-loop`)
+- **hotfix/issue**: Urgent production fixes (e.g., `hotfix/security-patch`)
+- **release/version**: Release preparation (e.g., `release/1.2.0`)
+
+## 2. COMMIT MESSAGE FORMAT (CONVENTIONAL COMMITS)
+```
+type(scope): description
+
+Types:
+  feat:     New feature
+  fix:      Bug fix
+  refactor: Code restructuring (no behavior change)
+  style:    CSS/formatting changes (no logic change)
+  docs:     Documentation only
+  chore:    Build/config changes
+  db:       Database migration or schema change
+  security: Security-related changes
+  test:     Adding or updating tests
+  perf:     Performance improvements
+```
+
+### Examples:
+```
+feat(auth): add user registration with email verification
+fix(admin): resolve dashboard chart rendering on mobile
+db(users): add phone_number column to users table
+style(cards): update card shadow and border radius
+docs(api): add API endpoint documentation
+security(session): implement session regeneration on login
+test(auth): add unit tests for login flow
+```
+
+### Rules:
+- Present tense ("add" not "added")
+- Lowercase first word after type
+- No period at end
+- Max 72 characters for subject line
+- Add body (blank line after subject) for complex changes
+
+## 3. .GITIGNORE ESSENTIALS
+```gitignore
+# Environment files (contain secrets)
+.env
+.env.*
+!.env.example
+
+# Logs
+logs/
+*.log
+
+# Cache
+cache/
+tmp/
+temp/
+.cache/
+
+# Uploads (user-generated content)
+uploads/
+
+# Dependencies
+node_modules/
+vendor/
+__pycache__/
+*.pyc
+.venv/
+venv/
+target/
+build/
+dist/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Backup files
+*.bak
+*.backup
+
+# Compiled output
+*.class
+*.o
+*.exe
+```
+
+## 4. GIT BACKUP REMINDER (MANDATORY)
+At the END of every AI chat session:
+1. AI MUST remind: "Would you like to commit and push changes to Git?"
+2. Provide a suggested commit message based on changes made
+3. Summarize what changed in this session
+
+## 5. WORKFLOW
+
+### Simple (Solo Developer)
+1. Pull latest: `git pull origin main`
+2. Make changes
+3. Stage: `git add .` (or specific files)
+4. Commit: `git commit -m "type(scope): description"`
+5. Push: `git push origin main`
+
+### Feature Branch (Team)
+1. Create branch: `git checkout -b feature/feature-name`
+2. Make changes and commit (small, focused commits)
+3. Push branch: `git push -u origin feature/feature-name`
+4. Create Pull Request for review
+5. After approval: merge to main
+6. Delete feature branch
+
+## 6. RULES
+- **NEVER** commit secrets, passwords, API keys, or .env files
+- **ALWAYS** check `git status` before committing
+- **ALWAYS** write meaningful commit messages
+- Commit frequently. Small, focused commits are better than large ones.
+- Push at the end of every work session
+- Review diffs before committing (use `git diff --staged`)
+- Use `.gitignore` to exclude generated files, dependencies, and secrets

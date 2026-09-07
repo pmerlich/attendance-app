@@ -48,3 +48,6 @@ yarn-error.log*
 # local development artifacts
 *.tsbuildinfo
 /server*.log
+
+# Claude Code local machine settings (personal permissions, not shared config)
+.claude/settings.local.json

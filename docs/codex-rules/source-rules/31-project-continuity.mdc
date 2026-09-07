@@ -1,0 +1,67 @@
+---
+alwaysApply: true
+---
+
+# PROJECT CONTINUITY - SESSION MANAGEMENT PROTOCOL
+
+## PURPOSE
+For large, multi-phase projects that span many sessions, this rule ensures context is never lost between conversations.
+
+## SESSION START (MANDATORY)
+At the START of every session, before doing ANY work:
+1. Read `CLAUDE.md` in the project root - understand current phase, active task, and decisions
+2. Read `docs/PROGRESS.md` - know exactly what's been completed and what's next
+3. Read `docs/DECISIONS.md` if making architectural choices - check if the decision was already made
+4. Read `docs/INFRASTRUCTURE.md` if working on anything that touches external services, APIs, deployment, or env vars - this is the single source of truth for all service configs, credentials locations, and setup status
+5. Acknowledge to the user: briefly state what phase we're in and what we're working on
+
+## BEFORE CODING ANY FEATURE
+Before writing code for any feature or task:
+1. Read the relevant `.claude/*.mdc` standards files for that task:
+   - Building ANY UI → invoke /frontend-design skill FIRST, then read relevant .mdc files below
+   - Building web UI → read `master-web-design-prompt.mdc`, `09-design-system.mdc`, `06-mobile-responsive-design.mdc`
+   - Building mobile UI → read `33-mobile-app-design.mdc`, `09-design-system.mdc`
+   - Building API → read `13-api-design-standards.mdc`, `01-security-fortress.mdc`
+   - Database work → read `14-database-design.mdc`
+   - Authentication → read `01-security-fortress.mdc`
+   - Internationalization → read `23-internationalization.mdc`
+   - Testing → read `17-testing-strategy.mdc`
+   - Deployment (web) → read `21-ci-cd-pipeline.mdc`
+   - Deployment (app stores) → read `34-app-store-deployment.mdc`
+   - Error handling → read `12-error-handling-ux.mdc`
+   - Performance → read `18-performance-optimization.mdc`
+   - Cross-platform code → read `32-cross-platform-development.mdc`
+   - Mobile architecture → read `35-mobile-app-architecture.mdc`
+   - Native device APIs → read `36-native-device-apis.mdc`
+   - Real-time sync → read `37-real-time-sync.mdc`
+2. Follow the standards defined in those files
+3. Always follow `master-protocol.mdc` (it's always active)
+4. Always follow `38-audit-ready-code.mdc` (it's always active - every line of code must pass third-party audits)
+
+## GUIDED APPROACH
+If the user does not code and Claude does all implementation, follow `16-guided-setup-assistance.mdc`:
+- Break tasks into small steps
+- Give ONE step at a time when the user needs to do something (run a command, create an account, etc.)
+- Wait for confirmation before moving on
+- Explain the "why" briefly
+- If something fails, troubleshoot before continuing
+
+## SESSION END (MANDATORY)
+At the END of every work session:
+1. Update `CLAUDE.md`:
+   - Update "Current Status" section with current phase and active task
+   - Update "What's Been Completed" checklist
+   - Add any new decisions to the "Key Decisions" table
+   - Update "Last Updated" date
+2. Update `docs/PROGRESS.md`:
+   - Check off completed items
+   - Add notes about anything in-progress or blocked
+3. Offer to commit changes to Git with a meaningful message
+4. Tell the user what was accomplished and what's next
+
+## CRITICAL RULES
+- NEVER start coding without knowing current project state
+- NEVER make architectural decisions that contradict `docs/DECISIONS.md`
+- NEVER skip reading relevant standards files before a task
+- ALWAYS follow security standards from `01-security-fortress.mdc` - no exceptions
+- If unsure about user intent, ASK - don't assume

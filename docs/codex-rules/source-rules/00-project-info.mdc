@@ -1,0 +1,30 @@
+---
+description: "AssistLynk New - project info"
+alwaysApply: true
+---
+
+# AssistLynk New - Project Information
+
+## Project Overview
+- **Name**: AssistLynk New
+- **Type**: Web application with backend
+- **Platform**: Windows 11, VS Code with Claude Code extension
+
+## Paths
+- **Local root**: `c:\projects\assistlynk-new\`
+
+## Server
+- **IP**: 46.225.114.122
+- **User**: root
+- **Auth**: SSH key (`~/.ssh/hetzner_key`)
+- **Port**: 22 (default)
+- **Command**: `ssh -i ~/.ssh/hetzner_key root@46.225.114.122`
+
+## Repository
+- **URL**: TBD (GitHub, private)
+- **Branch strategy**: main (production), develop (integration)
+
+## Key Rules
+- NEVER hardcode URLs - use environment config
+- ALWAYS commit at end of session
+- All changes go through Git, never edit server files directly
