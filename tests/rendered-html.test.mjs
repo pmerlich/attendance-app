@@ -356,6 +356,22 @@ test("P2-01: account-mode and billing-type radio pickers stay keyboard-focusable
   assert.match(css, /\.account-mode-options label:focus-within \{/);
 });
 
+test("P2-03/P2-04: docs match shipped offline-attachment behavior, and small badges/buttons meet WCAG AA contrast", async () => {
+  const decisions = await readFile(new URL("../docs/DECISIONS.md", import.meta.url), "utf8");
+  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+  // D-027 previously said file upload/deletion both require connectivity - contradicting the
+  // actual code, where uploadAttachment() queues offline like any other core action.
+  assert.doesNotMatch(decisions, /העלאת או מחיקת קבצים ויצירת קישור הזמנה לעובד דורשות חיבור לאינטרנט/);
+  assert.match(decisions, /P2-03/);
+  // Amber-600 on amber-light (~2.86:1) and white on --green at 11-12px/bold (~3.77:1) both fell
+  // short of WCAG AA's 4.5:1 for this text size; reused colors already proven readable elsewhere
+  // in this file instead of introducing new ones.
+  assert.doesNotMatch(css, /\.connection-pill\.pending \{ background: var\(--amber-light\); color: var\(--amber\); \}/);
+  assert.match(css, /\.connection-pill\.pending \{ background: var\(--amber-light\); color: #92400e; \}/);
+  assert.doesNotMatch(css, /\.invite-button \{[^}]*background: var\(--green\);/);
+  assert.doesNotMatch(css, /\.sync-popover button \{[^}]*background: var\(--green\);/);
+});
+
 test("P2-07: unhandled Worker errors are caught, logged, and answered with security headers", async () => {
   const worker = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
   // Before this fix there was no top-level catch at all - an exception from handler.fetch()
