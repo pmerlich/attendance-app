@@ -266,7 +266,7 @@ test("ships persistent isolated account authentication", async () => {
   assert.match(auth, /PBKDF2_ITERATIONS = 100_000/);
   assert.match(auth, /iterations > 100_000/);
   assert.match(route, /contactFieldError/);
-  assert.match(auth, /HttpOnly; SameSite=Lax; Max-Age=/);
+  assert.match(auth, /HttpOnly; SameSite=Lax; Secure; Max-Age=/);
   assert.match(auth, /expires_at = datetime\('now', \?\)/);
   assert.match(auth, /token_hash/);
   assert.match(route, /action === "register"/);
@@ -370,6 +370,32 @@ test("P2-03/P2-04: docs match shipped offline-attachment behavior, and small bad
   assert.match(css, /\.connection-pill\.pending \{ background: var\(--amber-light\); color: #92400e; \}/);
   assert.doesNotMatch(css, /\.invite-button \{[^}]*background: var\(--green\);/);
   assert.doesNotMatch(css, /\.sync-popover button \{[^}]*background: var\(--green\);/);
+});
+
+test("P2-15: session cookie uses the __Host- prefix without force-logging-out existing sessions", async () => {
+  const auth = await readFile(new URL("../app/auth-core.ts", import.meta.url), "utf8");
+  const route = await readFile(new URL("../app/api/auth/route.ts", import.meta.url), "utf8");
+  // __Host- is a browser-enforced contract: the browser itself rejects the cookie if Secure,
+  // no-Domain or Path=/ are ever violated, instead of trusting the server to always set them
+  // right. It requires Secure unconditionally, not just on HTTPS.
+  assert.match(auth, /const SESSION_COOKIE = "__Host-menahel_session";/);
+  assert.match(auth, /const LEGACY_SESSION_COOKIE = "menahel_session";/);
+  assert.match(auth, /Path=\/; HttpOnly; SameSite=Lax; Secure; Max-Age=\$\{SESSION_DAYS \* 86400\}`;/);
+  // A naive rename would force-log-out every currently-authenticated user on deploy (their
+  // browser still only holds the old-named cookie). sessionToken() must keep accepting the
+  // legacy name for a transition period; sessionCookie() (writing) must only ever use the new
+  // one, so already-logged-in users get silently migrated to it on their next request.
+  assert.match(auth, /if \(name === LEGACY_SESSION_COOKIE\) legacyToken = decodeURIComponent/);
+  assert.match(auth, /return legacyToken;/);
+  assert.doesNotMatch(auth, /sessionCookie\(token: string, request: Request\)/);
+  // Logout must clear both names - a lingering pre-rename cookie the browser hasn't overwritten
+  // yet would otherwise survive an explicit logout.
+  assert.match(auth, /export function clearSessionCookie\(request: Request\) \{/);
+  assert.match(auth, /return \[\s*`\$\{SESSION_COOKIE\}=; Path=\/; HttpOnly; SameSite=Lax; Secure; Max-Age=0`,\s*`\$\{LEGACY_SESSION_COOKIE\}=; Path=\/; HttpOnly; SameSite=Lax; Max-Age=0/);
+  // json()'s cookie param must accept the array clearSessionCookie() now returns, appending
+  // one set-cookie header per value (Headers.append, not a single overwritten header).
+  assert.match(route, /function json\(body: unknown, status = 200, cookie\?: string \| string\[\]\)/);
+  assert.match(route, /headers\.append\("set-cookie", value\)/);
 });
 
 test("P2-06: restore script exists and refuses a remote restore without explicit double confirmation", async () => {

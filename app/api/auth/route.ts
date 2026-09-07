@@ -39,7 +39,11 @@ async function ensureBaseSchema(db: D1Database) {
   await ensureAuthSchema(db);
 }
 
-function json(body: unknown, status = 200, cookie?: string) { const headers = new Headers({ "content-type": "application/json", "cache-control": "no-store" }); if (cookie) headers.append("set-cookie", cookie); return new Response(JSON.stringify(body), { status, headers }); }
+function json(body: unknown, status = 200, cookie?: string | string[]) {
+  const headers = new Headers({ "content-type": "application/json", "cache-control": "no-store" });
+  for (const value of cookie ? (Array.isArray(cookie) ? cookie : [cookie]) : []) headers.append("set-cookie", value);
+  return new Response(JSON.stringify(body), { status, headers });
+}
 
 export async function GET(request: Request) {
   await ensureBaseSchema(authEnv.DB);
@@ -100,7 +104,7 @@ export async function POST(request: Request) {
       if (String(error).includes("UNIQUE")) return json({ error: "כבר קיים חשבון עם כתובת המייל הזאת" }, 409);
       throw error;
     }
-    return json({ authenticated: true }, 201, await createSession(authEnv.DB, userId, request));
+    return json({ authenticated: true }, 201, await createSession(authEnv.DB, userId));
   }
 
   if (action === "login") {
@@ -113,7 +117,7 @@ export async function POST(request: Request) {
     if (!user || !(await verifyPassword(password, user.passwordHash))) { await authEnv.DB.prepare("INSERT INTO auth_login_attempts (id, attempt_key, succeeded) VALUES (?, ?, 0)").bind(crypto.randomUUID(), attemptKey).run(); return json({ error: "כתובת המייל או הסיסמה אינם נכונים" }, 401); }
     await authEnv.DB.prepare("INSERT INTO auth_login_attempts (id, attempt_key, succeeded) VALUES (?, ?, 1)").bind(crypto.randomUUID(), attemptKey).run();
     await authEnv.DB.prepare("UPDATE auth_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND expires_at <= CURRENT_TIMESTAMP AND revoked_at IS NULL").bind(user.id).run();
-    return json({ authenticated: true }, 200, await createSession(authEnv.DB, user.id, request));
+    return json({ authenticated: true }, 200, await createSession(authEnv.DB, user.id));
   }
 
   if (action === "requestPasswordReset") {
@@ -182,7 +186,7 @@ export async function POST(request: Request) {
       authEnv.DB.prepare("UPDATE auth_tokens SET used_at = CURRENT_TIMESTAMP WHERE id = ?").bind(record.tokenId),
       authEnv.DB.prepare("UPDATE auth_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND revoked_at IS NULL").bind(record.userId),
     ]);
-    return json({ authenticated: true }, 200, await createSession(authEnv.DB, record.userId, request));
+    return json({ authenticated: true }, 200, await createSession(authEnv.DB, record.userId));
   }
 
   if (action === "logout") {

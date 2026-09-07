@@ -1,6 +1,12 @@
 export type SessionIdentity = { userId: string; email: string; displayName: string; firstName: string; lastName: string; phone: string; businessId: string; ownerId: string; role: "manager" | "employee"; profileImageKey?: string | null; isLocal: boolean; isGuest: boolean };
 
-const SESSION_COOKIE = "menahel_session";
+// __Host- is a browser-enforced contract (Secure + no Domain + Path=/), not just a naming
+// convention - the browser rejects the cookie outright if any of those are ever violated,
+// instead of relying on the server always setting them correctly. LEGACY_SESSION_COOKIE is
+// read (never written) for a transition period so a session set before this rename isn't
+// force-logged-out on deploy (P2-15).
+const SESSION_COOKIE = "__Host-menahel_session";
+const LEGACY_SESSION_COOKIE = "menahel_session";
 const SESSION_DAYS = 365;
 // Cloudflare Workers' crypto.subtle enforces a hard cap of 100,000 PBKDF2 iterations
 // (higher counts throw NotSupportedError at runtime) - this must stay at or below that cap.
@@ -32,15 +38,31 @@ export async function verifyPassword(password: string, stored: string) {
 
 export function sessionToken(request: Request) {
   const cookie = request.headers.get("cookie") ?? "";
-  for (const item of cookie.split(";")) { const [name, ...parts] = item.trim().split("="); if (name === SESSION_COOKIE) return decodeURIComponent(parts.join("=")); }
-  return null;
+  let legacyToken: string | null = null;
+  for (const item of cookie.split(";")) {
+    const [name, ...parts] = item.trim().split("=");
+    if (name === SESSION_COOKIE) return decodeURIComponent(parts.join("="));
+    if (name === LEGACY_SESSION_COOKIE) legacyToken = decodeURIComponent(parts.join("="));
+  }
+  return legacyToken;
 }
 
-export function sessionCookie(token: string, request: Request) {
-  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
-  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}${secure}`;
+export function sessionCookie(token: string) {
+  // __Host- requires Secure unconditionally, not just on HTTPS. Modern browsers treat
+  // http://localhost (this project's documented local dev URL) as a trustworthy origin, so
+  // Secure cookies still work there - but this would break on a non-HTTPS, non-localhost host.
+  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=${SESSION_DAYS * 86400}`;
 }
-export function clearSessionCookie(request: Request) { return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${new URL(request.url).protocol === "https:" ? "; Secure" : ""}`; }
+export function clearSessionCookie(request: Request) {
+  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
+  // Clear both names: the current __Host- cookie, and any lingering pre-rename cookie a
+  // still-logged-in browser may not have overwritten yet (sessionCookie() only ever writes the
+  // new name - the legacy cookie only disappears when the browser expires it or logout runs).
+  return [
+    `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0`,
+    `${LEGACY_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`,
+  ];
+}
 
 export async function resolveSessionIdentity(db: D1Database, request: Request): Promise<SessionIdentity | null> {
   const token = sessionToken(request);
@@ -71,8 +93,8 @@ export async function ensureAuthSchema(db: D1Database) {
   await db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS users_login_email_unique ON users (lower(email)) WHERE password_hash IS NOT NULL AND deleted_at IS NULL").run();
 }
 
-export async function createSession(db: D1Database, userId: string, request: Request) {
+export async function createSession(db: D1Database, userId: string) {
   const token = randomToken();
   await db.prepare("INSERT INTO auth_sessions (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, datetime('now', ?))").bind(crypto.randomUUID(), userId, await sha256(token), `+${SESSION_DAYS} days`).run();
-  return sessionCookie(token, request);
+  return sessionCookie(token);
 }

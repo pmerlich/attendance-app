@@ -54,7 +54,7 @@ function secureResponse(response: Response, url: URL, request: Request) {
   if (url.protocol === "https:") headers.set("strict-transport-security", "max-age=31536000; includeSubDomains");
   if (url.pathname.startsWith("/api/")) headers.set("cache-control", "no-store, max-age=0");
   const activeSession = sessionToken(request);
-  if (activeSession && url.pathname === "/api/state" && response.status < 400) headers.append("set-cookie", sessionCookie(activeSession, request));
+  if (activeSession && url.pathname === "/api/state" && response.status < 400) headers.append("set-cookie", sessionCookie(activeSession));
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
