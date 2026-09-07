@@ -349,9 +349,10 @@ input, textarea, select { font: inherit; unicode-bidi: plaintext; text-align: st
 
 /* Billing & Multi-Select options */
 .billing-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }
-.billing-options label { border: 1px solid var(--line); padding: 12px; border-radius: var(--radius-md); text-align: center; cursor: pointer; transition: var(--transition); }
-.billing-options input { display: none; }
+.billing-options label { position: relative; border: 1px solid var(--line); padding: 12px; border-radius: var(--radius-md); text-align: center; cursor: pointer; transition: var(--transition); }
+.billing-options input { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .billing-options label:hover { background: var(--canvas); border-color: #cbd5e1; }
+.billing-options label:focus-within { border-color: var(--green); box-shadow: 0 0 0 3px rgba(5, 150, 105, 0.35); }
 .billing-options label.selected { background: var(--green-light); border-color: var(--green); box-shadow: var(--shadow-sm); }
 .billing-options label.selected strong { color: var(--green); }
 .billing-options strong { display: block; font-size: 14px; font-weight: 700; }
@@ -628,8 +629,9 @@ input, textarea, select { font: inherit; unicode-bidi: plaintext; text-align: st
 .account-mode-options { border: 0; padding: 0; margin: 24px 0; display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
 .account-mode-options legend { font-size: 15px; font-weight: 700; color: var(--ink); margin-bottom: 12px; }
 .account-mode-options label { border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 18px; cursor: pointer; display: flex; gap: 14px; align-items: flex-start; background: white; position: relative; }
-.account-mode-options label input { display: none; }
+.account-mode-options label input { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .account-mode-options label:hover { border-color: #cbd5e1; background: var(--canvas); }
+.account-mode-options label:focus-within { border-color: var(--green); box-shadow: 0 0 0 3px rgba(5, 150, 105, 0.35); }
 .account-mode-options label.selected { border-color: var(--green); background: var(--green-light); box-shadow: var(--shadow-sm); }
 .account-mode-options label.selected strong { color: var(--green); }
 .account-mode-options label .mode-icon { width: 36px; height: 36px; border-radius: 50%; background: #f1f5f9; display: grid; place-items: center; font-size: 18px; flex: 0 0 36px; }

@@ -1045,7 +1045,12 @@ export default function Home() {
     let continueSync = false;
     try {
       const operations = await readQueuedOperations();
-      if (!operations.length) {
+      // Operations already carrying a lastError were rejected by the server (e.g. a version
+      // conflict) and resending the same unchanged payload cannot succeed. They stay queued
+      // so the user can see and act on them (retry/discard UI below), but automatic sync
+      // passes skip resending them and stop applying their optimistic effect to the UI.
+      const pendingOperations = operations.filter((operation) => !operation.lastError);
+      if (!pendingOperations.length) {
         const response = await fetch("/api/state");
         if (response.status === 401) {
           setAuthRequired(true);
@@ -1054,10 +1059,10 @@ export default function Home() {
         }
         if (!response.ok) throw new Error("טעינת הנתונים נכשלה");
         const serverState = (await response.json()) as StoredState;
-        const queuedAfterFetch = await readQueuedOperations();
+        const queuedAfterFetch = (await readQueuedOperations()).filter((operation) => !operation.lastError);
         applyStoredState(queuedAfterFetch.reduce((current, operation) => applyOptimisticOperation(current, operation), serverState));
       } else {
-        for (const operation of operations) {
+        for (const operation of pendingOperations) {
           let response: Response;
           try {
             response = await fetch("/api/state", {
@@ -1083,7 +1088,7 @@ export default function Home() {
           if (response.ok) {
             const serverState = (await response.json()) as StoredState;
             await removeQueuedOperation(operation.id);
-            const queuedAfterSave = await readQueuedOperations();
+            const queuedAfterSave = (await readQueuedOperations()).filter((queued) => !queued.lastError);
             applyStoredState(queuedAfterSave.reduce((current, queued) => applyOptimisticOperation(current, queued), serverState));
             continue;
           }
@@ -1092,10 +1097,15 @@ export default function Home() {
             setSyncState("error");
             break;
           }
-          // Retrying an unchanged 4xx payload cannot succeed. Remove legacy invalid data
-          // instead of presenting it forever as a connectivity/sync failure.
-          await removeQueuedOperation(operation.id);
-          setSyncError("");
+          // Retrying an unchanged 4xx payload (e.g. a 409 version conflict) cannot succeed.
+          // Keep the operation queued with the server's reason instead of silently discarding
+          // the user's change, so the retry/discard UI below can surface it.
+          {
+            const payload = await response.json().catch(() => ({})) as { error?: string };
+            const message = payload.error || "הפעולה נדחתה על ידי השרת";
+            await enqueueOperation({ ...operation, lastError: message });
+            setSyncError(message);
+          }
           rejected += 1;
         }
       }
@@ -1104,19 +1114,24 @@ export default function Home() {
         const refresh = await fetch("/api/state");
         if (refresh.ok) {
           const authoritative = (await refresh.json()) as StoredState;
-          const queuedAfterRejection = await readQueuedOperations();
+          const queuedAfterRejection = (await readQueuedOperations()).filter((queued) => !queued.lastError);
           applyStoredState(queuedAfterRejection.reduce((current, queued) => applyOptimisticOperation(current, queued), authoritative));
         }
       }
       const remaining = await readQueuedOperations();
+      const remainingPending = remaining.filter((operation) => !operation.lastError);
       setPendingCount(remaining.length);
-      if (remaining.length) {
+      if (remainingPending.length) {
         if (!interrupted && navigator.onLine) {
           setSyncState("loading");
           continueSync = true;
         } else {
           setSyncState(navigator.onLine ? "error" : "offline");
         }
+      } else if (remaining.length) {
+        // Only rejected operations are left in the queue; nothing left to auto-retry.
+        // They stay visible via pendingCount/syncError until the user retries or discards them.
+        setSyncState("error");
       } else if (!authRequired) {
         setSyncState("saved");
       }
@@ -1204,7 +1219,7 @@ export default function Home() {
         const queued = await readQueuedOperations().catch(() => []);
         if (!active) return;
         setPendingCount(queued.length);
-        if (cached) applyStoredState(queued.reduce((current, operation) => applyOptimisticOperation(current, operation), cached));
+        if (cached) applyStoredState(queued.filter((operation) => !operation.lastError).reduce((current, operation) => applyOptimisticOperation(current, operation), cached));
         else { setOfflineWithoutCache(true); setAccountReady(true); }
         setSyncState("offline");
         return;

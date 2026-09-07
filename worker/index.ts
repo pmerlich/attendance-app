@@ -57,17 +57,26 @@ const worker = {
     const url = new URL(request.url);
     let response: Response;
 
-    if (url.pathname === "/_vinext/image") {
-      const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
-      response = await handleImageOptimization(request, {
-        fetchAsset: (path) => env.ASSETS.fetch(new Request(new URL(path, request.url))),
-        transformImage: async (body, { width, format, quality }) => {
-          const result = await env.IMAGES.input(body).transform(width > 0 ? { width } : {}).output({ format, quality });
-          return result.response();
-        },
-      }, allowedWidths);
-    } else {
-      response = await handler.fetch(request, env, ctx);
+    try {
+      if (url.pathname === "/_vinext/image") {
+        const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
+        response = await handleImageOptimization(request, {
+          fetchAsset: (path) => env.ASSETS.fetch(new Request(new URL(path, request.url))),
+          transformImage: async (body, { width, format, quality }) => {
+            const result = await env.IMAGES.input(body).transform(width > 0 ? { width } : {}).output({ format, quality });
+            return result.response();
+          },
+        }, allowedWidths);
+      } else {
+        response = await handler.fetch(request, env, ctx);
+      }
+    } catch (error) {
+      // A single top-level boundary for every unhandled exception (page render, API route, or
+      // image optimization) - without this, an error inside handler.fetch() propagated straight
+      // to the Workers runtime with no application-level record. Log only enough to locate the
+      // failure - never the request body, cookies, or Authorization header.
+      console.error(`[worker] unhandled error on ${request.method} ${url.pathname}:`, error instanceof Error ? error.message : String(error));
+      response = new Response("Internal Server Error", { status: 500 });
     }
 
     return secureResponse(response, url, request);

@@ -341,3 +341,42 @@ test("selects an existing client by id, keeps the timer display isolated from br
   // width, which pushed the row off-screen - it must be minmax(0, 1fr).
   assert.match(css, /\.record-list-filters \{ grid-template-columns: minmax\(0, 1fr\) minmax\(0, 1fr\); \}/);
 });
+
+test("P2-01: account-mode and billing-type radio pickers stay keyboard-focusable", async () => {
+  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+  // `display: none` removes an <input> from both the accessibility tree and the tab order,
+  // trapping keyboard/screen-reader users on these two required, unavoidable form controls.
+  // The real input must stay in the tab order (visually-hidden-but-focusable), with a visible
+  // focus ring on the label for sighted keyboard users.
+  assert.doesNotMatch(css, /\.billing-options input \{ display: none; \}/);
+  assert.doesNotMatch(css, /\.account-mode-options label input \{ display: none; \}/);
+  assert.match(css, /\.billing-options input \{ position: absolute; width: 1px; height: 1px;/);
+  assert.match(css, /\.account-mode-options label input \{ position: absolute; width: 1px; height: 1px;/);
+  assert.match(css, /\.billing-options label:focus-within \{/);
+  assert.match(css, /\.account-mode-options label:focus-within \{/);
+});
+
+test("P2-07: unhandled Worker errors are caught, logged, and answered with security headers", async () => {
+  const worker = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
+  // Before this fix there was no top-level catch at all - an exception from handler.fetch()
+  // (any page render or API route) propagated straight to the Workers runtime with zero
+  // application-level log line, and skipped secureResponse()'s headers on the error response.
+  assert.match(worker, /} catch \(error\) \{[\s\S]*?console\.error\(`\[worker\] unhandled error on \$\{request\.method\} \$\{url\.pathname\}:`/);
+  assert.match(worker, /response = new Response\("Internal Server Error", \{ status: 500 \}\);/);
+  assert.ok(worker.indexOf("} catch (error) {") < worker.indexOf("return secureResponse(response, url, request);"), "the error response must still pass through secureResponse()");
+});
+
+test("P2-02: rejected offline operations stay queued with a reason instead of vanishing", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  // A non-retryable 4xx (e.g. a 409 version conflict) during offline-queue replay must keep the
+  // operation queued with the server's message so the existing retry/discard UI can surface it,
+  // instead of calling removeQueuedOperation() and quietly losing the user's change.
+  assert.doesNotMatch(page, /Remove legacy invalid data\s*\/\/ instead of presenting it forever as a connectivity\/sync failure\.\s*await removeQueuedOperation\(operation\.id\);/);
+  assert.match(page, /const payload = await response\.json\(\)\.catch\(\(\) => \(\{\}\)\) as \{ error\?: string \};\s*const message = payload\.error \|\| "הפעולה נדחתה על ידי השרת";\s*await enqueueOperation\(\{ \.\.\.operation, lastError: message \}\);\s*setSyncError\(message\);/);
+  // Automatic sync passes must not resend an already-rejected operation (that cannot succeed
+  // and would otherwise retry forever via the continueSync self-reschedule below), and must stop
+  // applying its optimistic effect to the displayed state once it's known to have been rejected.
+  assert.match(page, /const pendingOperations = operations\.filter\(\(operation\) => !operation\.lastError\);/);
+  assert.match(page, /const remainingPending = remaining\.filter\(\(operation\) => !operation\.lastError\);/);
+  assert.match(page, /if \(remainingPending\.length\) \{/);
+});
