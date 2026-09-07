@@ -20,9 +20,14 @@ test("server-renders a neutral account loading screen without demo data", async 
   assert.equal(response.headers.get("x-content-type-options"), "nosniff");
   assert.equal(response.headers.get("x-frame-options"), "DENY");
   assert.match(response.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
-  assert.match(response.headers.get("content-security-policy") ?? "", /script-src 'self' 'unsafe-eval'/);
-  assert.doesNotMatch(response.headers.get("content-security-policy") ?? "", /script-src[^;]*'unsafe-inline'/);
+  assert.match(response.headers.get("content-security-policy") ?? "", /script-src 'self' 'unsafe-inline' 'unsafe-eval'/);
   const html = await response.text();
+  // vinext/@vitejs/plugin-rsc streams Suspense boundary data via inline <script> tags with
+  // no src - CSP must allow them (script-src 'unsafe-inline') or streaming breaks outright
+  // ("The server could not finish this Suspense boundary... Switched to client rendering").
+  // A prior fix pass removed 'unsafe-inline' without verifying this in a real browser and
+  // broke exactly that; this count is the actual mechanism, not an assumption.
+  assert.ok((html.match(/<script(?:\s[^>]*)?>/gi) ?? []).some((tag) => !/\ssrc=/.test(tag)), "expected at least one inline <script> tag from RSC streaming");
   assert.match(html, /<html[^>]*lang="he"[^>]*dir="rtl"/i);
   assert.match(html, /<title>מנהל עבודה \| פרויקטים, שעות וכספים<\/title>/);
   assert.match(html, /טוען את החשבון שלך/);
@@ -187,10 +192,11 @@ test("isolates offline data and validates critical mutations", async () => {
   assert.match(api, /בתמחור קבוע יש להזין מחיר גדול מאפס/);
   assert.match(api, /בתמחור שעתי יש להזין תעריף גדול מאפס/);
   assert.match(api, /p\.client_id AS clientId/);
-  // script-src must stay free of 'unsafe-inline' in every environment - it was removed
-  // once (docs/SOLO_WORKER_AUDIT.md S-27) and silently reintroduced by a later fix (H-01).
-  assert.match(worker, /script-src 'self'\$\{developmentScripts\}/);
-  assert.doesNotMatch(worker, /script-src 'self' 'unsafe-inline'/);
+  // script-src needs 'unsafe-inline': vinext/@vitejs/plugin-rsc streams Suspense boundary
+  // data via inline <script> tags with no src (see the inline-script assertion in the
+  // first test above) - removing this breaks RSC streaming, it is not just a hardening
+  // gap. Confirmed against the actual rendered output before restoring it (H-01 follow-up).
+  assert.match(worker, /script-src 'self' 'unsafe-inline'\$\{developmentScripts\}/);
   assert.match(worker, /url\.hostname === "localhost".*unsafe-eval/);
   assert.match(api, /projectStatements\.push\(auditStatement/);
   assert.match(api, /if \(createsClient\) projectStatements\.push/);

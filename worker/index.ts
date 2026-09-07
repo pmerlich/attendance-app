@@ -34,11 +34,17 @@ function secureResponse(response: Response, url: URL, request: Request) {
   headers.set("referrer-policy", "strict-origin-when-cross-origin");
   headers.set("permissions-policy", "camera=(self), geolocation=(), microphone=()");
   const developmentScripts = url.hostname === "localhost" || url.hostname === "127.0.0.1" ? " 'unsafe-eval'" : "";
-  // script-src must never carry 'unsafe-inline' - it was removed once already (see
-  // docs/SOLO_WORKER_AUDIT.md S-27) and silently reintroduced by a later, unrelated fix.
-  // Do not add it back without a nonce/hash-based alternative for whatever inline script
-  // actually needs it.
-  headers.set("content-security-policy", `default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'${developmentScripts}; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; frame-src 'self' blob:; connect-src 'self' ws: wss:`);
+  // script-src needs 'unsafe-inline': vinext/@vitejs/plugin-rsc streams Suspense boundary
+  // data to the client via inline <script> tags (confirmed by rendering the built worker -
+  // the response HTML contains ~18 of them with no src). Blocking them does not just
+  // weaken defense-in-depth, it breaks RSC streaming outright ("The server could not
+  // finish this Suspense boundary... Switched to client rendering"), which is exactly
+  // what commit d9c0e01 ("fix: prevent stale RSC suspense failures") was fixing when it
+  // added this back. A prior revision removed 'unsafe-inline' here (see
+  // docs/SOLO_WORKER_AUDIT.md S-27) without catching this - do not remove it again without
+  // first switching the framework's inline scripts to a nonce/hash-based CSP source and
+  // verifying Suspense/streaming still works in a real browser.
+  headers.set("content-security-policy", `default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'${developmentScripts}; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; frame-src 'self' blob:; connect-src 'self' ws: wss:`);
   if (url.protocol === "https:") headers.set("strict-transport-security", "max-age=31536000; includeSubDomains");
   if (url.pathname.startsWith("/api/")) headers.set("cache-control", "no-store, max-age=0");
   const activeSession = sessionToken(request);
