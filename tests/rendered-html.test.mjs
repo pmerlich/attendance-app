@@ -226,6 +226,10 @@ test("isolates offline data and validates critical mutations", async () => {
   const privacyPage = await readFile(new URL("../public/privacy.html", import.meta.url), "utf8");
   assert.match(privacyPage, /מדיניות פרטיות/);
   assert.match(page, /href="\/privacy\.html"/);
+  // P2-09: the placeholder asking the operator to add a real privacy contact must be gone,
+  // replaced with an actual one.
+  assert.doesNotMatch(privacyPage, /הערה למנהל המערכת/);
+  assert.match(privacyPage, /mailto:er2829288@gmail\.com/);
   assert.match(api, /fixedPriceInRange/);
   assert.match(page, /function formatMoney/);
   assert.match(page, /window\.addEventListener\("popstate"/);
