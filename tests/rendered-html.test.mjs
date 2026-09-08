@@ -354,6 +354,56 @@ test("selects an existing client by id, keeps the timer display isolated from br
   assert.match(css, /\.record-list-filters \{ grid-template-columns: minmax\(0, 1fr\) minmax\(0, 1fr\); \}/);
 });
 
+test("reads the password-reset URL token via useSyncExternalStore, not a useState initializer", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  // The server never sees `window`, so a `useState(() => typeof window === "undefined" ? null :
+  // ...)` initializer renders `null` during SSR but the real token on the client's first
+  // (hydrating) render whenever a password-reset link was actually followed - a hydration
+  // mismatch on exactly the flow this code exists for. useSyncExternalStore's getServerSnapshot
+  // keeps the client's first render matching SSR (null), then swaps in the real value right
+  // after mounting, still before the `if (resetToken) return <ResetPasswordView>` effect below
+  // runs.
+  assert.match(page, /const resetToken = useSyncExternalStore\(subscribeToNothing, readResetTokenFromUrl, readResetTokenOnServer\);/);
+  assert.match(page, /function readResetTokenOnServer\(\) \{ return null; \}/);
+  assert.doesNotMatch(page, /useState<string \| null>\(\(\) => \(typeof window === "undefined"/);
+});
+
+test("fixes profile password-change crash and adds a show/hide toggle to every password field", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+
+  // A DOM event's currentTarget is nulled out once the event finishes dispatching, so reading
+  // event.currentTarget again after an `await` throws "Cannot read properties of null (reading
+  // 'reset')" - and since that crash happened AFTER the server call already succeeded, the
+  // password *was* changed even though the UI never showed success or cleared the form,
+  // making the next attempt's stale currentPassword get rejected as "wrong" confusingly.
+  // Verified live in a real browser: the crash and its console error are gone, the success
+  // toast shows, and the form resets.
+  assert.match(page, /const formElement = event\.currentTarget;/);
+  assert.match(page, /const form = new FormData\(formElement\);/);
+  assert.match(page, /else \{ formElement\.reset\(\); setProfileMessage/);
+  assert.doesNotMatch(page, /event\.currentTarget\.reset\(\)/);
+
+  // Every password <input> in the app goes through one PasswordField component with a
+  // show/hide toggle - not raw <input type="password"> scattered across sign-in, reset, and
+  // profile forms.
+  assert.doesNotMatch(page, /type="password"/);
+  assert.match(page, /function PasswordField\(/);
+  // 2 in sign-in/register (password + confirmPassword), 2 in password-reset (same), 3 in the
+  // profile change-password form (currentPassword + password + confirmPassword).
+  assert.equal((page.match(/<PasswordField /g) ?? []).length, 7);
+  assert.match(page, /function EyeIcon\(\)/);
+  assert.match(page, /function EyeOffIcon\(\)/);
+
+  // .sign-in-card button already sets width:100%/height:44px for the submit button; without
+  // the extra .password-field class here that selector's higher specificity (an extra type
+  // selector beats a single class) stretched the toggle to fill the whole field on the
+  // sign-in/register/reset screens instead of sitting as a small icon inside it - confirmed via
+  // a real headless-browser render (34x34px after the fix, ~450px wide before it).
+  assert.match(css, /\.password-field \.password-toggle \{/);
+  assert.doesNotMatch(css, /^\.password-toggle \{/m);
+});
+
 test("P2-01: account-mode and billing-type radio pickers stay keyboard-focusable", async () => {
   const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
   // `display: none` removes an <input> from both the accessibility tree and the tab order,

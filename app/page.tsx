@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Image from "next/image";
 import { clearOfflineScope, deleteLegacyUnscopedStore, enqueueAttachment, enqueueOperation, readCachedState, readQueuedAttachments, readQueuedOperations, removeQueuedAttachment, removeQueuedOperation, setOfflineScope, writeCachedState, type QueuedAttachment, type QueuedOperation } from "./offline-store";
 import { createXlsx, type WorkbookCell } from "./xlsx-export";
@@ -827,6 +827,13 @@ function presentProjects(items: StoredProject[]): Project[] {
   });
 }
 
+// Helpers for the resetToken useSyncExternalStore below: module-level so subscribe is a
+// stable reference (never forces a re-subscribe) and getServerSnapshot's `null` deterministically
+// matches what the server renders, since it never sees `window`.
+function subscribeToNothing() { return () => {}; }
+function readResetTokenFromUrl() { return new URLSearchParams(window.location.search).get("resetToken"); }
+function readResetTokenOnServer() { return null; }
+
 export default function Home() {
   const [view, setView] = useState<View>("dashboard");
   const [clients, setClients] = useState(initialClients);
@@ -858,10 +865,15 @@ export default function Home() {
   });
   const [authRequired, setAuthRequired] = useState(false);
   const [accountReady, setAccountReady] = useState(false);
-  // Read once on first render (not in an effect): a person following a password-reset
-  // email link is never logged in, so this must short-circuit the normal
-  // account-loading/sign-in flow below rather than wait for it.
-  const [resetToken] = useState<string | null>(() => (typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("resetToken")));
+  // Read via useSyncExternalStore, not a plain useState initializer: the server never sees
+  // `window`, so the old `typeof window === "undefined"` branch rendered `null` during SSR but
+  // the real token during the client's first (hydrating) render whenever a reset link was
+  // followed - a hydration mismatch on exactly the flow this exists for. useSyncExternalStore
+  // renders getServerSnapshot's `null` on both the SSR pass and the client's first render (so
+  // hydration matches), then swaps in the real value synchronously right after mounting - still
+  // before the mount effect below runs, so its `if (resetToken) return` short-circuit (skipping
+  // an account-loading fetch that would 401 anyway) keeps working race-free.
+  const resetToken = useSyncExternalStore(subscribeToNothing, readResetTokenFromUrl, readResetTokenOnServer);
   const [recentTimeEntries, setRecentTimeEntries] = useState<TimeEntry[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
@@ -3282,6 +3294,42 @@ function OfflineUnavailableView() {
   );
 }
 
+function EyeIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M1.5 12S5.5 5 12 5s10.5 7 10.5 7-4 7-10.5 7S1.5 12 1.5 12Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+      <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" strokeWidth="1.8" />
+    </svg>
+  );
+}
+
+function EyeOffIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M1.5 12S5.5 5 12 5s10.5 7 10.5 7-4 7-10.5 7S1.5 12 1.5 12Z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+      <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M3 3l18 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+// Every password input in the app (sign-in/register, password reset, profile change-password)
+// goes through this one component so the show/hide toggle behaves and looks the same everywhere.
+function PasswordField({ label, name, autoComplete, minLength }: { label: string; name: string; autoComplete: string; minLength?: number }) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <label>
+      <span>{label}</span>
+      <div className="password-field">
+        <input name={name} type={visible ? "text" : "password"} dir="ltr" minLength={minLength} autoComplete={autoComplete} required />
+        <button type="button" className="password-toggle" onClick={() => setVisible((current) => !current)} aria-label={visible ? "הסתרת הסיסמה" : "הצגת הסיסמה"} aria-pressed={visible}>
+          {visible ? <EyeOffIcon /> : <EyeIcon />}
+        </button>
+      </div>
+    </label>
+  );
+}
+
 function SignInView() {
   const [mode, setMode] = useState<"login" | "register" | "forgot">("login");
   const [error, setError] = useState("");
@@ -3329,8 +3377,8 @@ function SignInView() {
             {/* No minLength on login: existing accounts may have a shorter password already set
                 (the server-side minimum only ever applies going forward), and an HTML5
                 minLength here would block a valid login from submitting at all. */}
-            {mode !== "forgot" && <label><span>סיסמה</span><input name="password" type="password" dir="ltr" minLength={mode === "register" ? 12 : undefined} autoComplete={mode === "login" ? "current-password" : "new-password"} required /></label>}
-            {mode === "register" && <label><span>אימות סיסמה</span><input name="confirmPassword" type="password" dir="ltr" minLength={12} autoComplete="new-password" required /></label>}
+            {mode !== "forgot" && <PasswordField label="סיסמה" name="password" minLength={mode === "register" ? 12 : undefined} autoComplete={mode === "login" ? "current-password" : "new-password"} />}
+            {mode === "register" && <PasswordField label="אימות סיסמה" name="confirmPassword" minLength={12} autoComplete="new-password" />}
             {mode === "register" && <label className="auth-upload"><span>תמונת פרופיל (אופציונלי)</span><input name="profileImage" type="file" accept="image/jpeg,image/png,image/webp" /><small>JPG, PNG או WEBP עד 5MB</small></label>}
             {mode === "register" && <small>הסיסמה צריכה לכלול לפחות 12 תווים, אות ומספר.</small>}
             <button type="submit" className="primary-button" disabled={submitting}>{submitting ? "נא להמתין…" : mode === "login" ? "כניסה" : mode === "register" ? "יצירת חשבון" : "שליחת קישור לאיפוס"}</button>
@@ -3381,8 +3429,8 @@ function ResetPasswordView({ token }: { token: string }) {
           if (!(field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement)) return;
           setError(invalidFieldMessage(field));
         }}>
-          <label><span>סיסמה חדשה</span><input name="password" type="password" dir="ltr" minLength={12} autoComplete="new-password" required /></label>
-          <label><span>אימות סיסמה</span><input name="confirmPassword" type="password" dir="ltr" minLength={12} autoComplete="new-password" required /></label>
+          <PasswordField label="סיסמה חדשה" name="password" minLength={12} autoComplete="new-password" />
+          <PasswordField label="אימות סיסמה" name="confirmPassword" minLength={12} autoComplete="new-password" />
           <small>הסיסמה צריכה לכלול לפחות 12 תווים, אות ומספר.</small>
           <button type="submit" className="primary-button" disabled={submitting || done}>{done ? "הסיסמה עודכנה…" : submitting ? "נא להמתין…" : "שמירת הסיסמה החדשה"}</button>
         </form>
@@ -3902,17 +3950,25 @@ function ProfileView({ user, accountMode, setAccountMode, openReports, openHisto
   const [passwordSaving, setPasswordSaving] = useState(false);
   async function submitAccountForm(event: FormEvent<HTMLFormElement>, action: "updateProfile" | "changePassword") {
     event.preventDefault();
+    // Capture the form element synchronously, before any `await`: a DOM event's currentTarget
+    // is nulled out by the browser once the event has finished dispatching, so reading
+    // event.currentTarget again after an async gap throws "Cannot read properties of null
+    // (reading 'reset')" - and since that crash happens AFTER the server call already
+    // succeeded (past the response.ok check below), the password *was* already changed; the
+    // stale currentPassword still sitting in the un-reset field then gets rejected as "wrong"
+    // on the next attempt, confusingly, even though it's the old (now-superseded) password.
+    const formElement = event.currentTarget;
     if (action === "updateProfile") setProfileSaving(true);
     else setPasswordSaving(true);
     setProfileMessage(null);
     try {
-      const form = new FormData(event.currentTarget);
+      const form = new FormData(formElement);
       form.set("action", action);
       const response = await fetch("/api/auth", { method: "POST", body: form });
       const payload = await response.json().catch(() => ({})) as { error?: string };
       if (!response.ok) throw new Error(payload.error ?? "השמירה נכשלה");
       if (action === "updateProfile") profileUpdated();
-      else { event.currentTarget.reset(); setProfileMessage({ kind: "success", text: "הסיסמה עודכנה בהצלחה וכל ההתחברויות האחרות נותקו." }); }
+      else { formElement.reset(); setProfileMessage({ kind: "success", text: "הסיסמה עודכנה בהצלחה וכל ההתחברויות האחרות נותקו." }); }
     } catch (error) {
       setProfileMessage({ kind: "error", text: error instanceof Error ? error.message : "השמירה נכשלה" });
     } finally {
@@ -3990,8 +4046,8 @@ function ProfileView({ user, accountMode, setAccountMode, openReports, openHisto
             if (field instanceof HTMLInputElement || field instanceof HTMLSelectElement || field instanceof HTMLTextAreaElement) setProfileMessage({ kind: "error", text: invalidFieldMessage(field) });
           }}>
             <h3>החלפת סיסמה</h3>
-            <label><span>סיסמה נוכחית</span><input name="currentPassword" type="password" autoComplete="current-password" required /></label>
-            <div className="auth-name-grid"><label><span>סיסמה חדשה</span><input name="password" type="password" minLength={12} autoComplete="new-password" required /></label><label><span>אימות סיסמה חדשה</span><input name="confirmPassword" type="password" minLength={12} autoComplete="new-password" required /></label></div>
+            <PasswordField label="סיסמה נוכחית" name="currentPassword" autoComplete="current-password" />
+            <div className="auth-name-grid"><PasswordField label="סיסמה חדשה" name="password" minLength={12} autoComplete="new-password" /><PasswordField label="אימות סיסמה חדשה" name="confirmPassword" minLength={12} autoComplete="new-password" /></div>
             <button type="submit" className="primary-button" disabled={passwordSaving}>{passwordSaving ? "מעדכן..." : "עדכון הסיסמה"}</button>
           </form>
           <NoticeToast notice={profileMessage} close={() => setProfileMessage(null)} />

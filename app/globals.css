@@ -1211,6 +1211,16 @@ img, svg, iframe { max-width: 100%; }
 .auth-form label > span { color:var(--ink); font-size:13px; font-weight:800; }
 .auth-form input { width:100%; min-height:46px; padding:10px 12px; border:1px solid var(--line); border-radius:10px; background:#fff; color:var(--ink); font:inherit; }
 .auth-form input:focus { outline:3px solid rgba(5,150,105,.14); border-color:var(--green); }
+.password-field { position:relative; }
+.password-field input { padding-inline-end:44px; }
+/* .password-field .password-toggle (two classes), not just .password-toggle: .sign-in-card
+   button already sets width:100%/height:44px/background for the submit button, and that
+   selector's extra type selector (button) out-specifies a single class - without the second
+   class here this button stretched to fill the whole field on the sign-in/register/reset
+   screens instead of sitting as a small icon inside it. */
+.password-field .password-toggle { position:absolute; inset-block:0; inset-inline-end:2px; width:34px; margin-block:auto; height:34px; border:0; border-radius:8px; background:transparent; color:var(--muted); display:grid; place-items:center; cursor:pointer; box-shadow:none; }
+.password-field .password-toggle:hover { color:var(--ink); background:var(--canvas); }
+.password-toggle svg { width:20px; height:20px; }
 .auth-name-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
 .auth-upload { padding:12px; border:1px dashed #a9c8bb; border-radius:10px; background:#f8fbfa; }
 .auth-upload input { padding:8px; }
