@@ -853,6 +853,18 @@ export default function Home() {
   const [syncState, setSyncState] = useState<"loading" | "saved" | "error" | "offline">("loading");
   const [pendingCount, setPendingCount] = useState(0);
   const [showSyncDetails, setShowSyncDetails] = useState(false);
+  const syncMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!showSyncDetails) return;
+    // Close on a click outside the sync menu (button + popover together), but not on a click
+    // inside it - so using "ניסיון סנכרון"/"הסרת פעולות שנדחו" inside the popover doesn't
+    // instantly close it before the action even registers.
+    function handleClick(event: MouseEvent) {
+      if (syncMenuRef.current && !syncMenuRef.current.contains(event.target as Node)) setShowSyncDetails(false);
+    }
+    document.addEventListener("click", handleClick);
+    return () => document.removeEventListener("click", handleClick);
+  }, [showSyncDetails]);
   const [syncError, setSyncError] = useState("");
   const [offlineWithoutCache, setOfflineWithoutCache] = useState(false);
   const [currentUser, setCurrentUser] = useState<AccountUser>({
@@ -1980,7 +1992,7 @@ export default function Home() {
             <h1>{viewTitles[view].title}</h1>
           </div>
           <div className="top-actions">
-            <div className="sync-menu">
+            <div className="sync-menu" ref={syncMenuRef}>
               <button type="button" className={"sync-icon-button " + (syncState === "error" ? "has-error" : syncState === "offline" || pendingCount ? "has-pending" : syncState === "loading" ? "is-syncing" : "is-saved")} onClick={() => setShowSyncDetails((current) => !current)} aria-label={pendingCount ? pendingCount + " פעולות ממתינות לסנכרון" : syncState === "offline" ? "מצב אופליין" : syncState === "error" ? "פרטי בעיית סנכרון" : "מצב הסנכרון"} aria-expanded={showSyncDetails}>
                 <span aria-hidden="true">↻</span>
                 {pendingCount > 0 && <b>{pendingCount > 99 ? "99+" : pendingCount}</b>}
@@ -3320,7 +3332,11 @@ function PasswordField({ label, name, autoComplete, minLength }: { label: string
   return (
     <label>
       <span>{label}</span>
-      <div className="password-field">
+      {/* dir="ltr" on the wrapper (not just the input) so the logical CSS properties below
+          (padding-inline-end / inset-inline-end) resolve against the password's own LTR typing
+          direction, not the page's RTL context - otherwise the toggle lands on the visual left,
+          the wrong side for where an LTR-typed field's trailing edge actually is. */}
+      <div className="password-field" dir="ltr">
         <input name={name} type={visible ? "text" : "password"} dir="ltr" minLength={minLength} autoComplete={autoComplete} required />
         <button type="button" className="password-toggle" onClick={() => setVisible((current) => !current)} aria-label={visible ? "הסתרת הסיסמה" : "הצגת הסיסמה"} aria-pressed={visible}>
           {visible ? <EyeOffIcon /> : <EyeIcon />}
@@ -4151,6 +4167,15 @@ function ProfileView({ user, accountMode, setAccountMode, openReports, openHisto
 }
 
 function NoticeToast({ notice, close }: { notice: { kind: "success" | "error"; text: string } | null; close: () => void }) {
+  useEffect(() => {
+    if (!notice) return;
+    // A click anywhere dismisses the toast, not just its own × button. Registering this in an
+    // effect (not inline during render) means it only starts catching clicks *after* the click
+    // that made the toast appear has already finished dispatching - so that same click can't
+    // immediately close it.
+    document.addEventListener("click", close);
+    return () => document.removeEventListener("click", close);
+  }, [notice, close]);
   if (!notice) return null;
   return (
     <div className="notice-toast-layer">

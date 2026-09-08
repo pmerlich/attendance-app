@@ -354,6 +354,27 @@ test("selects an existing client by id, keeps the timer display isolated from br
   assert.match(css, /\.record-list-filters \{ grid-template-columns: minmax\(0, 1fr\) minmax\(0, 1fr\); \}/);
 });
 
+test("password eye toggle sits on the field's trailing (right) edge; toasts and the sync popover close on an outside click", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  // dir="ltr" on the wrapper (not just the input) is what makes inset-inline-end resolve to the
+  // right - password fields are typed LTR even though the page itself is RTL, and without this
+  // the logical CSS property resolved against the page's RTL context instead, putting the
+  // toggle on the wrong (left) side. Verified visually in a real browser after this fix.
+  assert.match(page, /<div className="password-field" dir="ltr">/);
+
+  // A click anywhere (not just the × button) dismisses a NoticeToast - registered in a
+  // useEffect (not inline during render) so the same click that made the toast appear can't
+  // immediately close it (that click already finished dispatching before the effect runs).
+  assert.match(page, /document\.addEventListener\("click", close\);/);
+  assert.match(page, /return \(\) => document\.removeEventListener\("click", close\);/);
+
+  // The sync popover closes on a click outside .sync-menu, but not on a click inside it (so
+  // using its own retry/discard buttons doesn't instantly close it first).
+  assert.match(page, /const syncMenuRef = useRef<HTMLDivElement>\(null\);/);
+  assert.match(page, /if \(syncMenuRef\.current && !syncMenuRef\.current\.contains\(event\.target as Node\)\) setShowSyncDetails\(false\);/);
+  assert.match(page, /<div className="sync-menu" ref={syncMenuRef}>/);
+});
+
 test("reads the password-reset URL token via useSyncExternalStore, not a useState initializer", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   // The server never sees `window`, so a `useState(() => typeof window === "undefined" ? null :
