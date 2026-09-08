@@ -96,6 +96,14 @@ test("ships an offline shell and an idempotent operation migration", async () =>
   assert.equal(manifest.name, "מנהל עבודה");
   assert.equal(manifest.start_url, "/");
   assert.equal(manifest.display, "standalone");
+  // P2-10: an explicit maskable icon so Android's adaptive-icon mask doesn't crop the "any" one.
+  const maskable = manifest.icons.find((icon) => icon.purpose === "maskable");
+  assert.ok(maskable, "manifest must declare a maskable icon");
+  assert.equal(maskable.sizes, "512x512");
+  const maskablePng = await readFile(new URL(`../public${maskable.src}`, import.meta.url));
+  assert.ok(maskablePng.slice(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])), "maskable icon must be a real PNG");
+  assert.equal(maskablePng.readUInt32BE(16), 512, "maskable icon width must actually be 512px");
+  assert.equal(maskablePng.readUInt32BE(20), 512, "maskable icon height must actually be 512px");
 
   const migration = await readFile(new URL("../drizzle/0008_cheerful_sprite.sql", import.meta.url), "utf8");
   assert.match(migration, /CREATE TABLE `offline_operations`/);
