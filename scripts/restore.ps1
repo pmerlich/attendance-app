@@ -39,14 +39,20 @@ if ($Remote -and -not $Confirm) {
 # every table the backup defines and prepend an explicit `DROP TABLE IF EXISTS` for each one,
 # ahead of the backup's own statements, into a temporary copy - the original backup file is
 # never modified.
-$backupContent = Get-Content -LiteralPath $resolvedBackup -Raw
+# `wrangler d1 export` writes plain UTF-8 with no BOM, and the backup routinely carries non-ASCII
+# (Hebrew) text. Windows PowerShell's Get-Content/Set-Content -Encoding utf8 do not round-trip
+# that safely: a BOM-less file read without an explicit encoding falls back to the system
+# codepage, silently mangling every non-ASCII character, and utf8 on write adds a BOM. Use .NET's
+# UTF8Encoding($false) (no BOM) directly on both ends so accented/Hebrew text survives untouched.
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$backupContent = [IO.File]::ReadAllText($resolvedBackup, $utf8NoBom)
 $tableMatches = [regex]::Matches($backupContent, 'CREATE TABLE\s+["''\[]?(\w+)["''\]]?\s*\(')
 $tableNames = $tableMatches | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
 if (-not $tableNames) { throw "No CREATE TABLE statements found in backup file - cannot determine which tables to replace: $resolvedBackup" }
 Write-Output ("Backup defines " + $tableNames.Count + " table(s); each will be dropped and recreated from the backup: " + ($tableNames -join ", "))
 $dropStatements = ($tableNames | ForEach-Object { 'DROP TABLE IF EXISTS "' + $_ + '";' }) -join "`n"
 $preparedFile = Join-Path ([IO.Path]::GetTempPath()) ("restore-" + [Guid]::NewGuid().ToString("N") + ".sql")
-Set-Content -LiteralPath $preparedFile -Value ($dropStatements + "`n" + $backupContent) -NoNewline -Encoding utf8
+[IO.File]::WriteAllText($preparedFile, ($dropStatements + "`n" + $backupContent), $utf8NoBom)
 
 try {
   $targetArgs = @($DatabaseName, "--config", $resolvedConfig)
