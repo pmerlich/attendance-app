@@ -265,7 +265,7 @@ async function loadState(db: D1Database, identity: Identity) {
     db.prepare("SELECT work_mode AS workMode, currency FROM businesses WHERE id = ? AND deleted_at IS NULL").bind(businessId).first<{ workMode: "solo" | "employer"; currency: string }>(),
     identity.role === "manager" ? db.prepare(`SELECT c.id, c.name, c.address, COALESCE(c.phone, '') AS phone, COALESCE(c.email, '') AS email, c.updated_at AS updatedAt, COUNT(p.id) AS projects
       FROM clients c LEFT JOIN projects p ON p.client_id = c.id AND p.deleted_at IS NULL
-      WHERE c.business_id = ? AND c.deleted_at IS NULL GROUP BY c.id ORDER BY c.created_at DESC`).bind(businessId).all() : managerOnly(),
+      WHERE c.business_id = ? AND c.deleted_at IS NULL AND c.id NOT LIKE '%::no-client' GROUP BY c.id ORDER BY c.created_at DESC`).bind(businessId).all() : managerOnly(),
     identity.role === "manager" ? db.prepare(`SELECT u.id, u.display_name AS name, u.email, COALESCE(u.hourly_cost_cents, ROUND(u.hourly_cost * 100), 0) / 100.0 AS hourlyCost, u.updated_at AS updatedAt,
       CASE WHEN u.is_active = 1 THEN 'פעיל' ELSE 'מושהה' END AS status,
       CASE WHEN u.auth_user_id IS NOT NULL THEN 'connected'
@@ -288,7 +288,7 @@ async function loadState(db: D1Database, identity: Identity) {
     identity.role === "manager" ? db.prepare(`SELECT c.id, c.name, c.address, c.deleted_at AS deletedAt,
       COUNT(p.id) AS projectCount
       FROM clients c LEFT JOIN projects p ON p.client_id = c.id AND p.deleted_at IS NOT NULL
-      WHERE c.business_id = ? AND c.deleted_at IS NOT NULL
+      WHERE c.business_id = ? AND c.deleted_at IS NOT NULL AND c.id NOT LIKE '%::no-client'
       GROUP BY c.id ORDER BY c.deleted_at DESC`).bind(businessId).all() : managerOnly(),
     identity.role === "manager" ? db.prepare(`SELECT p.id, p.name, p.client_id AS clientId, COALESCE(c.name, '') AS clientName, p.address, p.deleted_at AS deletedAt
       FROM projects p LEFT JOIN clients c ON c.id = p.client_id
@@ -966,10 +966,16 @@ export async function POST(request: Request) {
   } else if (action === "addProject" || action === "updateProject") {
     const newClientName = boundedText(body.newClientName, 120);
     const newClientId = String(body.newClientId ?? "");
-    const clientId = newClientName ? newClientId : String(body.clientId ?? "");
+    // "ללא לקוח": some projects genuinely have none. client_id stays NOT NULL (every other
+    // query in this file inner-joins projects to clients), so this resolves to a real,
+    // per-business placeholder client instead - auto-created on first use below, and hidden
+    // from the clients list/trash queries above by the reserved "::no-client" id suffix.
+    const isNoClient = !newClientName && String(body.clientId ?? "") === "__none__";
+    const noClientId = businessId + "::no-client";
+    const clientId = newClientName ? newClientId : isNoClient ? noClientId : String(body.clientId ?? "");
     // newClientName is "" (not null) when absent, since boundedText() only returns null for a
     // missing *required* field - so this must fall through on falsy, not just on nullish.
-    const clientName = newClientName || boundedText(body.clientName, 120, true);
+    const clientName = newClientName || (isNoClient ? "ללא לקוח" : boundedText(body.clientName, 120, true));
     const name = boundedText(body.name, 160, true);
     const address = boundedText(body.address, 300, true);
     const description = boundedText(body.description, 4000) ?? "";
@@ -1007,7 +1013,9 @@ export async function POST(request: Request) {
     if (createsClient && !validEmail(newClientEmail)) return Response.json({ error: "כתובת האימייל של הלקוח החדש אינה תקינה" }, { status: 400 });
     const client = createsClient
       ? { id: newClientId, name: newClientName! }
-      : await db.prepare("SELECT id, name FROM clients WHERE id = ? AND business_id = ? AND deleted_at IS NULL LIMIT 1").bind(clientId, businessId).first<{ id: string; name: string }>();
+      : isNoClient
+        ? { id: noClientId, name: "ללא לקוח" }
+        : await db.prepare("SELECT id, name FROM clients WHERE id = ? AND business_id = ? AND deleted_at IS NULL LIMIT 1").bind(clientId, businessId).first<{ id: string; name: string }>();
     if (!client) return Response.json({ error: "הלקוח לא נמצא" }, { status: 400 });
     if (client.name !== clientName) return Response.json({ error: "פרטי הלקוח אינם תואמים" }, { status: 409 });
     const projectStatus = ["active", "waiting", "completed"].includes(String(body.status ?? "")) ? String(body.status) : "active";
@@ -1022,6 +1030,10 @@ export async function POST(request: Request) {
       validWorkerIds.push(workerId);
     }
     const projectStatements: D1PreparedStatement[] = [];
+    // Must run before any statement below that inserts/updates a project row referencing
+    // client.id, since client_id is a NOT NULL foreign key - INSERT OR IGNORE makes this a
+    // no-op after the first project without a client for this business.
+    if (isNoClient) projectStatements.push(db.prepare("INSERT OR IGNORE INTO clients (id, business_id, name, address, phone, email) VALUES (?, ?, ?, '', '', '')").bind(noClientId, businessId, "ללא לקוח"));
     if (action === "updateProject") {
       existing = await db.prepare("SELECT name, address, description, contact_name AS contactName, contact_phone AS contactPhone, start_date AS startDate, target_date AS targetDate, completed_date AS completedDate, status, billing_method AS billingType, COALESCE(fixed_price_cents, ROUND(fixed_price * 100)) / 100.0 AS fixedPrice, COALESCE(client_hourly_rate_cents, ROUND(client_hourly_rate * 100)) / 100.0 AS hourlyRate, updated_at AS updatedAt FROM projects WHERE id = ? AND business_id = ? AND deleted_at IS NULL").bind(projectId, businessId).first<Record<string, unknown>>() ?? null;
       if (!existing) return Response.json({ error: "הפרויקט לא נמצא" }, { status: 400 });

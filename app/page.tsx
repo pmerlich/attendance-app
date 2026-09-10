@@ -1808,6 +1808,7 @@ export default function Home() {
     const editingProject = editingId ? projects.find((project) => String(project.id) === String(editingId)) : undefined;
     const clientId = String(data.get("client") ?? "");
     const selectedClient = clients.find((client) => String(client.id) === clientId);
+    const clientNameForSubmit = clientId === "__none__" ? "ללא לקוח" : selectedClient?.name || "";
     try {
       if (!editingId && newClientName) {
         await saveAction("addProject", {
@@ -1837,7 +1838,7 @@ export default function Home() {
           expectedUpdatedAt: editingProject?.updatedAt,
           name: data.get("name"),
           clientId,
-          clientName: selectedClient?.name || "",
+          clientName: clientNameForSubmit,
           address: data.get("address"),
           description: data.get("description"),
           contactName: data.get("contactName"),
@@ -4564,7 +4565,8 @@ function ExpenseForm({ projects, initialProjectId, initial, submit }: { projects
 
 function ProjectForm({ accountMode, clients, employees, billingType, setBillingType, initial, submit }: { accountMode: AccountMode; clients: Client[]; employees: Employee[]; billingType: BillingType; setBillingType: (type: BillingType) => void; initial?: Project; submit: (event: FormEvent<HTMLFormElement>) => void }) {
   const isSolo = accountMode === "solo";
-  const [clientChoice, setClientChoice] = useState(String(initial?.clientId ?? ""));
+  const initialClientId = String(initial?.clientId ?? "");
+  const [clientChoice, setClientChoice] = useState(initialClientId.endsWith("::no-client") ? "__none__" : initialClientId);
   const isNewClient = !initial && clientChoice === "__new__";
   return (
     <form className="entity-form project-form" onSubmit={submit}>
@@ -4577,6 +4579,7 @@ function ProjectForm({ accountMode, clients, employees, billingType, setBillingT
             <option value="" disabled>
               בחירת לקוח
             </option>
+            <option value="__none__">ללא לקוח</option>
             {clients.map((client) => (
               <option key={client.id} value={String(client.id)}>
                 {client.name}

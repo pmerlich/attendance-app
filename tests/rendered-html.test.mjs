@@ -320,7 +320,16 @@ test("selects an existing client by id, keeps the timer display isolated from br
   assert.match(page, /const selectedClient = clients\.find\(\(client\) => String\(client\.id\) === clientId\)/);
   // newClientName is "" (not null) when absent, so the clientName fallback must check truthiness
   // (||), not nullishness (??) - that mismatch made every existing-client project rejected.
-  assert.match(api, /const clientName = newClientName \|\| boundedText\(body\.clientName, 120, true\)/);
+  assert.match(api, /const clientName = newClientName \|\| \(isNoClient \? "ללא לקוח" : boundedText\(body\.clientName, 120, true\)\)/);
+
+  // "ללא לקוח": client_id stays a NOT NULL foreign key, so picking it must resolve to a real,
+  // auto-created per-business placeholder client instead of an empty/invalid id - and that
+  // placeholder must never show up in the clients list or trash (reserved id suffix).
+  assert.match(page, /<option value="__none__">ללא לקוח<\/option>/);
+  assert.match(api, /const isNoClient = !newClientName && String\(body\.clientId \?\? ""\) === "__none__"/);
+  assert.match(api, /INSERT OR IGNORE INTO clients \(id, business_id, name, address, phone, email\) VALUES \(\?, \?, \?, '', '', ''\)/);
+  assert.match(api, /WHERE c\.business_id = \? AND c\.deleted_at IS NULL AND c\.id NOT LIKE '%::no-client'/);
+  assert.match(api, /WHERE c\.business_id = \? AND c\.deleted_at IS NOT NULL AND c\.id NOT LIKE '%::no-client'/);
 
   // Viewing/selecting a project must never reassign activeProject while a timer is running on a
   // different project - activeProject drives the timer widget and the per-card "is this the
