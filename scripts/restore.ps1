@@ -30,14 +30,36 @@ if ($Remote -and -not $Confirm) {
   throw "Refusing to restore into the REMOTE (production) database without -Confirm. This OVERWRITES live data for every row the backup file touches. Test with the default (-Local-style, i.e. omit -Remote) first, and only re-run with -Remote -Confirm once you are certain - ideally against a staging database, not the production one, for a first-time drill."
 }
 
-$targetArgs = @($DatabaseName, "--config", $resolvedConfig)
-if ($Remote) { $targetArgs += "--remote" } else { $targetArgs += "--local" }
-if ($PersistTo) { $targetArgs += @("--persist-to", $PersistTo) }
-$targetArgs += @("--file", $resolvedBackup, "--yes")
+# `wrangler d1 export` (used by both `npm run backup` and the scheduled GitHub Actions backup)
+# emits `CREATE TABLE <name> (...)` with neither `DROP TABLE` nor `IF NOT EXISTS`. Replaying it
+# as-is against any database that already has the schema - which is every real target: a fresh
+# `npm run dev` after first use, and always production - fails immediately with "table already
+# exists" before a single row is restored. A restore is documented (see comment above and
+# docs/OPERATIONS.md) as overwriting whatever the backup touches, so make that true: detect
+# every table the backup defines and prepend an explicit `DROP TABLE IF EXISTS` for each one,
+# ahead of the backup's own statements, into a temporary copy - the original backup file is
+# never modified.
+$backupContent = Get-Content -LiteralPath $resolvedBackup -Raw
+$tableMatches = [regex]::Matches($backupContent, 'CREATE TABLE\s+["''\[]?(\w+)["''\]]?\s*\(')
+$tableNames = $tableMatches | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
+if (-not $tableNames) { throw "No CREATE TABLE statements found in backup file - cannot determine which tables to replace: $resolvedBackup" }
+Write-Output ("Backup defines " + $tableNames.Count + " table(s); each will be dropped and recreated from the backup: " + ($tableNames -join ", "))
+$dropStatements = ($tableNames | ForEach-Object { 'DROP TABLE IF EXISTS "' + $_ + '";' }) -join "`n"
+$preparedFile = Join-Path ([IO.Path]::GetTempPath()) ("restore-" + [Guid]::NewGuid().ToString("N") + ".sql")
+Set-Content -LiteralPath $preparedFile -Value ($dropStatements + "`n" + $backupContent) -NoNewline -Encoding utf8
 
-Write-Output ("Restoring " + $resolvedBackup + " (" + $item.Length + " bytes) into '" + $DatabaseName + "' [" + $(if ($Remote) { "REMOTE - production" } else { "local" }) + "]...")
+try {
+  $targetArgs = @($DatabaseName, "--config", $resolvedConfig)
+  if ($Remote) { $targetArgs += "--remote" } else { $targetArgs += "--local" }
+  if ($PersistTo) { $targetArgs += @("--persist-to", $PersistTo) }
+  $targetArgs += @("--file", $preparedFile, "--yes")
 
-& npx wrangler d1 execute @targetArgs
-if ($LASTEXITCODE -ne 0) { throw "D1 restore failed with exit code $LASTEXITCODE" }
+  Write-Output ("Restoring " + $resolvedBackup + " (" + $item.Length + " bytes) into '" + $DatabaseName + "' [" + $(if ($Remote) { "REMOTE - production" } else { "local" }) + "]...")
+
+  & npx wrangler d1 execute @targetArgs
+  if ($LASTEXITCODE -ne 0) { throw "D1 restore failed with exit code $LASTEXITCODE" }
+} finally {
+  Remove-Item -LiteralPath $preparedFile -Force -ErrorAction SilentlyContinue
+}
 
 Write-Output "Restore command completed. Spot-check row counts per table against the source backup before trusting this restore (see docs/OPERATIONS.md)."
