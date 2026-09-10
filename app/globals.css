@@ -1320,6 +1320,11 @@ img, svg, iframe { max-width: 100%; }
   .payment-list article, .time-entry-list article { grid-template-columns: 40px minmax(0, 1fr); }
   .payment-list article time, .time-entry-list article time { grid-column: 1; grid-row: 2; }
   .payment-list article > small, .payment-list article > b, .time-entry-list article > b { grid-column: 2; }
+  /* Time entries only: the date (<time>) doesn't fit the 40px icon column above, so it
+     overflowed into the duration (<b>) on the same row. Share row 2 of the content column
+     between them instead, each pinned to its own edge, so they never collide. */
+  .time-entry-list article time { grid-column: 2; grid-row: 2; justify-self: end; }
+  .time-entry-list article > b { grid-row: 2; justify-self: start; }
   .payment-actions, .time-entry-actions { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); }
   .billable-badge { grid-column: 1 / -1; width: fit-content; }
 
