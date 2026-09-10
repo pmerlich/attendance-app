@@ -2350,7 +2350,11 @@ function Dashboard({
     const searchableText = (project.name + " " + project.client + " " + project.address).toLocaleLowerCase();
     return matchesStatus && searchableText.includes(normalizedQuery);
   });
-  const selectedProject = !running && selectedProjectId !== null ? projects.find((project) => String(project.id) === String(selectedProjectId)) ?? null : null;
+  // Viewing a project's details is unrelated to the running timer - only *starting* a
+  // different project's timer is blocked while one is active (see the timer button below).
+  const selectedProject = selectedProjectId !== null ? projects.find((project) => String(project.id) === String(selectedProjectId)) ?? null : null;
+  const isSelectedProjectTimerActive = running && selectedProject !== null && String(activeProject.id) === String(selectedProject.id);
+  const selectedProjectTimerDisabled = selectedProject !== null && (selectedProject.tag === "הסתיים" || (running && !isSelectedProjectTimerActive));
   const activeCount = projects.filter((project) => project.tag === "בביצוע").length;
   const totalExpected = projects.reduce((sum, project) => sum + project.expectedAmount, 0);
   const totalProfit = projects.reduce((sum, project) => sum + Number(project.profitAmount ?? project.expectedAmount), 0);
@@ -2547,13 +2551,19 @@ function Dashboard({
             )}
           </div>
           <div className="project-primary-actions">
-            <button type="button" className="project-timer-button" onClick={() => toggleProjectTimer(selectedProject)} disabled={selectedProject.tag === "הסתיים"}>
+            <button type="button" className={"project-timer-button" + (isSelectedProjectTimerActive ? " is-running" : "")} onClick={() => toggleProjectTimer(selectedProject)} disabled={selectedProjectTimerDisabled}>
               <span className="project-timer-button-icon">
-                <PlayIcon />
+                {isSelectedProjectTimerActive ? <StopIcon /> : <PlayIcon />}
               </span>
               <span>
-                <strong>{selectedProject.tag === "הסתיים" ? "הפרויקט הסתיים" : "התחלת טיימר"}</strong>
-                <small>{selectedProject.tag === "הסתיים" ? "לא ניתן להפעיל טיימר בפרויקט שהסתיים" : "הזמן יוצמד אוטומטית לפרויקט"}</small>
+                <strong>{selectedProject.tag === "הסתיים" ? "הפרויקט הסתיים" : isSelectedProjectTimerActive ? "עצירת הטיימר" : "התחלת טיימר"}</strong>
+                <small>
+                  {selectedProject.tag === "הסתיים"
+                    ? "לא ניתן להפעיל טיימר בפרויקט שהסתיים"
+                    : selectedProjectTimerDisabled
+                      ? "יש טיימר פעיל בפרויקט אחר - יש לעצור אותו קודם"
+                      : "הזמן יוצמד אוטומטית לפרויקט"}
+                </small>
               </span>
             </button>
             <button type="button" className="secondary-compact project-entry-action" onClick={showManual}>
